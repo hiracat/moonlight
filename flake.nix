@@ -13,12 +13,13 @@
     {
       devShells.x86_64-linux.default = pkgs.mkShell {
         buildInputs = with pkgs; [
-          glfw
+          libxkbcommon
 
           vulkan-headers
           vulkan-loader
           vulkan-tools
           vulkan-validation-layers
+          wayland
 
           shaderc
 
@@ -28,6 +29,7 @@
         shellHook = "
         export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
         export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib:$LD_LIBRARY_PATH
+        export LD_LIBRARY_PATH=${pkgs.libxkbcommon}/lib:$LD_LIBRARY_PATH
         zsh";
       };
     };
