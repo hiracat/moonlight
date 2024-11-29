@@ -53,7 +53,7 @@ struct AppContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    vertex_buffer: Subbuffer<[Vec2]>,
+    vertex_buffer: Subbuffer<[Vert]>,
 }
 
 struct RenderContext {
@@ -104,14 +104,17 @@ impl ApplicationHandler for App {
             App::create_device(physical_device, queue_family_index, &device_extensions);
 
         let vertices = [
-            Vec2 {
-                position: [-0.5, -0.25],
+            Vert {
+                in_position: [-0.5, -0.25, 0.0],
+                in_color: [1.0, 0.0, 0.0, 1.0],
             },
-            Vec2 {
-                position: [0.0, 0.5],
+            Vert {
+                in_position: [0.0, 0.5, 0.0],
+                in_color: [0.0, 1.0, 0.0, 1.0],
             },
-            Vec2 {
-                position: [0.25, -0.1],
+            Vert {
+                in_position: [0.25, -0.1, 0.0],
+                in_color: [0.0, 0.0, 1.0, 1.0],
             },
         ];
         //TODO: change this to be more generic and not rely on whatever this bs is
@@ -539,7 +542,7 @@ impl App {
             .entry_point("main")
             .unwrap();
 
-        let vertex_input_state = Vec2::per_vertex()
+        let vertex_input_state = Vert::per_vertex()
             .definition(&vertex_shader.info().input_interface)
             .unwrap();
 
@@ -615,17 +618,13 @@ impl App {
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
-struct Vec2 {
-    #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
+struct Vert {
+    #[format(R32G32B32_SFLOAT)]
+    in_position: [f32; 3],
+    #[format(R32G32B32A32_SFLOAT)]
+    in_color: [f32; 4],
 }
 
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct Vec3 {
-    #[format(R32G32B32_SFLOAT)]
-    position: [f32; 3],
-}
 fn window_size_dependent_setup(
     images: &[Arc<Image>],
     render_pass: &Arc<RenderPass>,
