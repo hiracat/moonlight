@@ -1,12 +1,22 @@
-#[allow(dead_code)]
+use bytemuck::{Pod, Zeroable};
+use std::f32::consts::FRAC_PI_4;
 use std::sync::Arc;
+use ultraviolet::{projection, Mat4, Vec3};
+use vulkano::buffer::BufferContents;
+use vulkano::descriptor_set::allocator::{
+    StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo,
+};
+use vulkano::descriptor_set::layout::DescriptorType::UniformBuffer;
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 
 use vulkano::{
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
         RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
     },
+    descriptor_set::layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo},
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
@@ -25,10 +35,11 @@ use vulkano::{
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
         },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
+        layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
         DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    shader::ShaderStages,
     swapchain::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
@@ -57,6 +68,7 @@ struct AppContext {
 }
 
 struct RenderContext {
+    descriptor_set: Arc<PersistentDescriptorSet>,
     window: Arc<Window>,
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
@@ -65,6 +77,7 @@ struct RenderContext {
     viewport: Viewport,
     recreate_swapchain: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
+    uniform_buffer: Arc<Subbuffer<TransformationUBO>>,
 }
 
 impl App {
@@ -124,7 +137,7 @@ impl ApplicationHandler for App {
             Default::default(),
         ));
         let vertex_buffer = Buffer::from_iter(
-            memory_allocator,
+            memory_allocator.clone(),
             BufferCreateInfo {
                 usage: BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
@@ -156,6 +169,56 @@ impl ApplicationHandler for App {
         let recreate_swapchain = false;
         let previous_frame_end = Some(sync::now(device.clone()).boxed());
 
+        let window_ratio = {
+            let windowsize: [f32; 2] = window_size.into();
+            windowsize[0] / windowsize[1]
+        };
+
+        let initial_transform = TransformationUBO {
+            model: ultraviolet::Mat4::identity(),
+            view: ultraviolet::Mat4::look_at(
+                Vec3::new(0.0, 0.0, 2.0), // Move camera back slightly
+                Vec3::new(0.0, 0.0, 0.0), // Look at origin
+                Vec3::new(0.0, 1.0, 0.0), // Up vector
+            ),
+            proj: projection::perspective_vk(FRAC_PI_4, window_ratio, 0.001, 100.0),
+        };
+        let uniform_buffer: Arc<Subbuffer<TransformationUBO>> = Buffer::new_sized(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into();
+        let mut buffer_write = uniform_buffer.write().unwrap();
+        *buffer_write = initial_transform;
+        drop(buffer_write);
+
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                set_count: 1,
+                ..Default::default()
+            },
+        );
+
+        let descriptor_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            pipeline.layout().set_layouts()[0].clone(),
+            [WriteDescriptorSet::buffer(
+                0,
+                uniform_buffer.as_ref().clone(),
+            )],
+            [],
+        )
+        .unwrap();
+
         self.app_context = Some(AppContext {
             command_buffer_allocator,
             device,
@@ -164,6 +227,7 @@ impl ApplicationHandler for App {
             window: window.clone(),
         });
         self.render_context = Some(RenderContext {
+            descriptor_set,
             window,
             swapchain,
             render_pass,
@@ -172,6 +236,7 @@ impl ApplicationHandler for App {
             pipeline,
             previous_frame_end,
             viewport,
+            uniform_buffer,
         })
     }
 
@@ -272,6 +337,13 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .bind_pipeline_graphics(render_context.pipeline.clone())
                     .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        render_context.pipeline.layout().clone(),
+                        0,
+                        render_context.descriptor_set.clone(),
+                    )
+                    .unwrap()
                     .bind_vertex_buffers(0, app_context.vertex_buffer.clone())
                     .unwrap();
 
@@ -341,6 +413,7 @@ impl App {
         let library =
             VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
         let required_extensions = Surface::required_extensions(event_loop);
+        //DEBUG: println!("{:?}", library.supported_extensions());
 
         Instance::new(
             library,
@@ -562,14 +635,28 @@ impl App {
         // resource locations, which allows them to share pipeline layouts.
         let layout = PipelineLayout::new(
             device.clone(),
-            // BUG:
-            // Since we only have one pipeline in this example, and thus one pipeline layout,
-            // we automatically generate the creation info for it from the resources used in
-            // the shaders. In a real application, you would specify this information manually
-            // so that you can re-use one layout in multiple pipelines.
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())
-                .unwrap(),
+            // here we create a uniform
+            // buffer descriptor set
+            // layout
+            PipelineDescriptorSetLayoutCreateInfo {
+                set_layouts: vec![DescriptorSetLayoutCreateInfo {
+                    bindings: [(
+                        0,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::VERTEX,
+                            descriptor_type: UniformBuffer,
+                            descriptor_count: 1,
+                            ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                }],
+                push_constant_ranges: vec![],
+                flags: PipelineLayoutCreateFlags::empty(),
+            }
+            .into_pipeline_layout_create_info(device.clone())
+            .unwrap(),
         )
         .unwrap();
 
@@ -623,6 +710,14 @@ struct Vert {
     in_position: [f32; 3],
     #[format(R32G32B32A32_SFLOAT)]
     in_color: [f32; 4],
+}
+
+#[derive(Pod, Zeroable, Copy, Clone)]
+#[repr(C)]
+struct TransformationUBO {
+    model: Mat4,
+    view: Mat4,
+    proj: Mat4,
 }
 
 fn window_size_dependent_setup(
