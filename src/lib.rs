@@ -1,6 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::f32::consts::FRAC_PI_4;
 use std::sync::Arc;
+use std::time::Instant;
 use ultraviolet::{projection, Mat4, Vec3};
 use vulkano::buffer::BufferContents;
 use vulkano::descriptor_set::allocator::{
@@ -61,14 +62,15 @@ pub struct App {
 
 struct AppContext {
     window: Arc<Window>,
+    aspect_ratio: f32,
     device: Arc<Device>,
     queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     vertex_buffer: Subbuffer<[Vert]>,
+    start_time: Instant,
 }
 
 struct RenderContext {
-    descriptor_set: Arc<PersistentDescriptorSet>,
     window: Arc<Window>,
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
@@ -77,7 +79,9 @@ struct RenderContext {
     viewport: Viewport,
     recreate_swapchain: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
+
     uniform_buffer: Arc<Subbuffer<TransformationUBO>>,
+    descriptor_set: Arc<PersistentDescriptorSet>,
 }
 
 impl App {
@@ -99,6 +103,8 @@ impl ApplicationHandler for App {
             eprintln!("resumed called while app is already some, why?");
             return;
         }
+
+        let start_time = Instant::now();
 
         // create temorary variables, then assign them all at the end to avoid forgetting things
 
@@ -156,7 +162,7 @@ impl ApplicationHandler for App {
 
         let render_pass = App::create_renderpass(&device, swapchain.image_format());
 
-        let framebuffers = window_size_dependent_setup(&images, &render_pass);
+        let framebuffers = App::recreate_framebuffers(&images, &render_pass);
         let pipeline = App::create_graphics_pipeline(&device, &render_pass);
 
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
@@ -174,15 +180,6 @@ impl ApplicationHandler for App {
             windowsize[0] / windowsize[1]
         };
 
-        let initial_transform = TransformationUBO {
-            model: ultraviolet::Mat4::identity(),
-            view: ultraviolet::Mat4::look_at(
-                Vec3::new(0.0, 0.0, 2.0), // Move camera back slightly
-                Vec3::new(0.0, 0.0, 0.0), // Look at origin
-                Vec3::new(0.0, 1.0, 0.0), // Up vector
-            ),
-            proj: projection::perspective_vk(FRAC_PI_4, window_ratio, 0.001, 100.0),
-        };
         let uniform_buffer: Arc<Subbuffer<TransformationUBO>> = Buffer::new_sized(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -196,6 +193,7 @@ impl ApplicationHandler for App {
         )
         .unwrap()
         .into();
+        let initial_transform = App::calculate_current_transform(start_time, window_ratio);
         let mut buffer_write = uniform_buffer.write().unwrap();
         *buffer_write = initial_transform;
         drop(buffer_write);
@@ -219,16 +217,9 @@ impl ApplicationHandler for App {
         )
         .unwrap();
 
-        self.app_context = Some(AppContext {
-            command_buffer_allocator,
-            device,
-            vertex_buffer,
-            queue,
-            window: window.clone(),
-        });
         self.render_context = Some(RenderContext {
             descriptor_set,
-            window,
+            window: window.clone(),
             swapchain,
             render_pass,
             recreate_swapchain,
@@ -237,7 +228,16 @@ impl ApplicationHandler for App {
             previous_frame_end,
             viewport,
             uniform_buffer,
-        })
+        });
+        self.app_context = Some(AppContext {
+            command_buffer_allocator,
+            device,
+            vertex_buffer,
+            queue,
+            start_time,
+            window: window.clone(),
+            aspect_ratio: window_ratio,
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -278,7 +278,7 @@ impl ApplicationHandler for App {
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
                     render_context.framebuffers =
-                        window_size_dependent_setup(&new_images, &render_context.render_pass);
+                        App::recreate_framebuffers(&new_images, &render_context.render_pass);
 
                     render_context.viewport.extent = window_size.into();
 
@@ -701,6 +701,40 @@ impl App {
         )
         .expect("failed to create graphics pipeline")
     }
+    fn recreate_framebuffers(
+        images: &[Arc<Image>],
+        render_pass: &Arc<RenderPass>,
+    ) -> Vec<Arc<Framebuffer>> {
+        images
+            .iter()
+            .map(|image| {
+                let view = ImageView::new_default(image.clone()).unwrap();
+
+                Framebuffer::new(
+                    render_pass.clone(),
+                    FramebufferCreateInfo {
+                        attachments: vec![view],
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
+        let elapsed_time = start_time - Instant::now();
+        let rotation = Mat4::from_euler_angles(0.0, 0.0, elapsed_time.as_secs() as f32 * 100.0);
+        TransformationUBO {
+            model: rotation,
+            view: ultraviolet::Mat4::look_at(
+                Vec3::new(0.0, 0.0, 2.0), // Move camera back slightly
+                Vec3::new(0.0, 0.0, 0.0), // Look at origin
+                Vec3::new(0.0, 1.0, 0.0), // Up vector
+            ),
+            proj: projection::perspective_vk(FRAC_PI_4, aspect_ratio, 0.001, 100.0),
+        }
+    }
 }
 
 #[derive(BufferContents, Vertex)]
@@ -718,25 +752,4 @@ struct TransformationUBO {
     model: Mat4,
     view: Mat4,
     proj: Mat4,
-}
-
-fn window_size_dependent_setup(
-    images: &[Arc<Image>],
-    render_pass: &Arc<RenderPass>,
-) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let view = ImageView::new_default(image.clone()).unwrap();
-
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![view],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>()
 }
