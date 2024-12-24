@@ -8,7 +8,9 @@ use vulkano::descriptor_set::allocator::{
     StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo,
 };
 use vulkano::descriptor_set::layout::DescriptorType::UniformBuffer;
+use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorType};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::memory::allocator::MemoryAllocator;
 use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 
 use vulkano::{
@@ -179,43 +181,8 @@ impl ApplicationHandler for App {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
-
-        let uniform_buffer: Arc<Subbuffer<TransformationUBO>> = Buffer::new_sized(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .into();
-        let initial_transform = App::calculate_current_transform(start_time, window_ratio);
-        let mut buffer_write = uniform_buffer.write().unwrap();
-        *buffer_write = initial_transform;
-        drop(buffer_write);
-
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
-            device.clone(),
-            StandardDescriptorSetAllocatorCreateInfo {
-                set_count: 1,
-                ..Default::default()
-            },
-        );
-
-        let descriptor_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            pipeline.layout().set_layouts()[0].clone(),
-            [WriteDescriptorSet::buffer(
-                0,
-                uniform_buffer.as_ref().clone(),
-            )],
-            [],
-        )
-        .unwrap();
+        let (uniform_buffer, descriptor_set) =
+            App::create_descriptor_set(device.clone(), memory_allocator);
 
         self.render_context = Some(RenderContext {
             descriptor_set,
@@ -227,7 +194,7 @@ impl ApplicationHandler for App {
             pipeline,
             previous_frame_end,
             viewport,
-            uniform_buffer,
+            uniform_buffer: uniform_buffer.into(),
         });
         self.app_context = Some(AppContext {
             command_buffer_allocator,
@@ -250,15 +217,27 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => render_context.recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
-                let window_size = render_context.window.inner_size();
-                if window_size.width == 0 || window_size.height == 0 {
-                    return;
+                println!("frame start");
+                unsafe {
+                    app_context.device.wait_idle().unwrap();
                 }
                 render_context
                     .previous_frame_end
                     .as_mut()
                     .unwrap()
                     .cleanup_finished();
+
+                let window_size = render_context.window.inner_size();
+                if window_size.width == 0 || window_size.height == 0 {
+                    return;
+                }
+
+                let mut write = render_context.uniform_buffer.write().unwrap();
+                *write = App::calculate_current_transform(
+                    app_context.start_time,
+                    app_context.aspect_ratio,
+                );
+                drop(write);
 
                 app_context.window.request_redraw();
 
@@ -332,7 +311,6 @@ impl ApplicationHandler for App {
                     .unwrap()
                     // We are now inside the first subpass of the render pass.
                     //
-                    // TODO: Document state setting and how it affects subsequent draw commands.
                     .set_viewport(0, [render_context.viewport.clone()].into_iter().collect())
                     .unwrap()
                     .bind_pipeline_graphics(render_context.pipeline.clone())
@@ -723,8 +701,11 @@ impl App {
     }
 
     fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
-        let elapsed_time = start_time - Instant::now();
-        let rotation = Mat4::from_euler_angles(0.0, 0.0, elapsed_time.as_secs() as f32 * 100.0);
+        let rotation =
+            Mat4::from_euler_angles(0.0, (start_time.elapsed().as_secs_f32() * 0.5) % 360.0, 0.0);
+
+        println!("elapsed time{}", start_time.elapsed().as_millis());
+
         TransformationUBO {
             model: rotation,
             view: ultraviolet::Mat4::look_at(
@@ -734,6 +715,62 @@ impl App {
             ),
             proj: projection::perspective_vk(FRAC_PI_4, aspect_ratio, 0.001, 100.0),
         }
+    }
+
+    fn create_descriptor_set(
+        device: Arc<Device>,
+        memory_allocator: Arc<dyn MemoryAllocator>,
+    ) -> (Subbuffer<TransformationUBO>, Arc<PersistentDescriptorSet>) {
+        let layout = DescriptorSetLayout::new(
+            device.clone(),
+            DescriptorSetLayoutCreateInfo {
+                bindings: [(
+                    0, // binding
+                    DescriptorSetLayoutBinding {
+                        stages: ShaderStages::VERTEX,
+                        descriptor_count: 1,
+                        descriptor_type: DescriptorType::UniformBuffer,
+
+                        ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                set_count: 1,
+                ..Default::default()
+            },
+        );
+
+        let uniform_buffer: Subbuffer<TransformationUBO> = Buffer::new_sized(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into();
+
+        let descriptor_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            layout.clone(),
+            [WriteDescriptorSet::buffer(0, uniform_buffer.clone())],
+            [],
+        )
+        .unwrap();
+        (uniform_buffer, descriptor_set)
     }
 }
 
