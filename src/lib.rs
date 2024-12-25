@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use ultraviolet::{projection, Mat4, Vec3};
 use vulkano::buffer::BufferContents;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo;
 use vulkano::descriptor_set::allocator::{
     StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo,
 };
@@ -56,6 +57,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
+const FRAMES_IN_FLIGHT: usize = 2;
+
 #[derive(Default)]
 pub struct App {
     render_context: Option<RenderContext>,
@@ -76,14 +79,20 @@ struct RenderContext {
     window: Arc<Window>,
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
-    framebuffers: Vec<Arc<Framebuffer>>,
+
     pipeline: Arc<GraphicsPipeline>,
     viewport: Viewport,
-    recreate_swapchain: bool,
-    previous_frame_end: Option<Box<dyn GpuFuture>>,
 
-    uniform_buffer: Arc<Subbuffer<TransformationUBO>>,
-    descriptor_set: Arc<PersistentDescriptorSet>,
+    recreate_swapchain: bool,
+
+    current_frame: usize,
+    frame_counter: u128,
+
+    framebuffers: Vec<Arc<Framebuffer>>,
+
+    uniform_buffers: Vec<Subbuffer<TransformationUBO>>,
+    descriptor_sets: Vec<Arc<PersistentDescriptorSet>>,
+    frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
 
 impl App {
@@ -102,7 +111,7 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app_context.is_some() {
-            eprintln!("resumed called while app is already some, why?");
+            eprintln!("resumed called while app is already some");
             return;
         }
 
@@ -142,7 +151,10 @@ impl ApplicationHandler for App {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
-            Default::default(),
+            StandardCommandBufferAllocatorCreateInfo {
+                primary_buffer_count: FRAMES_IN_FLIGHT,
+                ..Default::default()
+            },
         ));
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -177,24 +189,35 @@ impl ApplicationHandler for App {
         let recreate_swapchain = false;
         let previous_frame_end = Some(sync::now(device.clone()).boxed());
 
+        let frames_resources_free: Vec<Option<Box<dyn GpuFuture>>> = {
+            let mut vec = Vec::with_capacity(FRAMES_IN_FLIGHT);
+            vec.push(previous_frame_end);
+            for _ in 0..FRAMES_IN_FLIGHT - 1 {
+                vec.push(None);
+            }
+            vec
+        };
+
         let window_ratio = {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
-        let (uniform_buffer, descriptor_set) =
-            App::create_descriptor_set(device.clone(), memory_allocator);
+        let (uniform_buffers, descriptor_sets) =
+            App::create_descriptor_sets(device.clone(), memory_allocator);
 
         self.render_context = Some(RenderContext {
-            descriptor_set,
             window: window.clone(),
+            framebuffers,
             swapchain,
             render_pass,
             recreate_swapchain,
-            framebuffers,
             pipeline,
-            previous_frame_end,
             viewport,
-            uniform_buffer: uniform_buffer.into(),
+            current_frame: 0,
+            frame_counter: 0,
+            descriptor_sets,
+            frames_resources_free,
+            uniform_buffers,
         });
         self.app_context = Some(AppContext {
             command_buffer_allocator,
@@ -218,11 +241,9 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => render_context.recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
                 println!("frame start");
-                unsafe {
-                    app_context.device.wait_idle().unwrap();
-                }
-                render_context
-                    .previous_frame_end
+                render_context.frame_counter += 1;
+
+                render_context.frames_resources_free[render_context.current_frame]
                     .as_mut()
                     .unwrap()
                     .cleanup_finished();
@@ -232,7 +253,9 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let mut write = render_context.uniform_buffer.write().unwrap();
+                let mut write = render_context.uniform_buffers[render_context.current_frame]
+                    .write()
+                    .unwrap();
                 *write = App::calculate_current_transform(
                     app_context.start_time,
                     app_context.aspect_ratio,
@@ -319,7 +342,7 @@ impl ApplicationHandler for App {
                         PipelineBindPoint::Graphics,
                         render_context.pipeline.layout().clone(),
                         0,
-                        render_context.descriptor_set.clone(),
+                        render_context.descriptor_sets[render_context.current_frame].clone(),
                     )
                     .unwrap()
                     .bind_vertex_buffers(0, app_context.vertex_buffer.clone())
@@ -333,8 +356,7 @@ impl ApplicationHandler for App {
 
                 let command_buffer = builder.build().unwrap();
 
-                let future = render_context
-                    .previous_frame_end
+                let future = render_context.frames_resources_free[render_context.current_frame]
                     .take()
                     .unwrap()
                     .join(acquire_future)
@@ -358,17 +380,22 @@ impl ApplicationHandler for App {
                     .then_signal_fence_and_flush();
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        render_context.previous_frame_end = Some(future.boxed());
+                        render_context.frames_resources_free
+                            [(render_context.current_frame + 1) % FRAMES_IN_FLIGHT] =
+                            Some(future.boxed());
                     }
                     Err(VulkanError::OutOfDate) => {
                         render_context.recreate_swapchain = true;
-                        render_context.previous_frame_end =
+                        render_context.frames_resources_free
+                            [(render_context.current_frame + 1) % FRAMES_IN_FLIGHT] =
                             Some(sync::now(app_context.device.clone()).boxed());
                     }
                     Err(e) => {
                         panic!("failed to flush future: {e}");
                     }
                 }
+                render_context.current_frame =
+                    (render_context.current_frame + 1) % FRAMES_IN_FLIGHT;
             }
             _ => (),
         }
@@ -497,7 +524,9 @@ impl App {
                 // Some drivers report an `min_image_count` of 1, but fullscreen mode requires
                 // at least 2. Therefore we must ensure the count is at least 2, otherwise the
                 // program would crash when entering fullscreen mode on those drivers.
-                min_image_count: surface_capabilities.min_image_count.max(2),
+                min_image_count: surface_capabilities
+                    .min_image_count
+                    .max(FRAMES_IN_FLIGHT as u32),
 
                 image_format,
 
@@ -717,10 +746,13 @@ impl App {
         }
     }
 
-    fn create_descriptor_set(
+    fn create_descriptor_sets(
         device: Arc<Device>,
         memory_allocator: Arc<dyn MemoryAllocator>,
-    ) -> (Subbuffer<TransformationUBO>, Arc<PersistentDescriptorSet>) {
+    ) -> (
+        Vec<Subbuffer<TransformationUBO>>,
+        Vec<Arc<PersistentDescriptorSet>>,
+    ) {
         let layout = DescriptorSetLayout::new(
             device.clone(),
             DescriptorSetLayoutCreateInfo {
@@ -739,38 +771,44 @@ impl App {
             },
         )
         .unwrap();
-
         let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo {
-                set_count: 1,
+                set_count: FRAMES_IN_FLIGHT as usize,
                 ..Default::default()
             },
         );
 
-        let uniform_buffer: Subbuffer<TransformationUBO> = Buffer::new_sized(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+        let mut uniform_buffers = vec![];
+        let mut descriptor_sets = vec![];
 
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .into();
+        for i in 0..FRAMES_IN_FLIGHT {
+            uniform_buffers.push(
+                Buffer::new_sized(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
 
-        let descriptor_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            layout.clone(),
-            [WriteDescriptorSet::buffer(0, uniform_buffer.clone())],
-            [],
-        )
-        .unwrap();
-        (uniform_buffer, descriptor_set)
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+
+            let descriptor_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                layout.clone(),
+                [WriteDescriptorSet::buffer(0, uniform_buffers[i].clone())],
+                [],
+            )
+            .unwrap();
+            descriptor_sets.push(descriptor_set);
+        }
+        (uniform_buffers, descriptor_sets)
     }
 }
 
