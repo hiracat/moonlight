@@ -1,26 +1,21 @@
 use bytemuck::{Pod, Zeroable};
-use std::f32::consts::FRAC_PI_4;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Instant};
 use ultraviolet::{projection, Mat4, Vec3};
-use vulkano::buffer::BufferContents;
-use vulkano::command_buffer::allocator::StandardCommandBufferAllocatorCreateInfo;
-use vulkano::descriptor_set::allocator::{
-    StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo,
-};
-use vulkano::descriptor_set::layout::DescriptorType::UniformBuffer;
-use vulkano::descriptor_set::layout::{DescriptorSetLayout, DescriptorType};
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::memory::allocator::MemoryAllocator;
-use vulkano::pipeline::{Pipeline, PipelineBindPoint};
-
 use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-        RenderPassBeginInfo, SubpassBeginInfo, SubpassContents,
+        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
+        AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
+        SubpassContents,
     },
-    descriptor_set::layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo},
+    descriptor_set::{
+        allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
+        layout::{
+            DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
+            DescriptorType::{self, UniformBuffer},
+        },
+        PersistentDescriptorSet, WriteDescriptorSet,
+    },
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
@@ -28,7 +23,9 @@ use vulkano::{
     format::Format,
     image::{view::ImageView, Image, ImageUsage},
     instance::{Instance, InstanceCreateInfo},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
+    },
     pipeline::{
         graphics::{
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -40,7 +37,8 @@ use vulkano::{
             GraphicsPipelineCreateInfo,
         },
         layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
-        DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     shader::ShaderStages,
@@ -56,15 +54,26 @@ use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
-
-const FRAMES_IN_FLIGHT: usize = 2;
-
+const VERTICES: [Vert; 3] = [
+    Vert {
+        in_position: [-0.5, -0.25, 0.0],
+        in_color: [1.0, 0.0, 0.0, 1.0],
+    },
+    Vert {
+        in_position: [0.0, 0.5, 0.0],
+        in_color: [0.0, 1.0, 0.0, 1.0],
+    },
+    Vert {
+        in_position: [0.25, -0.1, 0.0],
+        in_color: [0.0, 0.0, 1.0, 1.0],
+    },
+];
+const FRAMES_IN_FLIGHT: usize = 3;
 #[derive(Default)]
 pub struct App {
     render_context: Option<RenderContext>,
     app_context: Option<AppContext>,
 }
-
 struct AppContext {
     window: Arc<Window>,
     aspect_ratio: f32,
@@ -74,38 +83,36 @@ struct AppContext {
     vertex_buffer: Subbuffer<[Vert]>,
     start_time: Instant,
 }
-
 struct RenderContext {
-    window: Arc<Window>,
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
-
     pipeline: Arc<GraphicsPipeline>,
     viewport: Viewport,
 
     recreate_swapchain: bool,
-
     current_frame: usize,
     frame_counter: u128,
 
     framebuffers: Vec<Arc<Framebuffer>>,
-
     uniform_buffers: Vec<Subbuffer<TransformationUBO>>,
     descriptor_sets: Vec<Arc<PersistentDescriptorSet>>,
     frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct Vert {
+    #[format(R32G32B32_SFLOAT)]
+    in_position: [f32; 3],
+    #[format(R32G32B32A32_SFLOAT)]
+    in_color: [f32; 4],
+}
 
-impl App {
-    // TODO: all init is done in the resumed function because window needs an
-    // activeeventloop to be created, there is a way around this, but idk what it is
-
-    // INFO: if you still want an empty app struct it derives default
-    pub fn new() -> Self {
-        App {
-            app_context: None,
-            render_context: None,
-        }
-    }
+#[derive(Pod, Zeroable, Copy, Clone)]
+#[repr(C)]
+struct TransformationUBO {
+    model: Mat4,
+    view: Mat4,
+    proj: Mat4,
 }
 
 impl ApplicationHandler for App {
@@ -114,40 +121,19 @@ impl ApplicationHandler for App {
             eprintln!("resumed called while app is already some");
             return;
         }
-
         let start_time = Instant::now();
-
-        // create temorary variables, then assign them all at the end to avoid forgetting things
-
         let instance = App::create_instance(event_loop);
         let window = App::create_window(event_loop);
-
-        let surface = App::create_surface(&instance, &window);
+        let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
         let device_extensions = DeviceExtensions {
             khr_swapchain: true,
             ..DeviceExtensions::empty()
         };
         let (physical_device, queue_family_index) =
             App::create_physical_device(&instance, &surface, &device_extensions);
-
         let (device, queue) =
             App::create_device(physical_device, queue_family_index, &device_extensions);
 
-        let vertices = [
-            Vert {
-                in_position: [-0.5, -0.25, 0.0],
-                in_color: [1.0, 0.0, 0.0, 1.0],
-            },
-            Vert {
-                in_position: [0.0, 0.5, 0.0],
-                in_color: [0.0, 1.0, 0.0, 1.0],
-            },
-            Vert {
-                in_position: [0.25, -0.1, 0.0],
-                in_color: [0.0, 0.0, 1.0, 1.0],
-            },
-        ];
-        //TODO: change this to be more generic and not rely on whatever this bs is
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
@@ -167,18 +153,15 @@ impl ApplicationHandler for App {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vertices,
+            VERTICES,
         )
         .unwrap();
 
         let window_size = window.inner_size();
         let (swapchain, images) = App::create_swapchain(&window, &device, &surface);
-
         let render_pass = App::create_renderpass(&device, swapchain.image_format());
-
         let framebuffers = App::recreate_framebuffers(&images, &render_pass);
         let pipeline = App::create_graphics_pipeline(&device, &render_pass);
-
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
         let viewport = Viewport {
@@ -187,26 +170,21 @@ impl ApplicationHandler for App {
             depth_range: 0.0..=1.0,
         };
         let recreate_swapchain = false;
-        let previous_frame_end = Some(sync::now(device.clone()).boxed());
-
         let frames_resources_free: Vec<Option<Box<dyn GpuFuture>>> = {
             let mut vec = Vec::with_capacity(FRAMES_IN_FLIGHT);
-            vec.push(previous_frame_end);
-            for _ in 0..FRAMES_IN_FLIGHT - 1 {
-                vec.push(None);
+            for _ in 0..FRAMES_IN_FLIGHT {
+                let previous_frame_end = Some(sync::now(device.clone()).boxed());
+                vec.push(previous_frame_end);
             }
             vec
         };
-
-        let window_ratio = {
+        let aspect_ratio = {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
         let (uniform_buffers, descriptor_sets) =
             App::create_descriptor_sets(device.clone(), memory_allocator);
-
         self.render_context = Some(RenderContext {
-            window: window.clone(),
             framebuffers,
             swapchain,
             render_pass,
@@ -226,83 +204,77 @@ impl ApplicationHandler for App {
             queue,
             start_time,
             window: window.clone(),
-            aspect_ratio: window_ratio,
+            aspect_ratio,
         });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let render_context = self.render_context.as_mut().unwrap();
-        let app_context = self.app_context.as_mut().unwrap();
+        // INFO: RCX = render_context, its just a pain to have so many really long lines, APX is the app context
+        let rcx = self.render_context.as_mut().unwrap();
+        let acx = self.app_context.as_mut().unwrap();
         match event {
             WindowEvent::CloseRequested => {
-                println!("The close button was pressed; stopping");
+                println!("The close ~uhhh~ button was pressed; stopping");
                 event_loop.exit();
             }
-            WindowEvent::Resized(_) => render_context.recreate_swapchain = true,
+            WindowEvent::Resized(_) => rcx.recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
-                println!("frame start");
-                render_context.frame_counter += 1;
-
-                render_context.frames_resources_free[render_context.current_frame]
+                println!("frame start UwU");
+                acx.window.request_redraw();
+                let window_size = acx.window.inner_size();
+                if window_size.width == 0 || window_size.height == 0 {
+                    return;
+                }
+                rcx.frame_counter += 1;
+                rcx.frames_resources_free[rcx.current_frame]
                     .as_mut()
                     .unwrap()
                     .cleanup_finished();
 
-                let window_size = render_context.window.inner_size();
-                if window_size.width == 0 || window_size.height == 0 {
-                    return;
+                {
+                    let mut write = rcx.uniform_buffers[rcx.current_frame].write().unwrap();
+                    *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
+                    // write needs to be dropped to free the lock on the uniform buffer
                 }
 
-                let mut write = render_context.uniform_buffers[render_context.current_frame]
-                    .write()
-                    .unwrap();
-                *write = App::calculate_current_transform(
-                    app_context.start_time,
-                    app_context.aspect_ratio,
-                );
-                drop(write);
-
-                app_context.window.request_redraw();
-
-                if render_context.recreate_swapchain {
+                if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
-
-                    let (new_swapchain, new_images) = render_context
+                    let (new_swapchain, new_images) = rcx
                         .swapchain
                         .recreate(SwapchainCreateInfo {
                             image_extent: window_size.into(),
-                            ..render_context.swapchain.create_info()
+                            ..rcx.swapchain.create_info()
                         })
-                        .expect("failed to recreate swapchain");
-
-                    render_context.swapchain = new_swapchain;
-
+                        .expect(
+                            "failed to create the stinkin swapchain wooo baby that was difficult",
+                        );
+                    rcx.swapchain = new_swapchain;
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
-                    render_context.framebuffers =
-                        App::recreate_framebuffers(&new_images, &render_context.render_pass);
-
-                    render_context.viewport.extent = window_size.into();
-
-                    render_context.recreate_swapchain = false;
+                    rcx.framebuffers = App::recreate_framebuffers(&new_images, &rcx.render_pass);
+                    rcx.viewport.extent = window_size.into();
+                    rcx.recreate_swapchain = false;
                 }
-                let (image_index, suboptimal, acquire_future) =
-                    match acquire_next_image(render_context.swapchain.clone(), None)
-                        .map_err(Validated::unwrap)
-                    {
-                        Ok(r) => r,
-                        Err(VulkanError::OutOfDate) => {
-                            render_context.recreate_swapchain = true;
-                            return;
-                        }
-                        Err(e) => panic!("failed to acquire next image: {e}"),
-                    };
+
+                let (image_index, suboptimal, acquire_future) = match acquire_next_image(
+                    rcx.swapchain.clone(),
+                    None,
+                )
+                .map_err(Validated::unwrap)
+                {
+                    Ok(r) => r,
+                    Err(VulkanError::OutOfDate) => {
+                        rcx.recreate_swapchain = true;
+                        return;
+                    }
+                    Err(e) => panic!("failed to acquire next image: {e}"),
+                };
                 if suboptimal {
-                    render_context.recreate_swapchain = true;
+                    rcx.recreate_swapchain = true;
                 }
                 let mut builder = AutoCommandBufferBuilder::primary(
-                    &app_context.command_buffer_allocator,
-                    app_context.queue.queue_family_index(),
+                    &acx.command_buffer_allocator,
+                    acx.queue.queue_family_index(),
                     CommandBufferUsage::OneTimeSubmit,
                 )
                 .unwrap();
@@ -311,98 +283,80 @@ impl ApplicationHandler for App {
                 builder
                     .begin_render_pass(
                         RenderPassBeginInfo {
-                            // A list of values to clear the attachments with. This list contains
-                            // one item for each attachment in the render pass. In this case, there
-                            // is only one attachment, and we clear it with a blue color.
-                            //
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
-                            // with clear values, any others should use `None` as the clear value.
-                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-
+                            // others should use none as their value
+                            clear_values: vec![Some([0.0, 0.68, 1.0, 1.0].into())],
                             ..RenderPassBeginInfo::framebuffer(
-                                render_context.framebuffers[image_index as usize].clone(),
+                                rcx.framebuffers[image_index as usize].clone(),
                             )
                         },
                         SubpassBeginInfo {
                             // The contents of the first (and only) subpass. This can be either
-                            // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
-                            // advanced and is not covered here.
+                            // `Inline` or `SecondaryCommandBuffers`
                             contents: SubpassContents::Inline,
                             ..Default::default()
                         },
                     )
                     .unwrap()
-                    // We are now inside the first subpass of the render pass.
-                    //
-                    .set_viewport(0, [render_context.viewport.clone()].into_iter().collect())
+                    .set_viewport(0, [rcx.viewport.clone()].into_iter().collect())
                     .unwrap()
-                    .bind_pipeline_graphics(render_context.pipeline.clone())
+                    .bind_pipeline_graphics(rcx.pipeline.clone())
                     .unwrap()
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
-                        render_context.pipeline.layout().clone(),
+                        rcx.pipeline.layout().clone(),
                         0,
-                        render_context.descriptor_sets[render_context.current_frame].clone(),
+                        rcx.descriptor_sets[rcx.current_frame].clone(),
                     )
                     .unwrap()
-                    .bind_vertex_buffers(0, app_context.vertex_buffer.clone())
+                    .bind_vertex_buffers(0, acx.vertex_buffer.clone())
                     .unwrap();
-
-                builder
-                    .draw(app_context.vertex_buffer.len() as u32, 1, 0, 0)
+                builder // not necessary to seperate but good for clear thinking about it
+                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
                     .unwrap();
-
                 builder.end_render_pass(Default::default()).unwrap();
 
                 let command_buffer = builder.build().unwrap();
-
-                let future = render_context.frames_resources_free[render_context.current_frame]
+                let future = rcx.frames_resources_free[rcx.current_frame]
                     .take()
                     .unwrap()
                     .join(acquire_future)
-                    .then_execute(app_context.queue.clone(), command_buffer)
+                    .then_execute(acx.queue.clone(), command_buffer)
                     .unwrap()
-                    // The color output is now expected to contain our triangle. But in order to
-                    // show it on the screen, we have to *present* the image by calling
-                    // `then_swapchain_present`.
-                    //
-                    // This function does not actually present the image immediately. Instead it
-                    // submits a present command at the end of the queue. This means that it will
-                    // only be presented once the GPU has finished executing the command buffer
-                    // that draws the triangle.
+                    // dosent present imediately but submits a present command to
+                    // the queue, so the triangle will finish rendering
                     .then_swapchain_present(
-                        app_context.queue.clone(),
+                        acx.queue.clone(),
                         SwapchainPresentInfo::swapchain_image_index(
-                            render_context.swapchain.clone(),
+                            rcx.swapchain.clone(),
                             image_index,
                         ),
                     )
-                    .then_signal_fence_and_flush();
+                    .then_signal_fence_and_flush(); // signal will tell gpu to finish and use fence
+
                 match future.map_err(Validated::unwrap) {
                     Ok(future) => {
-                        render_context.frames_resources_free
-                            [(render_context.current_frame + 1) % FRAMES_IN_FLIGHT] =
-                            Some(future.boxed());
+                        rcx.frames_resources_free[rcx.current_frame] = Some(future.boxed());
                     }
                     Err(VulkanError::OutOfDate) => {
-                        render_context.recreate_swapchain = true;
-                        render_context.frames_resources_free
-                            [(render_context.current_frame + 1) % FRAMES_IN_FLIGHT] =
-                            Some(sync::now(app_context.device.clone()).boxed());
+                        rcx.recreate_swapchain = true;
+                        rcx.frames_resources_free[rcx.current_frame] =
+                            Some(sync::now(acx.device.clone()).boxed());
                     }
                     Err(e) => {
-                        panic!("failed to flush future: {e}");
+                        rcx.frames_resources_free[rcx.current_frame] =
+                            Some(Box::new(sync::now(acx.device.clone())).boxed());
+                        println!("Failed to flush future: {:?}", e);
                     }
                 }
-                render_context.current_frame =
-                    (render_context.current_frame + 1) % FRAMES_IN_FLIGHT;
+                rcx.current_frame = (rcx.current_frame + 1) % FRAMES_IN_FLIGHT;
             }
             _ => (),
         }
     }
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let render_context = self.render_context.as_mut().unwrap();
-        render_context.window.request_redraw();
+        let app_context = self.app_context.as_mut().unwrap();
+        app_context.window.request_redraw();
     }
 }
 impl App {
@@ -413,12 +367,10 @@ impl App {
                 .expect("failed to create window"),
         )
     }
-
     fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
         let library =
             VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
         let required_extensions = Surface::required_extensions(event_loop);
-        //DEBUG: println!("{:?}", library.supported_extensions());
 
         Instance::new(
             library,
@@ -429,10 +381,6 @@ impl App {
         )
         .expect("failed to create instance")
     }
-    fn create_surface(instance: &Arc<Instance>, window: &Arc<Window>) -> Arc<Surface> {
-        Surface::from_window(instance.clone(), window.clone()).unwrap()
-    }
-
     fn create_physical_device(
         instance: &Arc<Instance>,
         surface: &Arc<Surface>,
@@ -446,14 +394,11 @@ impl App {
                     .supported_extensions()
                     .contains(required_extensions)
             })
-            // takes an iterator of physical device, and pairs it
-            // to a u32
             .filter_map(|physical_device| {
                 physical_device
                     .queue_family_properties()
                     .iter() // iterate over all available queues for each device
                     .enumerate() // returns an iterator of type (physicaldevice, u32)
-                    // returns first elemnt to return true, or none
                     .position(|(index, queue_family_properties)| {
                         queue_family_properties
                             .queue_flags
@@ -474,7 +419,7 @@ impl App {
                     _ => 5,
                 },
             )
-            .expect("no suitable physical device found")
+            .expect("poor ass, u dont have a good gpu")
     }
     fn create_device(
         physical_device: Arc<PhysicalDevice>,
@@ -503,59 +448,34 @@ impl App {
         surface: &Arc<Surface>,
     ) -> (Arc<Swapchain>, Vec<Arc<Image>>) {
         let window_size = window.inner_size();
-        // Querying the capabilities of the surface. When we create the swapchain we can only
-        // pass values that are allowed by the capabilities.
         let surface_capabilities = device
             .physical_device()
             .surface_capabilities(surface, Default::default())
             .unwrap();
-
-        // Choosing the internal format that the images will have.
         let (image_format, _) = device
             .physical_device()
             .surface_formats(surface, Default::default())
             .unwrap()[0]; // take the first available format
-
-        // Please take a look at the docs for the meaning of the parameters we didn't mention.
         Swapchain::new(
             device.clone(),
             surface.clone(),
             SwapchainCreateInfo {
-                // Some drivers report an `min_image_count` of 1, but fullscreen mode requires
-                // at least 2. Therefore we must ensure the count is at least 2, otherwise the
-                // program would crash when entering fullscreen mode on those drivers.
+                // always keep a min image count of 2 bc required for fullscreen, and have 1-2 more
+                // than ur frames in flight
                 min_image_count: surface_capabilities
                     .min_image_count
-                    .max(FRAMES_IN_FLIGHT as u32),
-
+                    .max(1 + FRAMES_IN_FLIGHT as u32),
                 image_format,
-
-                // The size of the window, only used to initially setup the swapchain.
-                //
-                // NOTE:
-                // On some drivers the swapchain extent is specified by
-                // `surface_capabilities.current_extent` and the swapchain size must use this
-                // extent. This extent is always the same as the window size.
-                //
-                // However, other drivers don't specify a value, i.e.
-                // `surface_capabilities.current_extent` is `None`. These drivers will allow
-                // anything, but the only sensible value is the window size.
-                //
-                // Both of these cases need the swapchain to use the window size, so we just
-                // use that.
+                // always use the window_size bc some drivers dont report in
+                // swapchain.currentextent
                 image_extent: window_size.into(),
-
                 image_usage: ImageUsage::COLOR_ATTACHMENT,
-
-                // The alpha mode indicates how the alpha value of the final image will behave.
-                // For example, you can choose whether the window will be
-                // opaque or transparent.
+                // change how window and alpha relate, if window is transparent or opaque
                 composite_alpha: surface_capabilities
                     .supported_composite_alpha
                     .into_iter()
                     .next()
                     .unwrap(),
-
                 ..Default::default()
             },
         )
@@ -612,7 +532,6 @@ impl App {
                 path: "shaders/fragment.glsl",
             }
         }
-
         let vertex_shader = vertex_shader::load(device.clone())
             .unwrap()
             .entry_point("main")
@@ -621,11 +540,9 @@ impl App {
             .unwrap()
             .entry_point("main")
             .unwrap();
-
         let vertex_input_state = Vert::per_vertex()
             .definition(&vertex_shader.info().input_interface)
             .unwrap();
-
         let stages = [
             PipelineShaderStageCreateInfo::new(vertex_shader),
             PipelineShaderStageCreateInfo::new(fragment_shader),
@@ -642,9 +559,6 @@ impl App {
         // resource locations, which allows them to share pipeline layouts.
         let layout = PipelineLayout::new(
             device.clone(),
-            // here we create a uniform
-            // buffer descriptor set
-            // layout
             PipelineDescriptorSetLayoutCreateInfo {
                 set_layouts: vec![DescriptorSetLayoutCreateInfo {
                     bindings: [(
@@ -666,12 +580,9 @@ impl App {
             .unwrap(),
         )
         .unwrap();
-
         // We have to indicate which subpass of which render pass this pipeline is going to be
         // used in. The pipeline will only be usable from this particular subpass.
         let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-
-        // Finally, create the pipeline.
         GraphicsPipeline::new(
             device.clone(),
             None,
@@ -728,7 +639,6 @@ impl App {
             })
             .collect::<Vec<_>>()
     }
-
     fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
         let rotation =
             Mat4::from_euler_angles(0.0, (start_time.elapsed().as_secs_f32() * 0.5) % 360.0, 0.0);
@@ -738,14 +648,13 @@ impl App {
         TransformationUBO {
             model: rotation,
             view: ultraviolet::Mat4::look_at(
-                Vec3::new(0.0, 0.0, 2.0), // Move camera back slightly
+                Vec3::new(0.0, 0.0, 3.0), // Move camera back slightly
                 Vec3::new(0.0, 0.0, 0.0), // Look at origin
                 Vec3::new(0.0, 1.0, 0.0), // Up vector
             ),
             proj: projection::perspective_vk(FRAC_PI_4, aspect_ratio, 0.001, 100.0),
         }
     }
-
     fn create_descriptor_sets(
         device: Arc<Device>,
         memory_allocator: Arc<dyn MemoryAllocator>,
@@ -778,10 +687,8 @@ impl App {
                 ..Default::default()
             },
         );
-
         let mut uniform_buffers = vec![];
         let mut descriptor_sets = vec![];
-
         for i in 0..FRAMES_IN_FLIGHT {
             uniform_buffers.push(
                 Buffer::new_sized(
@@ -798,7 +705,6 @@ impl App {
                 )
                 .unwrap(),
             );
-
             let descriptor_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
                 layout.clone(),
@@ -810,21 +716,4 @@ impl App {
         }
         (uniform_buffers, descriptor_sets)
     }
-}
-
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct Vert {
-    #[format(R32G32B32_SFLOAT)]
-    in_position: [f32; 3],
-    #[format(R32G32B32A32_SFLOAT)]
-    in_color: [f32; 4],
-}
-
-#[derive(Pod, Zeroable, Copy, Clone)]
-#[repr(C)]
-struct TransformationUBO {
-    model: Mat4,
-    view: Mat4,
-    proj: Mat4,
 }
