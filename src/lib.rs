@@ -21,7 +21,7 @@ use vulkano::{
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
     },
     format::Format,
-    image::{view::ImageView, Image, ImageUsage},
+    image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
@@ -29,9 +29,10 @@ use vulkano::{
     pipeline::{
         graphics::{
             color_blend::{ColorBlendAttachmentState, ColorBlendState},
+            depth_stencil::{DepthState, DepthStencilState},
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
-            rasterization::RasterizationState,
+            rasterization::{CullMode, RasterizationState},
             vertex_input::{Vertex, VertexDefinition},
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
@@ -40,7 +41,11 @@ use vulkano::{
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
-    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    render_pass::{
+        AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
+        SubpassDescription,
+    },
     shader::ShaderStages,
     swapchain::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
@@ -54,18 +59,30 @@ use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
-const VERTICES: [Vert; 3] = [
+const VERTICES: [Vert; 6] = [
     Vert {
-        in_position: [-0.5, -0.25, 0.0],
-        in_color: [1.0, 0.0, 0.0, 1.0],
+        in_position: [-0.5, 0.5, -0.5],
+        in_color: [0.0, 0.0, 0.0, 1.0],
     },
     Vert {
-        in_position: [0.0, 0.5, 0.0],
-        in_color: [0.0, 1.0, 0.0, 1.0],
+        in_position: [0.5, 0.5, -0.5],
+        in_color: [0.0, 0.0, 0.0, 1.0],
     },
     Vert {
-        in_position: [0.25, -0.1, 0.0],
-        in_color: [0.0, 0.0, 1.0, 1.0],
+        in_position: [0.0, -0.5, -0.5],
+        in_color: [0.0, 0.0, 0.0, 1.0],
+    },
+    Vert {
+        in_position: [-0.5, -0.5, -0.6],
+        in_color: [1.0, 1.0, 1.0, 1.0],
+    },
+    Vert {
+        in_position: [0.5, -0.5, -0.6],
+        in_color: [1.0, 1.0, 1.0, 1.0],
+    },
+    Vert {
+        in_position: [0.0, 0.5, -0.6],
+        in_color: [1.0, 1.0, 1.0, 1.0],
     },
 ];
 const FRAMES_IN_FLIGHT: usize = 3;
@@ -82,6 +99,7 @@ struct AppContext {
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     vertex_buffer: Subbuffer<[Vert]>,
     start_time: Instant,
+    memory_allocator: Arc<dyn MemoryAllocator>,
 }
 struct RenderContext {
     swapchain: Arc<Swapchain>,
@@ -114,7 +132,6 @@ struct TransformationUBO {
     view: Mat4,
     proj: Mat4,
 }
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app_context.is_some() {
@@ -159,8 +176,11 @@ impl ApplicationHandler for App {
 
         let window_size = window.inner_size();
         let (swapchain, images) = App::create_swapchain(&window, &device, &surface);
+
         let render_pass = App::create_renderpass(&device, swapchain.image_format());
-        let framebuffers = App::recreate_framebuffers(&images, &render_pass);
+
+        let framebuffers =
+            App::recreate_framebuffers(&images, &render_pass, memory_allocator.clone());
         let pipeline = App::create_graphics_pipeline(&device, &render_pass);
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
@@ -183,7 +203,7 @@ impl ApplicationHandler for App {
             windowsize[0] / windowsize[1]
         };
         let (uniform_buffers, descriptor_sets) =
-            App::create_descriptor_sets(device.clone(), memory_allocator);
+            App::create_descriptor_sets(device.clone(), memory_allocator.clone());
         self.render_context = Some(RenderContext {
             framebuffers,
             swapchain,
@@ -205,9 +225,9 @@ impl ApplicationHandler for App {
             start_time,
             window: window.clone(),
             aspect_ratio,
+            memory_allocator: memory_allocator.clone(),
         });
     }
-
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // INFO: RCX = render_context, its just a pain to have so many really long lines, APX is the app context
         let rcx = self.render_context.as_mut().unwrap();
@@ -251,8 +271,14 @@ impl ApplicationHandler for App {
                     rcx.swapchain = new_swapchain;
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
-                    rcx.framebuffers = App::recreate_framebuffers(&new_images, &rcx.render_pass);
+                    rcx.framebuffers = App::recreate_framebuffers(
+                        &new_images,
+                        &rcx.render_pass,
+                        acx.memory_allocator.clone(),
+                    );
                     rcx.viewport.extent = window_size.into();
+                    acx.aspect_ratio = window_size.width as f32 / window_size.height as f32;
+
                     rcx.recreate_swapchain = false;
                 }
 
@@ -285,7 +311,10 @@ impl ApplicationHandler for App {
                         RenderPassBeginInfo {
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
                             // others should use none as their value
-                            clear_values: vec![Some([0.0, 0.68, 1.0, 1.0].into())],
+                            clear_values: vec![
+                                Some([0.0, 0.68, 1.0, 1.0].into()),
+                                Some(1.0.into()),
+                            ],
                             ..RenderPassBeginInfo::framebuffer(
                                 rcx.framebuffers[image_index as usize].clone(),
                             )
@@ -442,6 +471,30 @@ impl App {
         let queue = queues.next().unwrap();
         (device, queue)
     }
+    fn create_depth_buffer(
+        memory_allocator: Arc<dyn MemoryAllocator>,
+        dimensions: [u32; 3],
+    ) -> Arc<Image> {
+        // First, create the image for the depth buffer
+        let depth_image = Image::new(
+            memory_allocator,
+            ImageCreateInfo {
+                // Makes the image the same size as our window
+                extent: dimensions,
+                // Tell Vulkan this is for depth information
+                format: Format::D16_UNORM,
+                // We want to use this as a depth attachment
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        depth_image
+    }
     fn create_swapchain(
         window: &Arc<Window>,
         device: &Arc<Device>,
@@ -482,36 +535,45 @@ impl App {
         .unwrap()
     }
     fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPass> {
-        // this is a macro, the proper way to do this is probably very different but we dont talk
-        // about that
-        vulkano::single_pass_renderpass!(
+        RenderPass::new(
             device.clone(),
-            attachments: {
-                // `color` is a custom name we give to the first and only attachment.
-                color: {
-                    // `format: <ty>` indicates the type of the format of the image. This has to be
-                    // one of the types of the `vulkano::format` module (or alternatively one of
-                    // your structs that implements the `FormatDesc` trait). Here we use the same
-                    // format as the swapchain.
-                    format: image_format,
-                    // `samples: 1` means that we ask the GPU to use one sample to determine the
-                    // value of each pixel in the color attachment. We could use a larger value
-                    // (multisampling) for antialiasing. An example of this can be found in
-                    // msaa-renderpass.rs.
-                    samples: 1,
-                    // `load_op: Clear` means that we ask the GPU to clear the content of this
-                    // attachment at the start of the drawing.
-                    load_op: Clear,
-                    // `store_op: Store` means that we ask the GPU to store the output of the draw
-                    // in the actual image. We could also ask it to discard the result.
-                    store_op: Store,
-                },
-            },
-            pass: {
-                // We use the attachment named `color` as the one and only color attachment.
-                color: [color],
-                // No depth-stencil attachment is indicated with empty brackets.
-                depth_stencil: {},
+            RenderPassCreateInfo {
+                attachments: vec![
+                    // Your existing color attachment
+                    AttachmentDescription {
+                        format: image_format,
+                        samples: SampleCount::Sample1,
+                        load_op: AttachmentLoadOp::Clear,
+                        store_op: AttachmentStoreOp::Store,
+                        initial_layout: ImageLayout::Undefined,
+                        final_layout: ImageLayout::PresentSrc,
+                        ..Default::default()
+                    },
+                    // New depth attachment
+                    AttachmentDescription {
+                        format: Format::D16_UNORM,
+                        samples: SampleCount::Sample1,
+                        load_op: AttachmentLoadOp::Clear,
+                        store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
+                        initial_layout: ImageLayout::Undefined,
+                        final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                        ..Default::default()
+                    },
+                ],
+                subpasses: vec![SubpassDescription {
+                    color_attachments: vec![Some(AttachmentReference {
+                        attachment: 0, // Color attachment
+                        layout: ImageLayout::ColorAttachmentOptimal,
+                        ..Default::default()
+                    })],
+                    depth_stencil_attachment: Some(AttachmentReference {
+                        attachment: 1, // Depth attachment
+                        layout: ImageLayout::DepthStencilAttachmentOptimal,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
             },
         )
         .unwrap()
@@ -598,7 +660,10 @@ impl App {
                 viewport_state: Some(ViewportState::default()),
                 // How polygons are culled and converted into a raster of pixels. The default
                 // value does not perform any culling.
-                rasterization_state: Some(RasterizationState::default()),
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::Back,
+                    ..Default::default()
+                }),
                 // How multiple fragment shader samples are converted to a single pixel value.
                 // The default value does not perform any multisampling.
                 multisample_state: Some(MultisampleState::default()),
@@ -609,10 +674,15 @@ impl App {
                     subpass.num_color_attachments(),
                     ColorBlendAttachmentState::default(),
                 )),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: Some(DepthState::simple()),
+                    ..Default::default()
+                }),
                 // Dynamic states allows us to specify parts of the pipeline settings when
                 // recording the command buffer, before we perform drawing. Here, we specify
                 // that the viewport should be dynamic.
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+
                 subpass: Some(subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
@@ -622,22 +692,25 @@ impl App {
     fn recreate_framebuffers(
         images: &[Arc<Image>],
         render_pass: &Arc<RenderPass>,
+        allocator: Arc<dyn MemoryAllocator>,
     ) -> Vec<Arc<Framebuffer>> {
-        images
-            .iter()
-            .map(|image| {
-                let view = ImageView::new_default(image.clone()).unwrap();
-
+        let mut framebuffers = vec![];
+        for i in 0..images.len() {
+            let depth_buffer = App::create_depth_buffer(allocator.clone(), images[0].extent());
+            let image_view = ImageView::new_default(images[i].clone()).unwrap();
+            let depth_view = ImageView::new_default(depth_buffer).unwrap();
+            framebuffers.push(
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {
-                        attachments: vec![view],
+                        attachments: vec![image_view, depth_view],
                         ..Default::default()
                     },
                 )
-                .unwrap()
-            })
-            .collect::<Vec<_>>()
+                .unwrap(),
+            );
+        }
+        framebuffers
     }
     fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
         let rotation =
