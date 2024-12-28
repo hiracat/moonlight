@@ -302,6 +302,13 @@ struct AmbientLightUBO {
     color: [f32; 3],
     intensity: f32,
 }
+#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+#[repr(C)]
+struct DirectionalLightUBO {
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app_context.is_some() {
@@ -373,12 +380,16 @@ impl ApplicationHandler for App {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
-        let (uniform_buffers, ambient_buffer, descriptor_sets) =
+        let (uniform_buffers, ambient_buffer, directional_buffer, descriptor_sets) =
             App::create_descriptor_sets(device.clone(), memory_allocator.clone());
 
         *ambient_buffer.write().unwrap() = AmbientLightUBO {
             color: [1.0, 1.0, 1.0],
             intensity: 0.2,
+        };
+        *directional_buffer.write().unwrap() = DirectionalLightUBO {
+            position: [-4.0, -4.0, 0.0],
+            color: [1.0, 1.0, 1.0],
         };
 
         self.render_context = Some(RenderContext {
@@ -816,6 +827,15 @@ impl App {
                                 ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
                             },
                         ),
+                        (
+                            2,
+                            DescriptorSetLayoutBinding {
+                                stages: ShaderStages::FRAGMENT,
+                                descriptor_type: UniformBuffer,
+                                descriptor_count: 1,
+                                ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                            },
+                        ),
                     ]
                     .into(),
                     ..Default::default()
@@ -928,6 +948,7 @@ impl App {
     ) -> (
         Vec<Subbuffer<TransformationUBO>>,
         Subbuffer<AmbientLightUBO>,
+        Subbuffer<DirectionalLightUBO>,
         Vec<Arc<PersistentDescriptorSet>>,
     ) {
         let layout = DescriptorSetLayout::new(
@@ -948,6 +969,18 @@ impl App {
                     ),
                     (
                         1, // binding
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::FRAGMENT,
+                            descriptor_count: 1,
+                            descriptor_type: DescriptorType::UniformBuffer,
+
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::UniformBuffer,
+                            )
+                        },
+                    ),
+                    (
+                        2, // binding
                         DescriptorSetLayoutBinding {
                             stages: ShaderStages::FRAGMENT,
                             descriptor_count: 1,
@@ -987,6 +1020,19 @@ impl App {
             },
         )
         .unwrap();
+        let directional_buffer = Buffer::new_sized(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         for i in 0..FRAMES_IN_FLIGHT {
             uniform_buffers.push(
@@ -1010,12 +1056,18 @@ impl App {
                 [
                     WriteDescriptorSet::buffer(0, uniform_buffers[i].clone()),
                     WriteDescriptorSet::buffer(1, ambient_buffer.clone()),
+                    WriteDescriptorSet::buffer(2, directional_buffer.clone()),
                 ],
                 [],
             )
             .unwrap();
             descriptor_sets.push(descriptor_set);
         }
-        (uniform_buffers, ambient_buffer, descriptor_sets)
+        (
+            uniform_buffers,
+            ambient_buffer,
+            directional_buffer,
+            descriptor_sets,
+        )
     }
 }
