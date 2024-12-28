@@ -20,7 +20,7 @@ use vulkano::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
     },
-    format::Format,
+    format::{self, Format},
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
@@ -32,7 +32,7 @@ use vulkano::{
             depth_stencil::{DepthState, DepthStencilState},
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
-            rasterization::{CullMode, RasterizationState},
+            rasterization::{CullMode, FrontFace, RasterizationState},
             vertex_input::{Vertex, VertexDefinition},
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
@@ -59,32 +59,195 @@ use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
-const VERTICES: [Vert; 6] = [
+const VERTICES: [Vert; 36] = [
+    // front face
     Vert {
-        in_position: [-0.5, 0.5, -0.5],
-        in_color: [0.0, 0.0, 0.0, 1.0],
+        position: [-1.000000, -1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.75, 0.837],
     },
     Vert {
-        in_position: [0.5, 0.5, -0.5],
-        in_color: [0.0, 0.0, 0.0, 1.0],
+        position: [-1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.35, 0.137],
     },
     Vert {
-        in_position: [0.0, -0.5, -0.5],
-        in_color: [0.0, 0.0, 0.0, 1.0],
+        position: [1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.35, 0.137],
     },
     Vert {
-        in_position: [-0.5, -0.5, -0.6],
-        in_color: [1.0, 1.0, 1.0, 1.0],
+        position: [-1.000000, -1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.35, 0.137],
     },
     Vert {
-        in_position: [0.5, -0.5, -0.6],
-        in_color: [1.0, 1.0, 1.0, 1.0],
+        position: [1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.35, 0.137],
     },
     Vert {
-        in_position: [0.0, 0.5, -0.6],
-        in_color: [1.0, 1.0, 1.0, 1.0],
+        position: [1.000000, -1.000000, 1.000000],
+        normal: [0.0000, 0.0000, 1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    // back face
+    Vert {
+        position: [1.000000, -1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, -1.000000, -1.000000],
+        normal: [0.0000, 0.0000, -1.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    // top face
+    Vert {
+        position: [-1.000000, -1.000000, 1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, 1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, -1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, -1.000000, 1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, -1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, -1.000000, -1.000000],
+        normal: [0.0000, -1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    // bottom face
+    Vert {
+        position: [1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, 1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, -1.000000],
+        normal: [0.0000, 1.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    // left face
+    Vert {
+        position: [-1.000000, -1.000000, -1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, -1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, 1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, -1.000000, -1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, 1.000000, 1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [-1.000000, -1.000000, 1.000000],
+        normal: [-1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    // right face
+    Vert {
+        position: [1.000000, -1.000000, 1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, 1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, -1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, 1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, 1.000000, -1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
+    },
+    Vert {
+        position: [1.000000, -1.000000, -1.000000],
+        normal: [1.0000, 0.0000, 0.0000],
+        color: [1.0, 0.35, 0.137],
     },
 ];
+
 const FRAMES_IN_FLIGHT: usize = 3;
 #[derive(Default)]
 pub struct App {
@@ -120,9 +283,11 @@ struct RenderContext {
 #[repr(C)]
 struct Vert {
     #[format(R32G32B32_SFLOAT)]
-    in_position: [f32; 3],
-    #[format(R32G32B32A32_SFLOAT)]
-    in_color: [f32; 4],
+    position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    normal: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    color: [f32; 3],
 }
 
 #[derive(Pod, Zeroable, Copy, Clone)]
@@ -662,6 +827,7 @@ impl App {
                 // value does not perform any culling.
                 rasterization_state: Some(RasterizationState {
                     cull_mode: CullMode::Back,
+                    front_face: FrontFace::Clockwise,
                     ..Default::default()
                 }),
                 // How multiple fragment shader samples are converted to a single pixel value.
@@ -713,13 +879,21 @@ impl App {
         framebuffers
     }
     fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
-        let rotation =
-            Mat4::from_euler_angles(0.0, (start_time.elapsed().as_secs_f32() * 0.5) % 360.0, 0.0);
+        let move_back = Mat4::from_translation(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -5.0,
+        });
+        let rotation = Mat4::from_euler_angles(
+            0.0,
+            (start_time.elapsed().as_secs_f32() * 0.5) % 360.0,
+            (start_time.elapsed().as_secs_f32() * 0.3) % 360.0,
+        );
 
         println!("elapsed time{}", start_time.elapsed().as_millis());
 
         TransformationUBO {
-            model: rotation,
+            model: move_back * rotation,
             view: ultraviolet::Mat4::look_at(
                 Vec3::new(0.0, 0.0, 3.0), // Move camera back slightly
                 Vec3::new(0.0, 0.0, 0.0), // Look at origin
