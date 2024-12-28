@@ -20,7 +20,7 @@ use vulkano::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
     },
-    format::{self, Format},
+    format::Format,
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
@@ -247,7 +247,6 @@ const VERTICES: [Vert; 36] = [
         color: [1.0, 0.35, 0.137],
     },
 ];
-
 const FRAMES_IN_FLIGHT: usize = 3;
 #[derive(Default)]
 pub struct App {
@@ -297,6 +296,12 @@ struct TransformationUBO {
     view: Mat4,
     proj: Mat4,
 }
+#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+#[repr(C)]
+struct AmbientLightUBO {
+    color: [f32; 3],
+    intensity: f32,
+}
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app_context.is_some() {
@@ -324,6 +329,7 @@ impl ApplicationHandler for App {
                 ..Default::default()
             },
         ));
+
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -367,8 +373,14 @@ impl ApplicationHandler for App {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
-        let (uniform_buffers, descriptor_sets) =
+        let (uniform_buffers, ambient_buffer, descriptor_sets) =
             App::create_descriptor_sets(device.clone(), memory_allocator.clone());
+
+        *ambient_buffer.write().unwrap() = AmbientLightUBO {
+            color: [1.0, 1.0, 1.0],
+            intensity: 0.2,
+        };
+
         self.render_context = Some(RenderContext {
             framebuffers,
             swapchain,
@@ -476,10 +488,7 @@ impl ApplicationHandler for App {
                         RenderPassBeginInfo {
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
                             // others should use none as their value
-                            clear_values: vec![
-                                Some([0.0, 0.68, 1.0, 1.0].into()),
-                                Some(1.0.into()),
-                            ],
+                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0.into())],
                             ..RenderPassBeginInfo::framebuffer(
                                 rcx.framebuffers[image_index as usize].clone(),
                             )
@@ -788,15 +797,26 @@ impl App {
             device.clone(),
             PipelineDescriptorSetLayoutCreateInfo {
                 set_layouts: vec![DescriptorSetLayoutCreateInfo {
-                    bindings: [(
-                        0,
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
-                            descriptor_type: UniformBuffer,
-                            descriptor_count: 1,
-                            ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
-                        },
-                    )]
+                    bindings: [
+                        (
+                            0,
+                            DescriptorSetLayoutBinding {
+                                stages: ShaderStages::VERTEX,
+                                descriptor_type: UniformBuffer,
+                                descriptor_count: 1,
+                                ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                            },
+                        ),
+                        (
+                            1,
+                            DescriptorSetLayoutBinding {
+                                stages: ShaderStages::FRAGMENT,
+                                descriptor_type: UniformBuffer,
+                                descriptor_count: 1,
+                                ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                            },
+                        ),
+                    ]
                     .into(),
                     ..Default::default()
                 }],
@@ -907,21 +927,38 @@ impl App {
         memory_allocator: Arc<dyn MemoryAllocator>,
     ) -> (
         Vec<Subbuffer<TransformationUBO>>,
+        Subbuffer<AmbientLightUBO>,
         Vec<Arc<PersistentDescriptorSet>>,
     ) {
         let layout = DescriptorSetLayout::new(
             device.clone(),
             DescriptorSetLayoutCreateInfo {
-                bindings: [(
-                    0, // binding
-                    DescriptorSetLayoutBinding {
-                        stages: ShaderStages::VERTEX,
-                        descriptor_count: 1,
-                        descriptor_type: DescriptorType::UniformBuffer,
+                bindings: [
+                    (
+                        0, // binding
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::VERTEX,
+                            descriptor_count: 1,
+                            descriptor_type: DescriptorType::UniformBuffer,
 
-                        ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-                    },
-                )]
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::UniformBuffer,
+                            )
+                        },
+                    ),
+                    (
+                        1, // binding
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::FRAGMENT,
+                            descriptor_count: 1,
+                            descriptor_type: DescriptorType::UniformBuffer,
+
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::UniformBuffer,
+                            )
+                        },
+                    ),
+                ]
                 .into(),
                 ..Default::default()
             },
@@ -936,6 +973,21 @@ impl App {
         );
         let mut uniform_buffers = vec![];
         let mut descriptor_sets = vec![];
+
+        let ambient_buffer = Buffer::new_sized(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
         for i in 0..FRAMES_IN_FLIGHT {
             uniform_buffers.push(
                 Buffer::new_sized(
@@ -955,12 +1007,15 @@ impl App {
             let descriptor_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
                 layout.clone(),
-                [WriteDescriptorSet::buffer(0, uniform_buffers[i].clone())],
+                [
+                    WriteDescriptorSet::buffer(0, uniform_buffers[i].clone()),
+                    WriteDescriptorSet::buffer(1, ambient_buffer.clone()),
+                ],
                 [],
             )
             .unwrap();
             descriptor_sets.push(descriptor_set);
         }
-        (uniform_buffers, descriptor_sets)
+        (uniform_buffers, ambient_buffer, descriptor_sets)
     }
 }
