@@ -1,8 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Instant};
 use ultraviolet::{projection, Mat4, Vec3};
+use vulkan::{create_device, create_physical_device};
 use vulkano::{
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
         AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
@@ -16,13 +17,9 @@ use vulkano::{
         },
         PersistentDescriptorSet, WriteDescriptorSet,
     },
-    device::{
-        physical::{PhysicalDevice, PhysicalDeviceType},
-        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
-    },
+    device::{Device, DeviceExtensions, Queue},
     format::Format,
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
-    instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
@@ -38,7 +35,7 @@ use vulkano::{
             GraphicsPipelineCreateInfo,
         },
         layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
-        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
     render_pass::{
@@ -51,7 +48,7 @@ use vulkano::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
     sync::{self, AccessFlags, GpuFuture, PipelineStages},
-    Validated, VulkanError, VulkanLibrary,
+    Validated, VulkanError,
 };
 use winit::{
     application::ApplicationHandler,
@@ -59,194 +56,6 @@ use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
-const VERTICES: [Vert; 36] = [
-    // front face
-    Vert {
-        position: [-1.000000, -1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.75, 0.837],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, 1.000000],
-        normal: [0.0000, 0.0000, 1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    // back face
-    Vert {
-        position: [1.000000, -1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, -1.000000],
-        normal: [0.0000, 0.0000, -1.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    // top face
-    Vert {
-        position: [-1.000000, -1.000000, 1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, 1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, -1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, 1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, -1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, -1.000000],
-        normal: [0.0000, -1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    // bottom face
-    Vert {
-        position: [1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, 1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, -1.000000],
-        normal: [0.0000, 1.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    // left face
-    Vert {
-        position: [-1.000000, -1.000000, -1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, -1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, 1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, -1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, 1.000000, 1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [-1.000000, -1.000000, 1.000000],
-        normal: [-1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    // right face
-    Vert {
-        position: [1.000000, -1.000000, 1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, 1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, -1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, 1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, 1.000000, -1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-    Vert {
-        position: [1.000000, -1.000000, -1.000000],
-        normal: [1.0000, 0.0000, 0.0000],
-        color: [1.0, 0.35, 0.137],
-    },
-];
 const FRAMES_IN_FLIGHT: usize = 3;
 #[derive(Default)]
 pub struct App {
@@ -266,7 +75,9 @@ struct AppContext {
 struct RenderContext {
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
-    pipeline: Arc<GraphicsPipeline>,
+    deffered_pipeline: Arc<GraphicsPipeline>,
+    lighting_pipeline: Arc<GraphicsPipeline>,
+
     viewport: Viewport,
 
     recreate_swapchain: bool,
@@ -278,7 +89,7 @@ struct RenderContext {
     descriptor_sets: Vec<Arc<PersistentDescriptorSet>>,
     frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
-#[derive(BufferContents, Vertex)]
+#[derive(vulkano::buffer::BufferContents, Vertex)]
 #[repr(C)]
 struct Vert {
     #[format(R32G32B32_SFLOAT)]
@@ -308,7 +119,8 @@ struct DirectionalLightUBO {
     position: [f32; 3],
     color: [f32; 3],
 }
-
+mod models;
+mod vulkan;
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app_context.is_some() {
@@ -316,7 +128,7 @@ impl ApplicationHandler for App {
             return;
         }
         let start_time = Instant::now();
-        let instance = App::create_instance(event_loop);
+        let instance = vulkan::create_instance(event_loop);
         let window = App::create_window(event_loop);
         let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
         let device_extensions = DeviceExtensions {
@@ -324,9 +136,9 @@ impl ApplicationHandler for App {
             ..DeviceExtensions::empty()
         };
         let (physical_device, queue_family_index) =
-            App::create_physical_device(&instance, &surface, &device_extensions);
+            create_physical_device(&instance, &surface, &device_extensions);
         let (device, queue) =
-            App::create_device(physical_device, queue_family_index, &device_extensions);
+            create_device(physical_device, queue_family_index, &device_extensions);
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -348,7 +160,7 @@ impl ApplicationHandler for App {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            VERTICES,
+            crate::models::VERTICES,
         )
         .unwrap();
 
@@ -359,7 +171,8 @@ impl ApplicationHandler for App {
 
         let framebuffers =
             App::recreate_framebuffers(&images, &render_pass, memory_allocator.clone());
-        let pipeline = App::create_graphics_pipeline(&device, &render_pass);
+        let (lighting_pipeline, deffered_pipeline) =
+            App::create_graphics_pipeline(&device, &render_pass);
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
         let viewport = Viewport {
@@ -397,7 +210,8 @@ impl ApplicationHandler for App {
             swapchain,
             render_pass,
             recreate_swapchain,
-            pipeline,
+            deffered_pipeline,
+            lighting_pipeline,
             viewport,
             current_frame: 0,
             frame_counter: 0,
@@ -581,86 +395,6 @@ impl App {
                 .expect("failed to create window"),
         )
     }
-    fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
-        let library =
-            VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
-        let required_extensions = Surface::required_extensions(event_loop);
-
-        Instance::new(
-            library,
-            InstanceCreateInfo {
-                enabled_extensions: required_extensions,
-                ..Default::default()
-            },
-        )
-        .expect("failed to create instance")
-    }
-    fn create_physical_device(
-        instance: &Arc<Instance>,
-        surface: &Arc<Surface>,
-        required_extensions: &DeviceExtensions,
-    ) -> (Arc<PhysicalDevice>, u32) {
-        instance
-            .enumerate_physical_devices()
-            .unwrap()
-            .filter(|physical_device| {
-                physical_device
-                    .supported_extensions()
-                    .contains(required_extensions)
-            })
-            .filter_map(|physical_device| {
-                physical_device
-                    .queue_family_properties()
-                    .iter() // iterate over all available queues for each device
-                    .enumerate() // returns an iterator of type (physicaldevice, u32)
-                    .position(|(index, queue_family_properties)| {
-                        queue_family_properties
-                            .queue_flags
-                            .intersects(QueueFlags::GRAPHICS)
-                            && physical_device
-                                .surface_support(index as u32, surface)
-                                .unwrap()
-                    })
-                    .map(|index| (physical_device, index as u32))
-            })
-            .min_by_key(
-                |(physical_device, _)| match physical_device.properties().device_type {
-                    PhysicalDeviceType::DiscreteGpu => 0,
-                    PhysicalDeviceType::IntegratedGpu => 1,
-                    PhysicalDeviceType::VirtualGpu => 2,
-                    PhysicalDeviceType::Cpu => 3,
-                    PhysicalDeviceType::Other => 4,
-                    _ => 5,
-                },
-            )
-            .expect("poor ass, u dont have a good gpu")
-    }
-
-    fn create_device(
-        physical_device: Arc<PhysicalDevice>,
-        queue_family_index: u32,
-        required_extensions: &DeviceExtensions,
-    ) -> (Arc<Device>, Arc<Queue>) {
-        let (device, mut queues) = Device::new(
-            physical_device,
-            DeviceCreateInfo {
-                enabled_features: Features {
-                    separate_depth_stencil_layouts: true, // MUST ENABLE THIS
-                    ..Default::default()
-                },
-                enabled_extensions: *required_extensions,
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let queue = queues.next().unwrap();
-        (device, queue)
-    }
     fn create_depth_buffer(
         memory_allocator: Arc<dyn MemoryAllocator>,
         dimensions: [u32; 3],
@@ -837,34 +571,59 @@ impl App {
         )
         .unwrap()
     }
-
     fn create_graphics_pipeline(
         device: &Arc<Device>,
-        render_pass: &Arc<RenderPass>,
-    ) -> Arc<GraphicsPipeline> {
-        mod vertex_shader {
+        deffered_render_pass: &Arc<RenderPass>,
+        lighting_render_pass: &Arc<RenderPass>,
+    ) -> (Arc<GraphicsPipeline>, Arc<GraphicsPipeline>) {
+        mod deferred_vert {
             vulkano_shaders::shader! {
                 ty: "vertex",
-                path: "shaders/vertex.glsl",
+                path: "src/shaders/deferred.vert",
             }
         }
-        mod fragment_shader {
+
+        mod deferred_frag {
             vulkano_shaders::shader! {
                 ty: "fragment",
-                path: "shaders/fragment.glsl",
+                path: "src/shaders/deferred.frag"
             }
         }
-        let vertex_shader = vertex_shader::load(device.clone())
+
+        mod lighting_vert {
+            vulkano_shaders::shader! {
+                ty: "vertex",
+                path: lighting.vert,
+            }
+        }
+
+        mod lighting_frag {
+            vulkano_shaders::shader! {
+                ty: "fragment",
+                path: lighting.frag,
+            }
+        }
+
+        let deferred_vert = deferred_vert::load(device.clone())
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let fragment_shader = fragment_shader::load(device.clone())
+        let deferred_frag = deferred_frag::load(device.clone())
+            .unwrap()
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let vertex_input_state = Vert::per_vertex()
-            .definition(&vertex_shader.info().input_interface)
+        let lighting_vert = lighting_vert::load(device.clone())
+            .unwrap()
+            .unwrap()
+            .entry_point("main")
             .unwrap();
+        let lighting_frag = lighting_frag::load(device.clone())
+            .unwrap()
+            .unwrap()
+            .entry_point("main")
+            .unwrap();
+
         let stages = [
             PipelineShaderStageCreateInfo::new(vertex_shader),
             PipelineShaderStageCreateInfo::new(fragment_shader),
@@ -879,6 +638,9 @@ impl App {
         // in the shaders; they can be used by shaders in other pipelines that share the same
         // layout. Thus, it is a good idea to design shaders so that many pipelines have common
         // resource locations, which allows them to share pipeline layouts.
+
+        let vertex_input_state = Vert::per_vertex().definition(&deferred_vert).unwrap();
+
         let layout = PipelineLayout::new(
             device.clone(),
             PipelineDescriptorSetLayoutCreateInfo {
@@ -924,8 +686,8 @@ impl App {
         .unwrap();
         // We have to indicate which subpass of which render pass this pipeline is going to be
         // used in. The pipeline will only be usable from this particular subpass.
-        let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        GraphicsPipeline::new(
+        let deffered_subpass = Subpass::from(deffered_render_pass.clone(), 0).unwrap();
+        let deffered_pipeline = GraphicsPipeline::new(
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
@@ -952,7 +714,7 @@ impl App {
                 // framebuffer. The default value overwrites the old value with the new one,
                 // without any blending.
                 color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
+                    deffered_subpass.num_color_attachments(),
                     ColorBlendAttachmentState::default(),
                 )),
                 depth_stencil_state: Some(DepthStencilState {
@@ -965,11 +727,58 @@ impl App {
                 // that the viewport should be dynamic.
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
 
-                subpass: Some(subpass.into()),
+                subpass: Some(deffered_subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )
-        .expect("failed to create graphics pipeline")
+        .expect("failed to create graphics pipeline");
+        let lighting_pipeline = GraphicsPipeline::new(
+            device.clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: stages.into_iter().collect(),
+                // How vertex data is read from the vertex buffers into the vertex shader.
+                vertex_input_state: Some(vertex_input_state),
+                // How vertices are arranged into primitive shapes. The default primitive shape
+                // is a triangle.
+                input_assembly_state: Some(InputAssemblyState::default()),
+                // How primitives are transformed and clipped to fit the framebuffer. We use a
+                // resizable viewport, set to draw over the entire window.
+                viewport_state: Some(ViewportState::default()),
+                // How polygons are culled and converted into a raster of pixels. The default
+                // value does not perform any culling.
+                rasterization_state: Some(RasterizationState {
+                    cull_mode: CullMode::Back,
+                    front_face: FrontFace::Clockwise,
+                    ..Default::default()
+                }),
+                // How multiple fragment shader samples are converted to a single pixel value.
+                // The default value does not perform any multisampling.
+                multisample_state: Some(MultisampleState::default()),
+                // How pixel values are combined with the values already present in the
+                // framebuffer. The default value overwrites the old value with the new one,
+                // without any blending.
+                color_blend_state: Some(ColorBlendState::with_attachment_states(
+                    deffered_subpass.num_color_attachments(),
+                    ColorBlendAttachmentState::default(),
+                )),
+                depth_stencil_state: Some(DepthStencilState {
+                    depth: Some(DepthState::simple()),
+                    ..Default::default()
+                }),
+
+                // Dynamic states allows us to specify parts of the pipeline settings when
+                // recording the command buffer, before we perform drawing. Here, we specify
+                // that the viewport should be dynamic.
+                dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+
+                subpass: Some(deffered_subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )
+        .expect("failed to create graphics pipeline");
+
+        (deffered_pipeline, lighting_pipeline)
     }
     fn recreate_framebuffers(
         images: &[Arc<Image>],
