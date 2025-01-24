@@ -18,7 +18,7 @@ use vulkano::{
     },
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
-        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
     },
     format::Format,
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
@@ -44,13 +44,13 @@ use vulkano::{
     render_pass::{
         AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
         Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
-        SubpassDescription,
+        SubpassDependency, SubpassDescription,
     },
     shader::ShaderStages,
     swapchain::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
-    sync::{self, GpuFuture},
+    sync::{self, AccessFlags, GpuFuture, PipelineStages},
     Validated, VulkanError, VulkanLibrary,
 };
 use winit::{
@@ -635,6 +635,7 @@ impl App {
             )
             .expect("poor ass, u dont have a good gpu")
     }
+
     fn create_device(
         physical_device: Arc<PhysicalDevice>,
         queue_family_index: u32,
@@ -643,6 +644,10 @@ impl App {
         let (device, mut queues) = Device::new(
             physical_device,
             DeviceCreateInfo {
+                enabled_features: Features {
+                    separate_depth_stencil_layouts: true, // MUST ENABLE THIS
+                    ..Default::default()
+                },
                 enabled_extensions: *required_extensions,
                 queue_create_infos: vec![QueueCreateInfo {
                     queue_family_index,
@@ -724,45 +729,115 @@ impl App {
             device.clone(),
             RenderPassCreateInfo {
                 attachments: vec![
-                    // Your existing color attachment
+                    // final color attachment
                     AttachmentDescription {
-                        format: image_format,
-                        samples: SampleCount::Sample1,
                         load_op: AttachmentLoadOp::Clear,
                         store_op: AttachmentStoreOp::Store,
+                        format: image_format,
+                        samples: SampleCount::Sample1,
                         initial_layout: ImageLayout::Undefined,
                         final_layout: ImageLayout::PresentSrc,
                         ..Default::default()
                     },
-                    // New depth attachment
+                    // color attachment (gbuffer)
+                    AttachmentDescription {
+                        load_op: AttachmentLoadOp::Clear,
+                        store_op: AttachmentStoreOp::DontCare,
+                        format: Format::A2B10G10R10_UNORM_PACK32,
+                        samples: SampleCount::Sample1,
+                        initial_layout: ImageLayout::Undefined,
+                        final_layout: ImageLayout::ColorAttachmentOptimal,
+                        ..Default::default()
+                    },
+                    // normal attachment (gbuffer)
+                    AttachmentDescription {
+                        load_op: AttachmentLoadOp::Clear,
+                        store_op: AttachmentStoreOp::DontCare,
+                        format: Format::R16G16B16A16_SFLOAT,
+                        samples: SampleCount::Sample1,
+                        initial_layout: ImageLayout::Undefined,
+                        final_layout: ImageLayout::ColorAttachmentOptimal,
+                        ..Default::default()
+                    },
+                    // depth attachment(gbuffer)
                     AttachmentDescription {
                         format: Format::D16_UNORM,
                         samples: SampleCount::Sample1,
                         load_op: AttachmentLoadOp::Clear,
                         store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
                         initial_layout: ImageLayout::Undefined,
-                        final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                        final_layout: ImageLayout::DepthAttachmentOptimal,
                         ..Default::default()
                     },
                 ],
-                subpasses: vec![SubpassDescription {
-                    color_attachments: vec![Some(AttachmentReference {
-                        attachment: 0, // Color attachment
-                        layout: ImageLayout::ColorAttachmentOptimal,
+                subpasses: vec![
+                    // geometry pass
+                    SubpassDescription {
+                        color_attachments: vec![
+                            // gcolor
+                            Some(AttachmentReference {
+                                attachment: 1,
+                                layout: ImageLayout::ColorAttachmentOptimal,
+                                ..Default::default()
+                            }),
+                            // gnormal
+                            Some(AttachmentReference {
+                                attachment: 2,
+                                layout: ImageLayout::ColorAttachmentOptimal,
+                                ..Default::default()
+                            }),
+                        ],
+                        depth_stencil_attachment: Some(AttachmentReference {
+                            attachment: 3,
+                            layout: ImageLayout::DepthAttachmentOptimal,
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    })],
-                    depth_stencil_attachment: Some(AttachmentReference {
-                        attachment: 1, // Depth attachment
-                        layout: ImageLayout::DepthStencilAttachmentOptimal,
+                    },
+                    // lighting/final pass
+                    SubpassDescription {
+                        input_attachments: vec![
+                            // gcolor attachment
+                            Some(AttachmentReference {
+                                attachment: 1,
+                                layout: ImageLayout::ShaderReadOnlyOptimal,
+                                ..Default::default()
+                            }),
+                            // gnormal
+                            Some(AttachmentReference {
+                                attachment: 2,
+                                layout: ImageLayout::ShaderReadOnlyOptimal,
+                                ..Default::default()
+                            }),
+                        ],
+                        color_attachments: vec![Some(AttachmentReference {
+                            attachment: 0, // Color attachment
+                            layout: ImageLayout::ColorAttachmentOptimal,
+                            ..Default::default()
+                        })],
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
+                    },
+                ],
+                dependencies: vec![
+                    // Transition between geometry pass and lighting pass
+                    SubpassDependency {
+                        src_subpass: Some(0),
+                        dst_subpass: Some(1),
+                        src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT
+                            | PipelineStages::EARLY_FRAGMENT_TESTS,
+                        dst_stages: PipelineStages::FRAGMENT_SHADER,
+                        src_access: AccessFlags::COLOR_ATTACHMENT_WRITE
+                            | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
+                        ..Default::default()
+                    },
+                ],
                 ..Default::default()
             },
         )
         .unwrap()
     }
+
     fn create_graphics_pipeline(
         device: &Arc<Device>,
         render_pass: &Arc<RenderPass>,
@@ -884,6 +959,7 @@ impl App {
                     depth: Some(DepthState::simple()),
                     ..Default::default()
                 }),
+
                 // Dynamic states allows us to specify parts of the pipeline settings when
                 // recording the command buffer, before we perform drawing. Here, we specify
                 // that the viewport should be dynamic.
@@ -901,15 +977,59 @@ impl App {
         allocator: Arc<dyn MemoryAllocator>,
     ) -> Vec<Arc<Framebuffer>> {
         let mut framebuffers = vec![];
-        for i in 0..images.len() {
-            let depth_buffer = App::create_depth_buffer(allocator.clone(), images[0].extent());
-            let image_view = ImageView::new_default(images[i].clone()).unwrap();
-            let depth_view = ImageView::new_default(depth_buffer).unwrap();
+        for image in images {
+            let depth_buffer = Image::new(
+                allocator.clone(),
+                ImageCreateInfo {
+                    // Makes the image the same size as our window
+                    extent: image.extent(),
+                    // Tell Vulkan this is for depth information
+                    format: Format::D16_UNORM,
+                    // We want to use this as a depth attachment
+                    usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let gbuffer_color = Image::new(
+                allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::A2B10G10R10_UNORM_PACK32,
+                    extent: image.extent(),
+                    usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap();
+            let gbuffer_normal = Image::new(
+                allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::R16G16B16A16_SFLOAT,
+                    extent: image.extent(),
+                    usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::INPUT_ATTACHMENT,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap();
+
+            let attachments = vec![
+                // Must match render pass attachment order:
+                ImageView::new_default(image.clone()).unwrap(), // 0: Final color
+                ImageView::new_default(gbuffer_color.clone()).unwrap(), // 1: G-Buffer color
+                ImageView::new_default(gbuffer_normal.clone()).unwrap(), // 2: G-Buffer normal
+                ImageView::new_default(depth_buffer.clone()).unwrap(), // 3: Depth
+            ];
             framebuffers.push(
                 Framebuffer::new(
                     render_pass.clone(),
                     FramebufferCreateInfo {
-                        attachments: vec![image_view, depth_view],
+                        attachments,
                         ..Default::default()
                     },
                 )
