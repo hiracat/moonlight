@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use models::VERTICES;
 use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Instant};
 use ultraviolet::{projection, Mat4, Vec3};
 use vulkan::{create_device, create_physical_device};
@@ -7,12 +8,12 @@ use vulkano::{
     command_buffer::{
         allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
         AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
-        SubpassContents,
+        SubpassContents, SubpassEndInfo,
     },
     descriptor_set::{
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
         layout::{
-            DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
+            DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
             DescriptorType::{self, UniformBuffer},
         },
         PersistentDescriptorSet, WriteDescriptorSet,
@@ -30,12 +31,13 @@ use vulkano::{
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::{CullMode, FrontFace, RasterizationState},
+            subpass::PipelineSubpassType,
             vertex_input::{Vertex, VertexDefinition},
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
         },
         layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
-        DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
     render_pass::{
@@ -47,7 +49,7 @@ use vulkano::{
     swapchain::{
         acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
-    sync::{self, AccessFlags, GpuFuture, PipelineStages},
+    sync::{self, AccessFlags, DependencyFlags, GpuFuture, PipelineStages},
     Validated, VulkanError,
 };
 use winit::{
@@ -75,7 +77,7 @@ struct AppContext {
 struct RenderContext {
     swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
-    deffered_pipeline: Arc<GraphicsPipeline>,
+    defered_pipeline: Arc<GraphicsPipeline>,
     lighting_pipeline: Arc<GraphicsPipeline>,
 
     viewport: Viewport,
@@ -86,7 +88,8 @@ struct RenderContext {
 
     framebuffers: Vec<Arc<Framebuffer>>,
     uniform_buffers: Vec<Subbuffer<TransformationUBO>>,
-    descriptor_sets: Vec<Arc<PersistentDescriptorSet>>,
+    defered_sets: Vec<Arc<PersistentDescriptorSet>>,
+    lighting_sets: Vec<Arc<PersistentDescriptorSet>>,
     frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
 #[derive(vulkano::buffer::BufferContents, Vertex)]
@@ -107,18 +110,18 @@ struct TransformationUBO {
     view: Mat4,
     proj: Mat4,
 }
-#[derive(Pod, Zeroable, Copy, Debug, Clone)]
-#[repr(C)]
-struct AmbientLightUBO {
-    color: [f32; 3],
-    intensity: f32,
-}
-#[derive(Pod, Zeroable, Copy, Debug, Clone)]
-#[repr(C)]
-struct DirectionalLightUBO {
-    position: [f32; 3],
-    color: [f32; 3],
-}
+//#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+//#[repr(C)]
+//struct AmbientLightUBO {
+//    color: [f32; 3],
+//    intensity: f32,
+//}
+//#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+//#[repr(C)]
+//struct DirectionalLightUBO {
+//    position: [f32; 3],
+//    color: [f32; 3],
+//}
 mod models;
 mod vulkan;
 impl ApplicationHandler for App {
@@ -168,11 +171,14 @@ impl ApplicationHandler for App {
         let (swapchain, images) = App::create_swapchain(&window, &device, &surface);
 
         let render_pass = App::create_renderpass(&device, swapchain.image_format());
+        let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
+        let lighting_pass = Arc::new(Subpass::from(render_pass.clone(), 1).unwrap());
 
-        let framebuffers =
+        let (framebuffers, color_buffers, normal_buffers) =
             App::recreate_framebuffers(&images, &render_pass, memory_allocator.clone());
-        let (lighting_pipeline, deffered_pipeline) =
-            App::create_graphics_pipeline(&device, &render_pass);
+
+        let (deffered_pipeline, lighting_pipeline) =
+            App::create_graphics_pipeline(&device, &deferred_pass, &lighting_pass);
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
         let viewport = Viewport {
@@ -193,29 +199,27 @@ impl ApplicationHandler for App {
             let windowsize: [f32; 2] = window_size.into();
             windowsize[0] / windowsize[1]
         };
-        let (uniform_buffers, ambient_buffer, directional_buffer, descriptor_sets) =
-            App::create_descriptor_sets(device.clone(), memory_allocator.clone());
-
-        *ambient_buffer.write().unwrap() = AmbientLightUBO {
-            color: [1.0, 1.0, 1.0],
-            intensity: 0.2,
-        };
-        *directional_buffer.write().unwrap() = DirectionalLightUBO {
-            position: [-4.0, -4.0, 0.0],
-            color: [1.0, 1.0, 1.0],
-        };
+        let (uniform_buffers, defered_sets, lighting_sets) = App::create_descriptor_sets(
+            device.clone(),
+            deffered_pipeline.clone(),
+            lighting_pipeline.clone(),
+            memory_allocator.clone(),
+            color_buffers[0].clone(),
+            normal_buffers[0].clone(),
+        );
 
         self.render_context = Some(RenderContext {
             framebuffers,
             swapchain,
             render_pass,
             recreate_swapchain,
-            deffered_pipeline,
+            defered_pipeline: deffered_pipeline,
             lighting_pipeline,
             viewport,
             current_frame: 0,
             frame_counter: 0,
-            descriptor_sets,
+            defered_sets,
+            lighting_sets,
             frames_resources_free,
             uniform_buffers,
         });
@@ -259,6 +263,8 @@ impl ApplicationHandler for App {
                     // write needs to be dropped to free the lock on the uniform buffer
                 }
 
+                let color_buffers: Vec<Arc<ImageView>>;
+                let normal_buffers: Vec<Arc<ImageView>>;
                 if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
                     let (new_swapchain, new_images) = rcx
@@ -273,7 +279,7 @@ impl ApplicationHandler for App {
                     rcx.swapchain = new_swapchain;
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
-                    rcx.framebuffers = App::recreate_framebuffers(
+                    (rcx.framebuffers, normal_buffers, color_buffers) = App::recreate_framebuffers(
                         &new_images,
                         &rcx.render_pass,
                         acx.memory_allocator.clone(),
@@ -313,7 +319,12 @@ impl ApplicationHandler for App {
                         RenderPassBeginInfo {
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
                             // others should use none as their value
-                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into()), Some(1.0.into())],
+                            clear_values: vec![
+                                Some([0.0, 0.0, 0.0, 1.0].into()),
+                                Some([0.0, 0.0, 0.0, 1.0].into()),
+                                Some([0.0, 0.0, 0.0, 1.0].into()),
+                                Some(1.0.into()),
+                            ],
                             ..RenderPassBeginInfo::framebuffer(
                                 rcx.framebuffers[image_index as usize].clone(),
                             )
@@ -328,21 +339,40 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .set_viewport(0, [rcx.viewport.clone()].into_iter().collect())
                     .unwrap()
-                    .bind_pipeline_graphics(rcx.pipeline.clone())
+                    .bind_pipeline_graphics(rcx.defered_pipeline.clone())
                     .unwrap()
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
-                        rcx.pipeline.layout().clone(),
+                        rcx.defered_pipeline.layout().clone(),
                         0,
-                        rcx.descriptor_sets[rcx.current_frame].clone(),
+                        rcx.defered_sets[rcx.current_frame].clone(),
                     )
                     .unwrap()
                     .bind_vertex_buffers(0, acx.vertex_buffer.clone())
-                    .unwrap();
-                builder // not necessary to seperate but good for clear thinking about it
+                    .unwrap()
                     .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
+                    .unwrap()
+                    .next_subpass(
+                        SubpassEndInfo::default(),
+                        SubpassBeginInfo {
+                            contents: SubpassContents::Inline,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .bind_pipeline_graphics(rcx.lighting_pipeline.clone())
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        rcx.lighting_pipeline.layout().clone(),
+                        0,
+                        rcx.lighting_sets[rcx.current_frame].clone(),
+                    )
+                    .unwrap()
+                    .draw(VERTICES.len() as u32, 1, 0, 0)
+                    .unwrap()
+                    .end_render_pass(SubpassEndInfo::default())
                     .unwrap();
-                builder.end_render_pass(Default::default()).unwrap();
 
                 let command_buffer = builder.build().unwrap();
                 let future = rcx.frames_resources_free[rcx.current_frame]
@@ -394,30 +424,6 @@ impl App {
                 .create_window(Window::default_attributes().with_title("moonlight"))
                 .expect("failed to create window"),
         )
-    }
-    fn create_depth_buffer(
-        memory_allocator: Arc<dyn MemoryAllocator>,
-        dimensions: [u32; 3],
-    ) -> Arc<Image> {
-        // First, create the image for the depth buffer
-        let depth_image = Image::new(
-            memory_allocator,
-            ImageCreateInfo {
-                // Makes the image the same size as our window
-                extent: dimensions,
-                // Tell Vulkan this is for depth information
-                format: Format::D16_UNORM,
-                // We want to use this as a depth attachment
-                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        depth_image
     }
     fn create_swapchain(
         window: &Arc<Window>,
@@ -476,7 +482,7 @@ impl App {
                     // color attachment (gbuffer)
                     AttachmentDescription {
                         load_op: AttachmentLoadOp::Clear,
-                        store_op: AttachmentStoreOp::DontCare,
+                        store_op: AttachmentStoreOp::Store,
                         format: Format::A2B10G10R10_UNORM_PACK32,
                         samples: SampleCount::Sample1,
                         initial_layout: ImageLayout::Undefined,
@@ -486,7 +492,7 @@ impl App {
                     // normal attachment (gbuffer)
                     AttachmentDescription {
                         load_op: AttachmentLoadOp::Clear,
-                        store_op: AttachmentStoreOp::DontCare,
+                        store_op: AttachmentStoreOp::Store,
                         format: Format::R16G16B16A16_SFLOAT,
                         samples: SampleCount::Sample1,
                         initial_layout: ImageLayout::Undefined,
@@ -552,20 +558,16 @@ impl App {
                         ..Default::default()
                     },
                 ],
-                dependencies: vec![
-                    // Transition between geometry pass and lighting pass
-                    SubpassDependency {
-                        src_subpass: Some(0),
-                        dst_subpass: Some(1),
-                        src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT
-                            | PipelineStages::EARLY_FRAGMENT_TESTS,
-                        dst_stages: PipelineStages::FRAGMENT_SHADER,
-                        src_access: AccessFlags::COLOR_ATTACHMENT_WRITE
-                            | AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
-                        ..Default::default()
-                    },
-                ],
+                dependencies: vec![SubpassDependency {
+                    src_subpass: Some(0),
+                    dst_subpass: Some(1),
+                    src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT, // Geometry pass writes
+                    dst_stages: PipelineStages::FRAGMENT_SHADER,         // Lighting pass reads
+                    src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,     // Geometry writes to color
+                    dst_access: AccessFlags::INPUT_ATTACHMENT_READ,      // Lighting reads as input
+                    dependency_flags: DependencyFlags::BY_REGION,
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         )
@@ -573,34 +575,31 @@ impl App {
     }
     fn create_graphics_pipeline(
         device: &Arc<Device>,
-        deffered_render_pass: &Arc<RenderPass>,
-        lighting_render_pass: &Arc<RenderPass>,
+        deffered_subpass: &Subpass,
+        lighting_subpass: &Subpass,
     ) -> (Arc<GraphicsPipeline>, Arc<GraphicsPipeline>) {
         mod deferred_vert {
             vulkano_shaders::shader! {
                 ty: "vertex",
-                path: "src/shaders/deferred.vert",
+                path: "src/shaders/defered_vert.glsl",
             }
         }
-
         mod deferred_frag {
             vulkano_shaders::shader! {
                 ty: "fragment",
-                path: "src/shaders/deferred.frag"
+                path: "src/shaders/defered_frag.glsl"
             }
         }
-
         mod lighting_vert {
             vulkano_shaders::shader! {
                 ty: "vertex",
-                path: lighting.vert,
+                path: "src/shaders/lighting_vert.glsl"
             }
         }
-
         mod lighting_frag {
             vulkano_shaders::shader! {
                 ty: "fragment",
-                path: lighting.frag,
+                path: "src/shaders/lighting_frag.glsl"
             }
         }
 
@@ -610,23 +609,28 @@ impl App {
             .unwrap();
         let deferred_frag = deferred_frag::load(device.clone())
             .unwrap()
-            .unwrap()
             .entry_point("main")
             .unwrap();
         let lighting_vert = lighting_vert::load(device.clone())
-            .unwrap()
             .unwrap()
             .entry_point("main")
             .unwrap();
         let lighting_frag = lighting_frag::load(device.clone())
             .unwrap()
-            .unwrap()
             .entry_point("main")
             .unwrap();
 
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vertex_shader),
-            PipelineShaderStageCreateInfo::new(fragment_shader),
+        let vertex_input_state = Vert::per_vertex()
+            .definition(&deferred_vert.info().input_interface)
+            .unwrap();
+
+        let defered_stagse = [
+            PipelineShaderStageCreateInfo::new(deferred_vert),
+            PipelineShaderStageCreateInfo::new(deferred_frag),
+        ];
+        let lighting_stages = [
+            PipelineShaderStageCreateInfo::new(lighting_vert),
+            PipelineShaderStageCreateInfo::new(lighting_frag),
         ];
 
         // We must now create a **pipeline layout** object, which describes the locations and
@@ -639,9 +643,31 @@ impl App {
         // layout. Thus, it is a good idea to design shaders so that many pipelines have common
         // resource locations, which allows them to share pipeline layouts.
 
-        let vertex_input_state = Vert::per_vertex().definition(&deferred_vert).unwrap();
+        let defered_layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo {
+                set_layouts: vec![DescriptorSetLayoutCreateInfo {
+                    bindings: [(
+                        0,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::VERTEX,
+                            descriptor_type: UniformBuffer,
+                            descriptor_count: 1,
+                            ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                }],
+                push_constant_ranges: vec![],
+                flags: PipelineLayoutCreateFlags::empty(),
+            }
+            .into_pipeline_layout_create_info(device.clone())
+            .unwrap(),
+        )
+        .unwrap();
 
-        let layout = PipelineLayout::new(
+        let lighting_layout = PipelineLayout::new(
             device.clone(),
             PipelineDescriptorSetLayoutCreateInfo {
                 set_layouts: vec![DescriptorSetLayoutCreateInfo {
@@ -656,21 +682,25 @@ impl App {
                             },
                         ),
                         (
-                            1,
+                            1, // Binding 1 for color input attachment
                             DescriptorSetLayoutBinding {
                                 stages: ShaderStages::FRAGMENT,
-                                descriptor_type: UniformBuffer,
+                                descriptor_type: DescriptorType::InputAttachment,
                                 descriptor_count: 1,
-                                ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                                ..DescriptorSetLayoutBinding::descriptor_type(
+                                    DescriptorType::InputAttachment,
+                                )
                             },
                         ),
                         (
-                            2,
+                            2, // Binding 2 for normals input attachment
                             DescriptorSetLayoutBinding {
                                 stages: ShaderStages::FRAGMENT,
-                                descriptor_type: UniformBuffer,
+                                descriptor_type: DescriptorType::InputAttachment,
                                 descriptor_count: 1,
-                                ..DescriptorSetLayoutBinding::descriptor_type(UniformBuffer)
+                                ..DescriptorSetLayoutBinding::descriptor_type(
+                                    DescriptorType::InputAttachment,
+                                )
                             },
                         ),
                     ]
@@ -686,14 +716,13 @@ impl App {
         .unwrap();
         // We have to indicate which subpass of which render pass this pipeline is going to be
         // used in. The pipeline will only be usable from this particular subpass.
-        let deffered_subpass = Subpass::from(deffered_render_pass.clone(), 0).unwrap();
-        let deffered_pipeline = GraphicsPipeline::new(
+        let defered_pipeline = GraphicsPipeline::new(
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
-                stages: stages.into_iter().collect(),
+                stages: defered_stagse.into_iter().collect(),
                 // How vertex data is read from the vertex buffers into the vertex shader.
-                vertex_input_state: Some(vertex_input_state),
+                vertex_input_state: Some(vertex_input_state.clone()),
                 // How vertices are arranged into primitive shapes. The default primitive shape
                 // is a triangle.
                 input_assembly_state: Some(InputAssemblyState::default()),
@@ -727,16 +756,19 @@ impl App {
                 // that the viewport should be dynamic.
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
 
-                subpass: Some(deffered_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout)
+                subpass: Some(PipelineSubpassType::BeginRenderPass(
+                    deffered_subpass.clone(),
+                )),
+                ..GraphicsPipelineCreateInfo::layout(defered_layout.clone())
             },
         )
-        .expect("failed to create graphics pipeline");
+        .expect("failed to create defered graphics pipeline");
+
         let lighting_pipeline = GraphicsPipeline::new(
             device.clone(),
             None,
             GraphicsPipelineCreateInfo {
-                stages: stages.into_iter().collect(),
+                stages: lighting_stages.into_iter().collect(),
                 // How vertex data is read from the vertex buffers into the vertex shader.
                 vertex_input_state: Some(vertex_input_state),
                 // How vertices are arranged into primitive shapes. The default primitive shape
@@ -759,33 +791,36 @@ impl App {
                 // framebuffer. The default value overwrites the old value with the new one,
                 // without any blending.
                 color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    deffered_subpass.num_color_attachments(),
+                    lighting_subpass.num_color_attachments(),
                     ColorBlendAttachmentState::default(),
                 )),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState::simple()),
-                    ..Default::default()
-                }),
-
                 // Dynamic states allows us to specify parts of the pipeline settings when
                 // recording the command buffer, before we perform drawing. Here, we specify
                 // that the viewport should be dynamic.
                 dynamic_state: [DynamicState::Viewport].into_iter().collect(),
 
-                subpass: Some(deffered_subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout)
+                subpass: Some(PipelineSubpassType::BeginRenderPass(
+                    lighting_subpass.clone(),
+                )),
+                ..GraphicsPipelineCreateInfo::layout(lighting_layout)
             },
         )
-        .expect("failed to create graphics pipeline");
+        .expect("failed to create lighting graphics pipeline");
 
-        (deffered_pipeline, lighting_pipeline)
+        (defered_pipeline, lighting_pipeline)
     }
     fn recreate_framebuffers(
         images: &[Arc<Image>],
         render_pass: &Arc<RenderPass>,
         allocator: Arc<dyn MemoryAllocator>,
-    ) -> Vec<Arc<Framebuffer>> {
+    ) -> (
+        Vec<Arc<Framebuffer>>,
+        Vec<Arc<ImageView>>,
+        Vec<Arc<ImageView>>,
+    ) {
         let mut framebuffers = vec![];
+        let mut color_buffers = vec![];
+        let mut normal_buffers = vec![];
         for image in images {
             let depth_buffer = Image::new(
                 allocator.clone(),
@@ -827,12 +862,20 @@ impl App {
             )
             .unwrap();
 
+            let final_color_view = ImageView::new_default(image.clone()).unwrap(); // 0: Final color
+            let deffered_color_view = ImageView::new_default(gbuffer_color.clone()).unwrap(); // 1: G-Buffer color
+            let defered_normal_view = ImageView::new_default(gbuffer_normal.clone()).unwrap(); // 2: G-Buffer normal
+            let depth_view = ImageView::new_default(depth_buffer.clone()).unwrap(); // 3: Depth
+
+            color_buffers.push(deffered_color_view.clone());
+            normal_buffers.push(defered_normal_view.clone());
+
             let attachments = vec![
                 // Must match render pass attachment order:
-                ImageView::new_default(image.clone()).unwrap(), // 0: Final color
-                ImageView::new_default(gbuffer_color.clone()).unwrap(), // 1: G-Buffer color
-                ImageView::new_default(gbuffer_normal.clone()).unwrap(), // 2: G-Buffer normal
-                ImageView::new_default(depth_buffer.clone()).unwrap(), // 3: Depth
+                final_color_view,
+                deffered_color_view,
+                defered_normal_view,
+                depth_view,
             ];
             framebuffers.push(
                 Framebuffer::new(
@@ -845,7 +888,7 @@ impl App {
                 .unwrap(),
             );
         }
-        framebuffers
+        (framebuffers, color_buffers, normal_buffers)
     }
     fn calculate_current_transform(start_time: Instant, aspect_ratio: f32) -> TransformationUBO {
         let move_back = Mat4::from_translation(Vec3 {
@@ -873,59 +916,20 @@ impl App {
     }
     fn create_descriptor_sets(
         device: Arc<Device>,
+        deffered_pipeline: Arc<GraphicsPipeline>,
+        lighting_pipeline: Arc<GraphicsPipeline>,
         memory_allocator: Arc<dyn MemoryAllocator>,
+
+        color_buffer: Arc<ImageView>,
+        normal_buffer: Arc<ImageView>,
     ) -> (
         Vec<Subbuffer<TransformationUBO>>,
-        Subbuffer<AmbientLightUBO>,
-        Subbuffer<DirectionalLightUBO>,
+        Vec<Arc<PersistentDescriptorSet>>,
         Vec<Arc<PersistentDescriptorSet>>,
     ) {
-        let layout = DescriptorSetLayout::new(
-            device.clone(),
-            DescriptorSetLayoutCreateInfo {
-                bindings: [
-                    (
-                        0, // binding
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
-                            descriptor_count: 1,
-                            descriptor_type: DescriptorType::UniformBuffer,
+        let defered_layout = deffered_pipeline.layout().set_layouts().get(0).unwrap();
+        let lighting_layout = lighting_pipeline.layout().set_layouts().get(0).unwrap();
 
-                            ..DescriptorSetLayoutBinding::descriptor_type(
-                                DescriptorType::UniformBuffer,
-                            )
-                        },
-                    ),
-                    (
-                        1, // binding
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            descriptor_count: 1,
-                            descriptor_type: DescriptorType::UniformBuffer,
-
-                            ..DescriptorSetLayoutBinding::descriptor_type(
-                                DescriptorType::UniformBuffer,
-                            )
-                        },
-                    ),
-                    (
-                        2, // binding
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            descriptor_count: 1,
-                            descriptor_type: DescriptorType::UniformBuffer,
-
-                            ..DescriptorSetLayoutBinding::descriptor_type(
-                                DescriptorType::UniformBuffer,
-                            )
-                        },
-                    ),
-                ]
-                .into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
         let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
             device.clone(),
             StandardDescriptorSetAllocatorCreateInfo {
@@ -934,69 +938,47 @@ impl App {
             },
         );
         let mut uniform_buffers = vec![];
-        let mut descriptor_sets = vec![];
-
-        let ambient_buffer = Buffer::new_sized(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let directional_buffer = Buffer::new_sized(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut deffered_sets = vec![];
+        let mut lighting_sets = vec![];
 
         for i in 0..FRAMES_IN_FLIGHT {
-            uniform_buffers.push(
-                Buffer::new_sized(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            let uniform_buffer = Buffer::new_sized(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
 
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            );
-            let descriptor_set = PersistentDescriptorSet::new(
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            uniform_buffers.push(uniform_buffer.clone());
+
+            let deffered_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
-                layout.clone(),
+                defered_layout.clone(),
+                [WriteDescriptorSet::buffer(0, uniform_buffers[i].clone())],
+                [],
+            )
+            .unwrap();
+            deffered_sets.push(deffered_set);
+
+            let lighting_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                lighting_layout.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, uniform_buffers[i].clone()),
-                    WriteDescriptorSet::buffer(1, ambient_buffer.clone()),
-                    WriteDescriptorSet::buffer(2, directional_buffer.clone()),
+                    WriteDescriptorSet::buffer(0, uniform_buffer),
+                    WriteDescriptorSet::image_view(1, color_buffer.clone()),
+                    WriteDescriptorSet::image_view(2, normal_buffer.clone()),
                 ],
                 [],
             )
             .unwrap();
-            descriptor_sets.push(descriptor_set);
+            lighting_sets.push(lighting_set);
         }
-        (
-            uniform_buffers,
-            ambient_buffer,
-            directional_buffer,
-            descriptor_sets,
-        )
+        (uniform_buffers, deffered_sets, lighting_sets)
     }
 }
