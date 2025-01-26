@@ -177,7 +177,7 @@ impl ApplicationHandler for App {
         let (framebuffers, color_buffers, normal_buffers) =
             App::recreate_framebuffers(&images, &render_pass, memory_allocator.clone());
 
-        let (deffered_pipeline, lighting_pipeline) =
+        let (defered_pipeline, lighting_pipeline) =
             App::create_graphics_pipeline(&device, &deferred_pass, &lighting_pass);
         // Dynamic viewports allow us to recreate just the viewport when the window is resized.
         // Otherwise we would have to recreate the whole pipeline.
@@ -201,11 +201,11 @@ impl ApplicationHandler for App {
         };
         let (uniform_buffers, defered_sets, lighting_sets) = App::create_descriptor_sets(
             device.clone(),
-            deffered_pipeline.clone(),
+            defered_pipeline.clone(),
             lighting_pipeline.clone(),
             memory_allocator.clone(),
-            color_buffers[0].clone(),
-            normal_buffers[0].clone(),
+            color_buffers.clone(),
+            normal_buffers.clone(),
         );
 
         self.render_context = Some(RenderContext {
@@ -213,7 +213,7 @@ impl ApplicationHandler for App {
             swapchain,
             render_pass,
             recreate_swapchain,
-            defered_pipeline: deffered_pipeline,
+            defered_pipeline,
             lighting_pipeline,
             viewport,
             current_frame: 0,
@@ -279,11 +279,23 @@ impl ApplicationHandler for App {
                     rcx.swapchain = new_swapchain;
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
-                    (rcx.framebuffers, normal_buffers, color_buffers) = App::recreate_framebuffers(
+                    (rcx.framebuffers, color_buffers, normal_buffers) = App::recreate_framebuffers(
                         &new_images,
                         &rcx.render_pass,
                         acx.memory_allocator.clone(),
                     );
+
+                    let (defered_sets, lighting_sets) = App::recreate_descriptor_sets(
+                        &acx.device,
+                        &rcx.defered_pipeline,
+                        &rcx.lighting_pipeline,
+                        &rcx.uniform_buffers,
+                        &color_buffers,
+                        &normal_buffers,
+                    );
+                    rcx.defered_sets = defered_sets;
+                    rcx.lighting_sets = lighting_sets;
+
                     rcx.viewport.extent = window_size.into();
                     acx.aspect_ratio = window_size.width as f32 / window_size.height as f32;
 
@@ -920,8 +932,8 @@ impl App {
         lighting_pipeline: Arc<GraphicsPipeline>,
         memory_allocator: Arc<dyn MemoryAllocator>,
 
-        color_buffer: Arc<ImageView>,
-        normal_buffer: Arc<ImageView>,
+        color_buffer: Vec<Arc<ImageView>>,
+        normal_buffer: Vec<Arc<ImageView>>,
     ) -> (
         Vec<Subbuffer<TransformationUBO>>,
         Vec<Arc<PersistentDescriptorSet>>,
@@ -971,8 +983,8 @@ impl App {
                 lighting_layout.clone(),
                 [
                     WriteDescriptorSet::buffer(0, uniform_buffer),
-                    WriteDescriptorSet::image_view(1, color_buffer.clone()),
-                    WriteDescriptorSet::image_view(2, normal_buffer.clone()),
+                    WriteDescriptorSet::image_view(1, color_buffer[i].clone()),
+                    WriteDescriptorSet::image_view(2, normal_buffer[i].clone()),
                 ],
                 [],
             )
@@ -980,5 +992,56 @@ impl App {
             lighting_sets.push(lighting_set);
         }
         (uniform_buffers, deffered_sets, lighting_sets)
+    }
+    fn recreate_descriptor_sets(
+        device: &Arc<Device>,
+        defered_pipeline: &Arc<GraphicsPipeline>,
+        lighting_pipeline: &Arc<GraphicsPipeline>,
+        uniform_buffers: &[Subbuffer<TransformationUBO>],
+        color_buffers: &[Arc<ImageView>],
+        normal_buffers: &[Arc<ImageView>],
+    ) -> (
+        Vec<Arc<PersistentDescriptorSet>>,
+        Vec<Arc<PersistentDescriptorSet>>,
+    ) {
+        let defered_layout = defered_pipeline.layout().set_layouts().get(0).unwrap();
+        let lighting_layout = lighting_pipeline.layout().set_layouts().get(0).unwrap();
+
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                set_count: FRAMES_IN_FLIGHT as usize,
+                ..Default::default()
+            },
+        );
+
+        let mut defered_sets = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut lighting_sets = Vec::with_capacity(FRAMES_IN_FLIGHT);
+
+        for i in 0..FRAMES_IN_FLIGHT {
+            let defered_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                defered_layout.clone(),
+                [WriteDescriptorSet::buffer(0, uniform_buffers[i].clone())],
+                [],
+            )
+            .unwrap();
+            defered_sets.push(defered_set);
+
+            let lighting_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                lighting_layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, uniform_buffers[i].clone()),
+                    WriteDescriptorSet::image_view(1, color_buffers[i].clone()),
+                    WriteDescriptorSet::image_view(2, normal_buffers[i].clone()),
+                ],
+                [],
+            )
+            .unwrap();
+            lighting_sets.push(lighting_set);
+        }
+
+        (defered_sets, lighting_sets)
     }
 }
