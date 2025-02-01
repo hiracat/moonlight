@@ -51,7 +51,7 @@ pub struct Context {
 
     pub swapchain: Arc<Swapchain>,
     pub render_pass: Arc<RenderPass>,
-    pub defered_pipeline: Arc<GraphicsPipeline>,
+    pub deferred_pipeline: Arc<GraphicsPipeline>,
     pub lighting_pipeline: Arc<GraphicsPipeline>,
 
     pub viewport: Viewport,
@@ -62,7 +62,7 @@ pub struct Context {
     pub normal_buffers: Vec<Arc<ImageView>>,
 
     pub uniform_buffers: Vec<Subbuffer<TransformationUBO>>,
-    pub defered_sets: Vec<Arc<PersistentDescriptorSet>>,
+    pub deferred_sets: Vec<Arc<PersistentDescriptorSet>>,
     pub lighting_sets: Vec<Arc<PersistentDescriptorSet>>,
     pub memory_allocator: Arc<dyn MemoryAllocator>,
 
@@ -128,8 +128,8 @@ impl Context {
             recreate_swapchain: false,
             current_frame: 0,
             frame_counter: 0,
-            defered_pipeline,
-            defered_sets,
+            deferred_pipeline: defered_pipeline,
+            deferred_sets: defered_sets,
             swapchain,
             framebuffers,
             frames_resources_free,
@@ -329,7 +329,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: image_format,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::Undefined,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
                     final_layout: ImageLayout::PresentSrc,
                     ..Default::default()
                 },
@@ -339,8 +339,8 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: Format::A2B10G10R10_UNORM_PACK32,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::Undefined,
-                    final_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
                 // normal attachment (gbuffer)
@@ -349,7 +349,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::Undefined,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
                     final_layout: ImageLayout::ColorAttachmentOptimal,
                     ..Default::default()
                 },
@@ -412,16 +412,20 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     ..Default::default()
                 },
             ],
-            dependencies: vec![SubpassDependency {
-                src_subpass: Some(0),
-                dst_subpass: Some(1),
-                src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT, // Geometry pass writes
-                dst_stages: PipelineStages::FRAGMENT_SHADER,         // Lighting pass reads
-                src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,     // Geometry writes to color
-                dst_access: AccessFlags::INPUT_ATTACHMENT_READ,      // Lighting reads as input
-                dependency_flags: DependencyFlags::BY_REGION,
-                ..Default::default()
-            }],
+            dependencies: vec![
+                // Transition from geometry pass (subpass 0) to lighting pass (subpass 1)
+                SubpassDependency {
+                    src_subpass: Some(0),
+                    dst_subpass: Some(1),
+                    src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT, // Wait for writes to finish
+                    dst_stages: PipelineStages::FRAGMENT_SHADER, // Transition before fragment shader reads
+                    src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
+                    dst_access: AccessFlags::INPUT_ATTACHMENT_READ, // Lighting pass reads
+                    // 👇 Add this to enable layout transitions
+                    dependency_flags: DependencyFlags::BY_REGION, // Allow layout transitions
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         },
     )

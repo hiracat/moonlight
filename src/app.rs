@@ -9,7 +9,7 @@ use vulkano::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
     },
-    instance::{Instance, InstanceCreateInfo},
+    instance::{Instance, InstanceCreateInfo, LayerProperties},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     swapchain::Surface,
     VulkanLibrary,
@@ -100,10 +100,13 @@ fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
         VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
     let required_extensions = Surface::required_extensions(event_loop);
 
+    let validation_layer = "VK_LAYER_KHRONOS_validation";
+
     Instance::new(
         library,
         InstanceCreateInfo {
             enabled_extensions: required_extensions,
+            enabled_layers: vec![validation_layer.to_string()],
             ..Default::default()
         },
     )

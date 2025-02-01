@@ -1,4 +1,4 @@
-use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Instant};
+use std::{f32::consts::FRAC_PI_4, time::Instant};
 use ultraviolet::{projection, Mat4, Vec3};
 use vulkano::{
     command_buffer::{
@@ -63,17 +63,19 @@ impl ApplicationHandler for App {
                     .as_mut()
                     .unwrap()
                     .cleanup_finished();
+                dbg!(rcx.frame_counter);
+                // NOTE: RENDERING START
 
                 if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
-                    let (new_swapchain, new_images) = rcx
+                    let new_images;
+                    (rcx.swapchain, new_images) = rcx
                         .swapchain
                         .recreate(SwapchainCreateInfo {
                             image_extent: window_size.into(),
                             ..rcx.swapchain.create_info()
                         })
                         .expect("failed to create swapchain");
-                    rcx.swapchain = new_swapchain;
                     // Because framebuffers contains a reference to the old swapchain, we need to
                     // recreate framebuffers as well.
                     (rcx.framebuffers, rcx.color_buffers, rcx.normal_buffers) =
@@ -83,16 +85,14 @@ impl ApplicationHandler for App {
                             rcx.memory_allocator.clone(),
                         );
 
-                    let (defered_sets, lighting_sets) = renderer::create_descriptor_sets(
+                    (rcx.deferred_sets, rcx.lighting_sets) = renderer::create_descriptor_sets(
                         &acx.device,
-                        &rcx.defered_pipeline,
+                        &rcx.deferred_pipeline,
                         &rcx.lighting_pipeline,
                         &rcx.uniform_buffers,
                         &rcx.color_buffers,
                         &rcx.normal_buffers,
                     );
-                    rcx.defered_sets = defered_sets;
-                    rcx.lighting_sets = lighting_sets;
 
                     rcx.viewport.extent = window_size.into();
                     acx.aspect_ratio = window_size.width as f32 / window_size.height as f32;
@@ -100,28 +100,25 @@ impl ApplicationHandler for App {
                     rcx.recreate_swapchain = false;
                 }
 
-                {
-                    let mut write = rcx.uniform_buffers[rcx.current_frame].write().unwrap();
-                    *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
-                    // write needs to be dropped to free the lock on the uniform buffer
-                }
+                let mut write = rcx.uniform_buffers[rcx.current_frame].write().unwrap();
+                *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
+                drop(write);
+                // write needs to be dropped to free the lock on the uniform buffer
 
-                let (swapchain_image_index, suboptimal, acquire_future) = match acquire_next_image(
-                    rcx.swapchain.clone(),
-                    None,
-                )
-                .map_err(Validated::unwrap)
-                {
-                    Ok(r) => r,
-                    Err(VulkanError::OutOfDate) => {
-                        rcx.recreate_swapchain = true;
-                        return;
-                    }
-                    Err(e) => panic!("failed to acquire next image: {e}"),
-                };
-                if suboptimal {
+                let (swapchain_image_index, is_suboptimal, acquire_future) =
+                    match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap)
+                    {
+                        Ok(r) => r,
+                        Err(VulkanError::OutOfDate) => {
+                            rcx.recreate_swapchain = true;
+                            return;
+                        }
+                        Err(e) => panic!("failed to acquire next image: {e}"),
+                    };
+                if is_suboptimal {
                     rcx.recreate_swapchain = true;
                 }
+
                 let mut builder = AutoCommandBufferBuilder::primary(
                     &acx.command_buffer_allocator,
                     acx.queue.queue_family_index(),
@@ -136,7 +133,7 @@ impl ApplicationHandler for App {
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
                             // others should use none as their value
                             clear_values: vec![
-                                Some([0.0, 0.0, 0.0, 1.0].into()),
+                                Some([1.0, 0.0, 0.0, 1.0].into()),
                                 Some([0.0, 0.0, 0.0, 1.0].into()),
                                 Some([0.0, 0.0, 0.0, 1.0].into()),
                                 Some(1.0.into()),
@@ -155,13 +152,13 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .set_viewport(0, [rcx.viewport.clone()].into_iter().collect())
                     .unwrap()
-                    .bind_pipeline_graphics(rcx.defered_pipeline.clone())
+                    .bind_pipeline_graphics(rcx.deferred_pipeline.clone())
                     .unwrap()
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
-                        rcx.defered_pipeline.layout().clone(),
+                        rcx.deferred_pipeline.layout().clone(),
                         0,
-                        rcx.defered_sets[rcx.current_frame].clone(),
+                        rcx.deferred_sets[rcx.current_frame].clone(),
                     )
                     .unwrap()
                     .bind_vertex_buffers(0, acx.vertex_buffer.clone())
@@ -185,7 +182,7 @@ impl ApplicationHandler for App {
                         rcx.lighting_sets[rcx.current_frame].clone(),
                     )
                     .unwrap()
-                    .draw(models::VERTICES.len() as u32, 1, 0, 0)
+                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
                     .unwrap()
                     .end_render_pass(SubpassEndInfo::default())
                     .unwrap();
