@@ -64,8 +64,8 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .cleanup_finished();
                 dbg!(rcx.frame_counter);
-                // NOTE: RENDERING START
 
+                // NOTE: RENDERING START
                 if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
                     dbg!(rcx.recreate_swapchain);

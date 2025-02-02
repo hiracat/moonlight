@@ -9,7 +9,10 @@ use vulkano::{
     },
     device::Device,
     format::Format,
-    image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
+    image::{
+        view::ImageView, Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageUsage,
+        SampleCount,
+    },
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
@@ -242,8 +245,8 @@ pub fn create_framebuffers(
     allocator: Arc<dyn MemoryAllocator>,
 ) -> (
     Vec<Arc<Framebuffer>>,
-    Vec<Arc<ImageView>>,
-    Vec<Arc<ImageView>>,
+    Vec<Arc<ImageView>>, // color
+    Vec<Arc<ImageView>>, // normal
 ) {
     let mut framebuffers = vec![];
     let mut color_buffers = vec![];
@@ -320,7 +323,8 @@ pub fn create_framebuffers(
 
     (framebuffers, color_buffers, normal_buffers)
 }
-fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPass> {
+
+fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Arc<RenderPass> {
     RenderPass::new(
         device.clone(),
         RenderPassCreateInfo {
@@ -329,7 +333,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                 AttachmentDescription {
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::Store,
-                    format: image_format,
+                    format: swapchain_image_format,
                     samples: SampleCount::Sample1,
                     initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::PresentSrc,
@@ -341,7 +345,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: Format::A2B10G10R10_UNORM_PACK32,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -351,7 +355,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -360,7 +364,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     format: Format::D16_UNORM,
                     samples: SampleCount::Sample1,
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
+                    store_op: AttachmentStoreOp::Store, // We don't need to keep depth data
                     initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     ..Default::default()
