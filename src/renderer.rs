@@ -44,6 +44,8 @@ use crate::{
     FRAMES_IN_FLIGHT,
 };
 
+//marker
+
 pub struct Context {
     pub recreate_swapchain: bool,
     pub current_frame: usize,
@@ -329,7 +331,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     store_op: AttachmentStoreOp::Store,
                     format: image_format,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::PresentSrc,
                     ..Default::default()
                 },
@@ -350,7 +352,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: SampleCount::Sample1,
                     initial_layout: ImageLayout::ColorAttachmentOptimal,
-                    final_layout: ImageLayout::ColorAttachmentOptimal,
+                    final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
                 // depth attachment(gbuffer)
@@ -360,7 +362,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
                     initial_layout: ImageLayout::Undefined,
-                    final_layout: ImageLayout::DepthAttachmentOptimal,
+                    final_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     ..Default::default()
                 },
             ],
@@ -383,7 +385,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     ],
                     depth_stencil_attachment: Some(AttachmentReference {
                         attachment: 3,
-                        layout: ImageLayout::DepthAttachmentOptimal,
+                        layout: ImageLayout::DepthStencilAttachmentOptimal,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -421,8 +423,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
                     dst_stages: PipelineStages::FRAGMENT_SHADER, // Transition before fragment shader reads
                     src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
                     dst_access: AccessFlags::INPUT_ATTACHMENT_READ, // Lighting pass reads
-                    // 👇 Add this to enable layout transitions
-                    dependency_flags: DependencyFlags::BY_REGION, // Allow layout transitions
+
                     ..Default::default()
                 },
             ],
@@ -433,7 +434,7 @@ fn create_renderpass(device: &Arc<Device>, image_format: Format) -> Arc<RenderPa
 }
 fn create_graphics_pipelines(
     device: &Arc<Device>,
-    defered_subpass: &Subpass,
+    deferred_subpass: &Subpass,
     lighting_subpass: &Subpass,
 ) -> (Arc<GraphicsPipeline>, Arc<GraphicsPipeline>) {
     mod defered_vert {
@@ -482,7 +483,7 @@ fn create_graphics_pipelines(
         .definition(&defered_vert.info().input_interface)
         .unwrap();
 
-    let defered_stagse = [
+    let deferred_stagse = [
         PipelineShaderStageCreateInfo::new(defered_vert),
         PipelineShaderStageCreateInfo::new(defered_frag),
     ];
@@ -576,11 +577,11 @@ fn create_graphics_pipelines(
     .unwrap();
     // We have to indicate which subpass of which render pass this pipeline is going to be
     // used in. The pipeline will only be usable from this particular subpass.
-    let defered_pipeline = GraphicsPipeline::new(
+    let deferred_pipeline = GraphicsPipeline::new(
         device.clone(),
         None,
         GraphicsPipelineCreateInfo {
-            stages: defered_stagse.into_iter().collect(),
+            stages: deferred_stagse.into_iter().collect(),
             // How vertex data is read from the vertex buffers into the vertex shader.
             vertex_input_state: Some(vertex_input_state.clone()),
             // How vertices are arranged into primitive shapes. The default primitive shape
@@ -603,7 +604,7 @@ fn create_graphics_pipelines(
             // framebuffer. The default value overwrites the old value with the new one,
             // without any blending.
             color_blend_state: Some(ColorBlendState::with_attachment_states(
-                defered_subpass.num_color_attachments(),
+                deferred_subpass.num_color_attachments(),
                 ColorBlendAttachmentState::default(),
             )),
             depth_stencil_state: Some(DepthStencilState {
@@ -617,7 +618,7 @@ fn create_graphics_pipelines(
             dynamic_state: [DynamicState::Viewport].into_iter().collect(),
 
             subpass: Some(PipelineSubpassType::BeginRenderPass(
-                defered_subpass.clone(),
+                deferred_subpass.clone(),
             )),
             ..GraphicsPipelineCreateInfo::layout(defered_layout.clone())
         },
@@ -667,5 +668,5 @@ fn create_graphics_pipelines(
     )
     .expect("failed to create lighting graphics pipeline");
 
-    (defered_pipeline, lighting_pipeline)
+    (deferred_pipeline, lighting_pipeline)
 }

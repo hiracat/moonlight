@@ -68,6 +68,7 @@ impl ApplicationHandler for App {
 
                 if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
+                    dbg!(rcx.recreate_swapchain);
                     let new_images;
                     (rcx.swapchain, new_images) = rcx
                         .swapchain
