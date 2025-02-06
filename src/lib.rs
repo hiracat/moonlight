@@ -20,7 +20,7 @@ mod models;
 mod renderer;
 mod resources;
 
-pub const FRAMES_IN_FLIGHT: usize = 3;
+pub const FRAMES_IN_FLIGHT: usize = 2;
 #[derive(Default)]
 pub struct App {
     render_context: Option<renderer::Context>,
@@ -45,6 +45,7 @@ impl ApplicationHandler for App {
         // INFO: RCX = render_context, acx is the app context
         let rcx = self.render_context.as_mut().unwrap();
         let acx = self.app_context.as_mut().unwrap();
+
         match event {
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
@@ -93,6 +94,7 @@ impl ApplicationHandler for App {
                         &rcx.uniform_buffers,
                         &rcx.color_buffers,
                         &rcx.normal_buffers,
+                        new_images.len(),
                     );
 
                     rcx.viewport.extent = window_size.into();
@@ -159,7 +161,7 @@ impl ApplicationHandler for App {
                         PipelineBindPoint::Graphics,
                         rcx.deferred_pipeline.layout().clone(),
                         0,
-                        rcx.deferred_sets[rcx.current_frame].clone(),
+                        rcx.deferred_sets[swapchain_image_index as usize].clone(),
                     )
                     .unwrap()
                     .bind_vertex_buffers(0, acx.vertex_buffer.clone())
@@ -180,7 +182,7 @@ impl ApplicationHandler for App {
                         PipelineBindPoint::Graphics,
                         rcx.lighting_pipeline.layout().clone(),
                         0,
-                        rcx.lighting_sets[rcx.current_frame].clone(),
+                        rcx.lighting_sets[swapchain_image_index as usize].clone(),
                     )
                     .unwrap()
                     .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)

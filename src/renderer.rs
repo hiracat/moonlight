@@ -33,8 +33,8 @@ use vulkano::{
     },
     render_pass::{
         AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
-        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
-        SubpassDependency, SubpassDescription,
+        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateFlags,
+        RenderPassCreateInfo, Subpass, SubpassDependency, SubpassDescription,
     },
     shader::ShaderStages,
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
@@ -77,7 +77,7 @@ pub struct Context {
 impl Context {
     pub fn init(device: &Arc<Device>, window: &Arc<Window>, surface: &Arc<Surface>) -> Self {
         let window_size = window.inner_size();
-        let (swapchain, images) = create_swapchain(&device, &window, &surface);
+        let (swapchain, swapchain_images) = create_swapchain(&device, &window, &surface);
 
         let render_pass = create_renderpass(&device, swapchain.image_format());
         let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
@@ -85,9 +85,9 @@ impl Context {
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let (framebuffers, color_buffers, normal_buffers) =
-            create_framebuffers(&images, &render_pass, memory_allocator.clone());
+            create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
         let mut uniform_buffers: Vec<Subbuffer<TransformationUBO>> = vec![];
-        for _ in 0..FRAMES_IN_FLIGHT {
+        for _ in 0..swapchain_images.len() {
             uniform_buffers.push(
                 Buffer::new_sized(
                     memory_allocator.clone(),
@@ -128,6 +128,7 @@ impl Context {
             &uniform_buffers,
             &color_buffers,
             &normal_buffers,
+            swapchain_images.len(),
         );
         Context {
             recreate_swapchain: false,
@@ -197,6 +198,7 @@ pub fn create_descriptor_sets(
     uniform_buffers: &[Subbuffer<TransformationUBO>],
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
+    swapchain_image_count: usize,
 ) -> (
     Vec<Arc<PersistentDescriptorSet>>, // deferred
     Vec<Arc<PersistentDescriptorSet>>, // lighting
@@ -207,14 +209,14 @@ pub fn create_descriptor_sets(
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
         device.clone(),
         StandardDescriptorSetAllocatorCreateInfo {
-            set_count: 2 * FRAMES_IN_FLIGHT as usize,
+            set_count: 2 * swapchain_image_count,
             ..Default::default()
         },
     );
     let mut deferred_sets = vec![];
     let mut lighting_sets = vec![];
 
-    for i in 0..FRAMES_IN_FLIGHT {
+    for i in 0..swapchain_image_count {
         let deferred_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
             deferred_layout.clone(),
@@ -345,7 +347,7 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     store_op: AttachmentStoreOp::Store,
                     format: Format::A2B10G10R10_UNORM_PACK32,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::Undefined,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -355,7 +357,7 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     store_op: AttachmentStoreOp::Store,
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::Undefined,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -365,7 +367,7 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     samples: SampleCount::Sample1,
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::Store, // We don't need to keep depth data
-                    initial_layout: ImageLayout::Undefined,
+                    initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     final_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     ..Default::default()
                 },
@@ -424,10 +426,9 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     src_subpass: Some(0),
                     dst_subpass: Some(1),
                     src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT, // Wait for writes to finish
-                    dst_stages: PipelineStages::FRAGMENT_SHADER, // Transition before fragment shader reads
-                    src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
+                    dst_stages: PipelineStages::FRAGMENT_SHADER, // Transition before fragment shader reads src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
                     dst_access: AccessFlags::INPUT_ATTACHMENT_READ, // Lighting pass reads
-
+                    dependency_flags: DependencyFlags::BY_REGION,
                     ..Default::default()
                 },
             ],
@@ -597,7 +598,7 @@ fn create_graphics_pipelines(
             // How polygons are culled and converted into a raster of pixels. The default
             // value does not perform any culling.
             rasterization_state: Some(RasterizationState {
-                cull_mode: CullMode::Back,
+                cull_mode: CullMode::None,
                 front_face: FrontFace::Clockwise,
                 ..Default::default()
             }),
