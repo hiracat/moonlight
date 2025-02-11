@@ -580,6 +580,8 @@ fn create_graphics_pipelines(
         .unwrap(),
     )
     .unwrap();
+    let cull_mode = CullMode::Back;
+    let front_face = FrontFace::Clockwise;
     // We have to indicate which subpass of which render pass this pipeline is going to be
     // used in. The pipeline will only be usable from this particular subpass.
     let deferred_pipeline = GraphicsPipeline::new(
@@ -598,8 +600,8 @@ fn create_graphics_pipelines(
             // How polygons are culled and converted into a raster of pixels. The default
             // value does not perform any culling.
             rasterization_state: Some(RasterizationState {
-                cull_mode: CullMode::None,
-                front_face: FrontFace::Clockwise,
+                cull_mode,
+                front_face,
                 ..Default::default()
             }),
             // How multiple fragment shader samples are converted to a single pixel value.
@@ -647,8 +649,8 @@ fn create_graphics_pipelines(
             // How polygons are culled and converted into a raster of pixels. The default
             // value does not perform any culling.
             rasterization_state: Some(RasterizationState {
-                cull_mode: CullMode::Back,
-                front_face: FrontFace::Clockwise,
+                cull_mode,
+                front_face,
                 ..Default::default()
             }),
             // How multiple fragment shader samples are converted to a single pixel value.
