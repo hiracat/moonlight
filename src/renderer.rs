@@ -255,7 +255,7 @@ pub fn create_framebuffers(
     let mut normal_buffers = vec![];
     let extent = swapchain_images[0].extent();
     for swapchain_image in swapchain_images {
-        let depth_buffer = Image::new(
+        let depth_image = Image::new(
             allocator.clone(),
             ImageCreateInfo {
                 // Makes the image the same size as our window
@@ -298,7 +298,7 @@ pub fn create_framebuffers(
         let final_color_view = ImageView::new_default(swapchain_image.clone()).unwrap(); // 0: Final color
         let color_view = ImageView::new_default(color_image.clone()).unwrap(); // 1: G-Buffer color
         let normal_view = ImageView::new_default(normal_image.clone()).unwrap(); // 2: G-Buffer normal
-        let depth_view = ImageView::new_default(depth_buffer.clone()).unwrap(); // 3: Depth
+        let depth_view = ImageView::new_default(depth_image.clone()).unwrap(); // 3: Depth
 
         color_buffers.push(color_view.clone());
         normal_buffers.push(normal_view.clone());
@@ -366,7 +366,7 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     format: Format::D16_UNORM,
                     samples: SampleCount::Sample1,
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::Store, // We don't need to keep depth data
+                    store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
                     initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     final_layout: ImageLayout::DepthStencilAttachmentOptimal,
                     ..Default::default()
@@ -614,6 +614,7 @@ fn create_graphics_pipelines(
             )),
             depth_stencil_state: Some(DepthStencilState {
                 depth: Some(DepthState::simple()),
+                stencil: None,
                 ..Default::default()
             }),
 

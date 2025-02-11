@@ -103,9 +103,8 @@ impl ApplicationHandler for App {
                     rcx.recreate_swapchain = false;
                 }
 
-                let mut write = rcx.uniform_buffers[rcx.current_frame].write().unwrap();
-                *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
-                drop(write);
+                dbg!(rcx.current_frame);
+
                 // write needs to be dropped to free the lock on the uniform buffer
 
                 let (swapchain_image_index, is_suboptimal, acquire_future) =
@@ -121,6 +120,15 @@ impl ApplicationHandler for App {
                 if is_suboptimal {
                     rcx.recreate_swapchain = true;
                 }
+
+                let mut write = rcx.uniform_buffers[swapchain_image_index as usize]
+                    .write()
+                    .unwrap();
+                *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
+                drop(write);
+
+                dbg!(is_suboptimal);
+                dbg!(swapchain_image_index);
 
                 let mut builder = AutoCommandBufferBuilder::primary(
                     &acx.command_buffer_allocator,
