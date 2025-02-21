@@ -87,15 +87,19 @@ impl ApplicationHandler for App {
                             rcx.memory_allocator.clone(),
                         );
 
-                    (rcx.deferred_sets, rcx.lighting_sets) = renderer::create_descriptor_sets(
-                        &acx.device,
-                        &rcx.deferred_pipeline,
-                        &rcx.lighting_pipeline,
-                        &rcx.uniform_buffers,
-                        &rcx.color_buffers,
-                        &rcx.normal_buffers,
-                        new_images.len(),
-                    );
+                    (rcx.deferred_sets, rcx.directional_sets, rcx.ambient_sets) =
+                        renderer::create_descriptor_sets(
+                            &acx.device,
+                            &rcx.deferred_pipeline,
+                            &rcx.directional_pipeline,
+                            &rcx.ambient_pipeline,
+                            &rcx.transform_buffers,
+                            &rcx.ambient_buffers,
+                            &rcx.directional_buffers,
+                            &rcx.color_buffers,
+                            &rcx.normal_buffers,
+                            new_images.len(),
+                        );
 
                     rcx.viewport.extent = window_size.into();
                     acx.aspect_ratio = window_size.width as f32 / window_size.height as f32;
@@ -121,7 +125,7 @@ impl ApplicationHandler for App {
                     rcx.recreate_swapchain = true;
                 }
 
-                let mut write = rcx.uniform_buffers[swapchain_image_index as usize]
+                let mut write = rcx.transform_buffers[swapchain_image_index as usize]
                     .write()
                     .unwrap();
                 *write = App::calculate_current_transform(acx.start_time, acx.aspect_ratio);
@@ -144,7 +148,7 @@ impl ApplicationHandler for App {
                             // Only attachments that have `AttachmentLoadOp::Clear` are provided
                             // others should use none as their value
                             clear_values: vec![
-                                Some([1.0, 0.0, 0.0, 1.0].into()),
+                                Some([0.1, 0.1, 0.1, 1.0].into()),
                                 Some([0.0, 0.0, 0.0, 1.0].into()),
                                 Some([0.0, 0.0, 0.0, 1.0].into()),
                                 Some(1.0.into()),
@@ -184,13 +188,24 @@ impl ApplicationHandler for App {
                         },
                     )
                     .unwrap()
-                    .bind_pipeline_graphics(rcx.lighting_pipeline.clone())
+                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
                     .unwrap()
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
-                        rcx.lighting_pipeline.layout().clone(),
+                        rcx.directional_pipeline.layout().clone(),
                         0,
-                        rcx.lighting_sets[swapchain_image_index as usize].clone(),
+                        rcx.directional_sets[swapchain_image_index as usize].clone(),
+                    )
+                    .unwrap()
+                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
+                    .unwrap()
+                    .bind_pipeline_graphics(rcx.ambient_pipeline.clone())
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        rcx.ambient_pipeline.layout().clone(),
+                        0,
+                        rcx.ambient_sets[swapchain_image_index as usize].clone(),
                     )
                     .unwrap()
                     .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)

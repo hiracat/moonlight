@@ -18,15 +18,16 @@ pub struct TransformationUBO {
     pub view: ultraviolet::Mat4,
     pub proj: ultraviolet::Mat4,
 }
-//#[derive(Pod, Zeroable, Copy, Debug, Clone)]
-//#[repr(C)]
-//struct AmbientLightUBO {
-//    color: [f32; 3],
-//    intensity: f32,
-//}
-//#[derive(Pod, Zeroable, Copy, Debug, Clone)]
-//#[repr(C)]
-//struct DirectionalLightUBO {
-//    position: [f32; 3],
-//    color: [f32; 3],
-//}
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+pub struct AmbientLightUBO {
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+pub struct DirectionalLightUBO {
+    pub position: [f32; 4],
+    pub color: [f32; 3],
+}
