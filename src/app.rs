@@ -1,5 +1,6 @@
-use std::{sync::Arc, time::Instant};
+use std::{fs::File, io::BufReader, sync::Arc, time::Instant};
 
+use obj::{load_obj, FromRawVertex, Obj};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::allocator::{
@@ -16,7 +17,10 @@ use vulkano::{
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
-use crate::{models, resources, FRAMES_IN_FLIGHT};
+use crate::{
+    resources::{self, Vertex},
+    FRAMES_IN_FLIGHT,
+};
 
 pub struct Context {
     pub window: Arc<Window>,
@@ -26,6 +30,7 @@ pub struct Context {
     pub queue: Arc<Queue>,
     pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     pub vertex_buffer: Subbuffer<[resources::Vertex]>,
+    pub index_buffer: Subbuffer<[u32]>,
     pub start_time: Instant,
 }
 
@@ -53,6 +58,58 @@ impl Context {
             },
         ));
 
+        let input = BufReader::new(File::open("data/models/stressball.obj").unwrap());
+        let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+
+        let vertices: Vec<resources::Vertex> = model
+            .vertices
+            .iter()
+            .map(|v| resources::Vertex {
+                position: v.position,
+                normal: v.normal,
+                color: [1.0, 1.0, 1.0], // map other fields as needed
+            })
+            .collect();
+
+        let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
+
+        //let vertices = [
+        //    Vertex {
+        //        position: [-0.5, 0.5, -0.5],
+        //        color: [0.0, 0.0, 0.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //    Vertex {
+        //        position: [0.5, 0.5, -0.5],
+        //        color: [0.0, 0.0, 0.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //    Vertex {
+        //        position: [0.0, -0.5, -0.5],
+        //        color: [0.0, 0.0, 0.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //    Vertex {
+        //        position: [-0.5, -0.5, -0.6],
+        //        color: [1.0, 1.0, 1.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //    Vertex {
+        //        position: [0.5, -0.5, -0.6],
+        //        color: [1.0, 1.0, 1.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //    Vertex {
+        //        position: [0.0, 0.5, -0.6],
+        //        color: [1.0, 1.0, 1.0],
+        //        normal: [0.0, 0.0, 0.0],
+        //    },
+        //];
+        //let indices: [u32; 6] = [
+        //    0, 1, 2, // first triangle
+        //    3, 4, 5, // second triangle
+        //];
+
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -64,7 +121,22 @@ impl Context {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            models::VERTICES,
+            vertices,
+        )
+        .unwrap();
+
+        let index_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            indices,
         )
         .unwrap();
 
@@ -80,6 +152,7 @@ impl Context {
             device,
             vertex_buffer,
             queue,
+            index_buffer,
             start_time,
             window: window.clone(),
             aspect_ratio,

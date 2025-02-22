@@ -1,11 +1,14 @@
-use std::{f32::consts::FRAC_PI_4, time::Instant};
+use std::{
+    f32::consts::FRAC_PI_4,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 use ultraviolet::{projection, Mat4, Vec3};
 use vulkano::{
     command_buffer::{
         AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
         SubpassContents, SubpassEndInfo,
     },
-    descriptor_set::PersistentDescriptorSet,
     pipeline::{Pipeline, PipelineBindPoint},
     swapchain::{acquire_next_image, SwapchainCreateInfo, SwapchainPresentInfo},
     sync::{self, GpuFuture},
@@ -17,7 +20,6 @@ use winit::{
 };
 
 mod app;
-mod models;
 mod renderer;
 mod resources;
 
@@ -54,6 +56,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => rcx.recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
+                sleep(Duration::from_secs(1));
                 println!("frame start");
                 acx.window.request_redraw();
                 let window_size = acx.window.inner_size();
@@ -185,7 +188,9 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .bind_vertex_buffers(0, acx.vertex_buffer.clone())
                     .unwrap()
-                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
+                    .bind_index_buffer(acx.index_buffer.clone())
+                    .unwrap()
+                    .draw_indexed(acx.index_buffer.len() as u32, 1, 0, 0, 0)
                     .unwrap()
                     .next_subpass(
                         SubpassEndInfo::default(),
@@ -194,40 +199,24 @@ impl ApplicationHandler for App {
                             ..Default::default()
                         },
                     )
-                    .unwrap()
-                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        rcx.directional_pipeline.layout().clone(),
-                        0,
-                        rcx.directional_sets[swapchain_image_index as usize][0].clone(),
-                    )
-                    .unwrap()
-                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
-                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        rcx.directional_pipeline.layout().clone(),
-                        0,
-                        rcx.directional_sets[swapchain_image_index as usize][1].clone(),
-                    )
-                    .unwrap()
-                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
-                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
-                    .unwrap()
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        rcx.directional_pipeline.layout().clone(),
-                        0,
-                        rcx.directional_sets[swapchain_image_index as usize][2].clone(),
-                    )
-                    .unwrap()
-                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
+                    .unwrap();
+
+                for i in 0..rcx.directional_sets[swapchain_image_index as usize].len() {
+                    builder
+                        .bind_pipeline_graphics(rcx.directional_pipeline.clone())
+                        .unwrap()
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            rcx.directional_pipeline.layout().clone(),
+                            0,
+                            rcx.directional_sets[swapchain_image_index as usize][i].clone(),
+                        )
+                        .unwrap()
+                        .draw_indexed(acx.index_buffer.len() as u32, 1, 0, 0, 0)
+                        .unwrap();
+                }
+
+                builder
                     .bind_pipeline_graphics(rcx.ambient_pipeline.clone())
                     .unwrap()
                     .bind_descriptor_sets(
@@ -237,10 +226,10 @@ impl ApplicationHandler for App {
                         rcx.ambient_sets[swapchain_image_index as usize].clone(),
                     )
                     .unwrap()
-                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
-                    .end_render_pass(SubpassEndInfo::default())
+                    .draw_indexed(acx.index_buffer.len() as u32, 1, 0, 0, 0)
                     .unwrap();
+
+                builder.end_render_pass(SubpassEndInfo::default()).unwrap();
 
                 let command_buffer = builder.build().unwrap();
                 let future = rcx.frames_resources_free[rcx.current_frame]
@@ -290,25 +279,21 @@ impl App {
         start_time: Instant,
         aspect_ratio: f32,
     ) -> resources::TransformationUBO {
-        let move_back = Mat4::from_translation(Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: -5.0,
-        });
         let rotation = Mat4::from_euler_angles(
             0.0,
-            (start_time.elapsed().as_secs_f32() * 0.5) % 360.0,
+            // (start_time.elapsed().as_secs_f32() * 0.5) % 360.0,
+            0.0,
             (start_time.elapsed().as_secs_f32() * 0.3) % 360.0,
         );
 
         resources::TransformationUBO {
-            model: move_back * rotation,
+            model: rotation,
             view: ultraviolet::Mat4::look_at(
                 Vec3::new(0.0, 0.0, 3.0), // Move camera back slightly
                 Vec3::new(0.0, 0.0, 0.0), // Look at origin
                 Vec3::new(0.0, 1.0, 0.0), // Up vector
             ),
-            proj: projection::perspective_vk(FRAC_PI_4, aspect_ratio, 0.001, 100.0),
+            proj: projection::perspective_vk(FRAC_PI_4, aspect_ratio, 0.1, 5.0),
         }
     }
 }

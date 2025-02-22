@@ -127,7 +127,7 @@ impl Context {
                     },
                     AmbientLightUBO {
                         color: [1.0, 1.0, 1.0],
-                        intensity: 0.2,
+                        intensity: 0.1,
                     },
                 )
                 .unwrap(),
@@ -147,7 +147,7 @@ impl Context {
                         ..Default::default()
                     },
                     DirectionalLightUBO {
-                        position: [-4.0, 0.0, -4.0, 1.0],
+                        position: [-4.0, 0.0, 4.0, 1.0],
                         color: [1.0, 0.0, 0.0],
                     },
                 )
@@ -334,7 +334,7 @@ pub fn create_descriptor_sets(
         deferred_sets.push(deferred_set);
 
         let mut directional_subset = vec![];
-        for j in 0..3 {
+        for j in 0..directional_buffers[0].len() {
             let directional_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
                 directional_layout.clone(),
@@ -391,18 +391,12 @@ pub fn create_framebuffers(
         let depth_image = Image::new(
             allocator.clone(),
             ImageCreateInfo {
-                // Makes the image the same size as our window
                 extent,
-                // Tell Vulkan this is for depth information
-                format: Format::D16_UNORM,
-                // We want to use this as a depth attachment
+                format: Format::D32_SFLOAT,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                 ..Default::default()
             },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                ..Default::default()
-            },
+            AllocationCreateInfo::default(),
         )
         .unwrap();
         let color_image = Image::new(
@@ -436,19 +430,11 @@ pub fn create_framebuffers(
         color_buffers.push(color_view.clone());
         normal_buffers.push(normal_view.clone());
 
-        let attachments = vec![
-            // Must match render pass attachment order:
-            final_color_view,
-            color_view,
-            normal_view,
-            depth_view,
-        ];
-
         framebuffers.push(
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments,
+                    attachments: vec![final_color_view, color_view, normal_view, depth_view],
                     ..Default::default()
                 },
             )
@@ -496,12 +482,12 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                 },
                 // depth attachment(gbuffer)
                 AttachmentDescription {
-                    format: Format::D16_UNORM,
+                    format: Format::D32_SFLOAT,
                     samples: SampleCount::Sample1,
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::DontCare, // We don't need to keep depth data
-                    initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
-                    final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                    store_op: AttachmentStoreOp::Store,
+                    initial_layout: ImageLayout::DepthAttachmentOptimal,
+                    final_layout: ImageLayout::DepthAttachmentOptimal,
                     ..Default::default()
                 },
             ],
@@ -524,7 +510,7 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     ],
                     depth_stencil_attachment: Some(AttachmentReference {
                         attachment: 3,
-                        layout: ImageLayout::DepthStencilAttachmentOptimal,
+                        layout: ImageLayout::DepthAttachmentOptimal,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -814,7 +800,7 @@ fn create_graphics_pipelines(
     )
     .unwrap();
 
-    let cull_mode = CullMode::Back;
+    let cull_mode = CullMode::None;
     let front_face = FrontFace::Clockwise;
     // We have to indicate which subpass of which render pass this pipeline is going to be
     // used in. The pipeline will only be usable from this particular subpass.
@@ -853,6 +839,7 @@ fn create_graphics_pipelines(
                 stencil: None,
                 ..Default::default()
             }),
+
             // Dynamic states allows us to specify parts of the pipeline settings when
             // recording the command buffer, before we perform drawing. Here, we specify
             // that the viewport should be dynamic.
