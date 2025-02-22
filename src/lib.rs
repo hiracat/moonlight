@@ -5,6 +5,7 @@ use vulkano::{
         AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
         SubpassContents, SubpassEndInfo,
     },
+    descriptor_set::PersistentDescriptorSet,
     pipeline::{Pipeline, PipelineBindPoint},
     swapchain::{acquire_next_image, SwapchainCreateInfo, SwapchainPresentInfo},
     sync::{self, GpuFuture},
@@ -141,6 +142,12 @@ impl ApplicationHandler for App {
                 )
                 .unwrap();
 
+                println!(
+                    "direction sets top length:{}\ninner length:{}",
+                    rcx.directional_sets.len(),
+                    rcx.directional_sets[0].len()
+                );
+
                 // Before we can draw, we have to *enter a render pass*.
                 builder
                     .begin_render_pass(
@@ -194,7 +201,29 @@ impl ApplicationHandler for App {
                         PipelineBindPoint::Graphics,
                         rcx.directional_pipeline.layout().clone(),
                         0,
-                        rcx.directional_sets[swapchain_image_index as usize].clone(),
+                        rcx.directional_sets[swapchain_image_index as usize][0].clone(),
+                    )
+                    .unwrap()
+                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
+                    .unwrap()
+                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        rcx.directional_pipeline.layout().clone(),
+                        0,
+                        rcx.directional_sets[swapchain_image_index as usize][1].clone(),
+                    )
+                    .unwrap()
+                    .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)
+                    .unwrap()
+                    .bind_pipeline_graphics(rcx.directional_pipeline.clone())
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        rcx.directional_pipeline.layout().clone(),
+                        0,
+                        rcx.directional_sets[swapchain_image_index as usize][2].clone(),
                     )
                     .unwrap()
                     .draw(acx.vertex_buffer.len() as u32, 1, 0, 0)

@@ -69,10 +69,10 @@ pub struct Context {
 
     pub transform_buffers: Vec<Subbuffer<TransformationUBO>>,
     pub ambient_buffers: Vec<Subbuffer<AmbientLightUBO>>,
-    pub directional_buffers: Vec<Subbuffer<DirectionalLightUBO>>,
+    pub directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>>,
 
     pub deferred_sets: Vec<Arc<PersistentDescriptorSet>>,
-    pub directional_sets: Vec<Arc<PersistentDescriptorSet>>,
+    pub directional_sets: Vec<Vec<Arc<PersistentDescriptorSet>>>,
     pub ambient_sets: Vec<Arc<PersistentDescriptorSet>>,
 
     pub memory_allocator: Arc<dyn MemoryAllocator>,
@@ -94,7 +94,7 @@ impl Context {
             create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
         let mut transform_buffers: Vec<Subbuffer<TransformationUBO>> = vec![];
         let mut ambient_buffers: Vec<Subbuffer<AmbientLightUBO>> = vec![];
-        let mut directional_buffers: Vec<Subbuffer<DirectionalLightUBO>> = vec![];
+        let mut directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>> = vec![];
 
         for _ in 0..swapchain_images.len() {
             transform_buffers.push(
@@ -126,7 +126,7 @@ impl Context {
                         ..Default::default()
                     },
                     AmbientLightUBO {
-                        color: [0.0, 1.0, 1.0],
+                        color: [1.0, 1.0, 1.0],
                         intensity: 0.2,
                     },
                 )
@@ -135,7 +135,39 @@ impl Context {
         }
 
         for _ in 0..swapchain_images.len() {
-            directional_buffers.push(
+            directional_buffers.push(vec![
+                Buffer::from_data(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    DirectionalLightUBO {
+                        position: [-4.0, 0.0, -4.0, 1.0],
+                        color: [1.0, 0.0, 0.0],
+                    },
+                )
+                .unwrap(),
+                Buffer::from_data(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    DirectionalLightUBO {
+                        position: [0.0, -4.0, 1.0, 1.0],
+                        color: [0.0, 1.0, 0.0],
+                    },
+                )
+                .unwrap(),
                 Buffer::from_data(
                     memory_allocator.clone(),
                     BufferCreateInfo {
@@ -148,11 +180,11 @@ impl Context {
                     },
                     DirectionalLightUBO {
                         position: [4.0, -2.0, 1.0, 1.0],
-                        color: [1.0, 1.0, 1.0],
+                        color: [0.0, 0.0, 1.0],
                     },
                 )
                 .unwrap(),
-            );
+            ])
         }
 
         let (deferred_pipeline, directional_pipeline, ambient_pipeline) =
@@ -184,6 +216,12 @@ impl Context {
             &normal_buffers,
             swapchain_images.len(),
         );
+        println!(
+            "##########init directional sets len:{}\ninner length:{}",
+            directional_sets.len(),
+            directional_sets[0].len()
+        );
+
         Context {
             recreate_swapchain: false,
             current_frame: 0,
@@ -260,14 +298,14 @@ pub fn create_descriptor_sets(
 
     transform_buffers: &[Subbuffer<TransformationUBO>],
     ambient_buffers: &[Subbuffer<AmbientLightUBO>],
-    directional_buffers: &[Subbuffer<DirectionalLightUBO>],
+    directional_buffers: &[Vec<Subbuffer<DirectionalLightUBO>>],
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
     swapchain_image_count: usize,
 ) -> (
-    Vec<Arc<PersistentDescriptorSet>>, // deferred
-    Vec<Arc<PersistentDescriptorSet>>, // directional
-    Vec<Arc<PersistentDescriptorSet>>, // ambient
+    Vec<Arc<PersistentDescriptorSet>>,      // deferred
+    Vec<Vec<Arc<PersistentDescriptorSet>>>, // directional
+    Vec<Arc<PersistentDescriptorSet>>,      // ambient
 ) {
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
         device.clone(),
@@ -295,19 +333,25 @@ pub fn create_descriptor_sets(
         .unwrap();
         deferred_sets.push(deferred_set);
 
-        let directional_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            directional_layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, transform_buffers[i].clone()),
-                WriteDescriptorSet::image_view(1, color_buffer[i].clone()),
-                WriteDescriptorSet::image_view(2, normal_buffer[i].clone()),
-                WriteDescriptorSet::buffer(3, directional_buffers[i].clone()),
-            ],
-            [],
-        )
-        .unwrap();
-        directional_sets.push(directional_set);
+        let mut directional_subset = vec![];
+        for j in 0..3 {
+            let directional_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                directional_layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, transform_buffers[i].clone()),
+                    WriteDescriptorSet::image_view(1, color_buffer[i].clone()),
+                    WriteDescriptorSet::image_view(2, normal_buffer[i].clone()),
+                    WriteDescriptorSet::buffer(3, directional_buffers[i][j].clone()),
+                ],
+                [],
+            )
+            .unwrap();
+            directional_subset.push(directional_set);
+            println!("directional_subsetslength:{}", directional_subset.len());
+        }
+        directional_sets.push(directional_subset);
+        println!("directional_sets length:{}", directional_sets.len());
 
         let ambient_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
@@ -323,6 +367,11 @@ pub fn create_descriptor_sets(
         .unwrap();
         ambient_sets.push(ambient_set);
     }
+    println!(
+        "directional_sets in create descriptor sets length:{}",
+        directional_sets.len()
+    );
+    println!("directional_subsetslength:{}", directional_sets[0].len());
     (deferred_sets, directional_sets, ambient_sets)
 }
 pub fn create_framebuffers(
