@@ -1,3 +1,4 @@
+use core::panic;
 use resources::{ModelData, ViewProjUBO};
 use std::{f32::consts::FRAC_PI_4, time::Instant};
 use ultraviolet::{projection, Mat4, Vec3};
@@ -10,7 +11,7 @@ use vulkano::{
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::{Pipeline, PipelineBindPoint},
     swapchain::{acquire_next_image, SwapchainCreateInfo, SwapchainPresentInfo},
-    sync::{self, GpuFuture},
+    sync::{self, GpuFuture, HostAccessError},
     Validated, VulkanError,
 };
 use winit::{
@@ -23,7 +24,7 @@ mod model;
 mod renderer;
 mod resources;
 
-pub const FRAMES_IN_FLIGHT: usize = 3;
+pub const FRAMES_IN_FLIGHT: usize = 2;
 #[derive(Default)]
 pub struct App {
     render_context: Option<renderer::Context>,
@@ -57,19 +58,21 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => rcx.recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
                 println!("frame start");
+                rcx.frames_resources_free[rcx.current_frame]
+                    .as_mut()
+                    .take()
+                    .unwrap()
+                    .cleanup_finished();
+
                 acx.window.request_redraw();
                 let window_size = acx.window.inner_size();
                 if window_size.width == 0 || window_size.height == 0 {
                     return;
                 }
+
                 rcx.frame_counter += 1;
-                rcx.frames_resources_free[rcx.current_frame]
-                    .as_mut()
-                    .unwrap()
-                    .cleanup_finished();
                 dbg!(rcx.frame_counter);
 
-                // NOTE: RENDERING START
                 if rcx.recreate_swapchain {
                     // Use the new dimensions of the window.
                     dbg!(rcx.recreate_swapchain);
@@ -146,28 +149,50 @@ impl ApplicationHandler for App {
                     rcx.recreate_swapchain = false;
                 }
 
-                dbg!(rcx.current_frame);
+                // NOTE: RENDERING START
 
-                let (swapchain_image_index, is_suboptimal, acquire_future) =
-                    match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap)
-                    {
-                        Ok(r) => r,
-                        Err(VulkanError::OutOfDate) => {
-                            rcx.recreate_swapchain = true;
-                            return;
-                        }
-                        Err(e) => panic!("failed to acquire next image: {e}"),
-                    };
+                let (image_index, is_suboptimal, acquire_future) = match acquire_next_image(
+                    rcx.swapchain.clone(),
+                    None,
+                )
+                .map_err(Validated::unwrap)
+                {
+                    Ok(r) => r,
+                    Err(VulkanError::OutOfDate) => {
+                        rcx.recreate_swapchain = true;
+                        return;
+                    }
+                    Err(e) => panic!("failed to acquire next image: {e}"),
+                };
+
                 if is_suboptimal {
                     rcx.recreate_swapchain = true;
                 }
+                let image_index = image_index as usize;
 
-                let mut write = rcx.model_buffers[rcx.current_frame].write().unwrap();
-                *write = App::calculate_current_transform(acx.start_time);
-                drop(write);
+                dbg!(rcx.current_frame);
 
-                dbg!(is_suboptimal);
-                dbg!(swapchain_image_index);
+                loop {
+                    match rcx.model_buffers[rcx.current_frame].write() {
+                        Ok(mut write) => {
+                            *write = App::calculate_current_transform(acx.start_time);
+                            break;
+                        }
+                        Err(error) => match error {
+                            HostAccessError::AccessConflict(_) => {
+                                println!("failed loop");
+                                rcx.frames_resources_free[rcx.current_frame]
+                                    .as_mut()
+                                    .take()
+                                    .unwrap()
+                                    .cleanup_finished();
+                            }
+                            _ => {
+                                panic!("failed to write to model buffer");
+                            }
+                        },
+                    }
+                }
 
                 let mut builder = AutoCommandBufferBuilder::primary(
                     &acx.command_buffer_allocator,
@@ -175,12 +200,6 @@ impl ApplicationHandler for App {
                     CommandBufferUsage::OneTimeSubmit,
                 )
                 .unwrap();
-
-                println!(
-                    "direction sets top length:{}\ninner length:{}",
-                    rcx.directional_sets.len(),
-                    rcx.directional_sets[0].len()
-                );
 
                 // Before we can draw, we have to *enter a render pass*.
                 builder
@@ -195,7 +214,7 @@ impl ApplicationHandler for App {
                                 Some(1.0.into()),
                             ],
                             ..RenderPassBeginInfo::framebuffer(
-                                rcx.framebuffers[swapchain_image_index as usize].clone(),
+                                rcx.framebuffers[image_index].clone(),
                             )
                         },
                         SubpassBeginInfo {
@@ -215,7 +234,7 @@ impl ApplicationHandler for App {
                         rcx.deferred_pipeline.layout().clone(),
                         0,
                         (
-                            rcx.view_proj_sets[swapchain_image_index as usize].clone(),
+                            rcx.view_proj_sets[image_index].clone(),
                             rcx.model_sets[rcx.current_frame].clone(),
                         ),
                     )
@@ -241,13 +260,13 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .bind_pipeline_graphics(rcx.directional_pipeline.clone())
                     .unwrap();
-                for i in 0..rcx.directional_sets[swapchain_image_index as usize].len() {
+                for i in 0..rcx.directional_sets[image_index].len() {
                     builder
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
                             rcx.directional_pipeline.layout().clone(),
                             0,
-                            rcx.directional_sets[swapchain_image_index as usize][i].clone(),
+                            rcx.directional_sets[image_index][i].clone(),
                         )
                         .unwrap()
                         .draw(acx.dummy_verts.len() as u32, 1, 0, 0)
@@ -261,7 +280,7 @@ impl ApplicationHandler for App {
                         PipelineBindPoint::Graphics,
                         rcx.ambient_pipeline.layout().clone(),
                         0,
-                        rcx.ambient_sets[swapchain_image_index as usize].clone(),
+                        rcx.ambient_sets[image_index].clone(),
                     )
                     .unwrap()
                     .bind_vertex_buffers(0, acx.dummy_verts.clone())
@@ -284,7 +303,7 @@ impl ApplicationHandler for App {
                         acx.queue.clone(),
                         SwapchainPresentInfo::swapchain_image_index(
                             rcx.swapchain.clone(),
-                            swapchain_image_index,
+                            image_index as u32,
                         ),
                     )
                     .then_signal_fence_and_flush(); // signal will tell gpu to finish and use fence

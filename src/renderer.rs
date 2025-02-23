@@ -225,14 +225,11 @@ impl Context {
             extent: window_size.into(),
             depth_range: 0.0..=1.0,
         };
-        let frames_resources_free: Vec<Option<Box<dyn GpuFuture>>> = {
-            let mut vec = Vec::with_capacity(FRAMES_IN_FLIGHT);
-            for _ in 0..FRAMES_IN_FLIGHT {
-                let previous_frame_end = Some(vulkano::sync::now(device.clone()).boxed());
-                vec.push(previous_frame_end);
-            }
-            vec
-        };
+        let mut frames_resources_free = vec![];
+        for _ in 0..FRAMES_IN_FLIGHT {
+            frames_resources_free.push(Some(vulkano::sync::now(device.clone()).boxed()));
+        }
+
         let (view_proj_sets, model_sets, directional_sets, ambient_sets) = create_descriptor_sets(
             &device,
             &deferred_pipeline,
@@ -246,12 +243,6 @@ impl Context {
             &normal_buffers,
             swapchain_images.len(),
         );
-        println!(
-            "##########init directional sets len:{}\ninner length:{}",
-            directional_sets.len(),
-            directional_sets[0].len()
-        );
-
         Context {
             recreate_swapchain: false,
             current_frame: 0,
@@ -317,7 +308,7 @@ fn create_swapchain(
                 .into_iter()
                 .next()
                 .unwrap(),
-            present_mode: PresentMode::Fifo,
+            present_mode: PresentMode::Mailbox,
             ..Default::default()
         },
     )
@@ -345,7 +336,7 @@ pub fn create_descriptor_sets(
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
         device.clone(),
         StandardDescriptorSetAllocatorCreateInfo {
-            set_count: 4 * swapchain_image_count,
+            set_count: 2,
             ..Default::default()
         },
     );
@@ -394,10 +385,8 @@ pub fn create_descriptor_sets(
             )
             .unwrap();
             directional_subset.push(directional_set);
-            println!("directional_subsetslength:{}", directional_subset.len());
         }
         directional_sets.push(directional_subset);
-        println!("directional_sets length:{}", directional_sets.len());
 
         let ambient_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
@@ -412,11 +401,6 @@ pub fn create_descriptor_sets(
         .unwrap();
         ambient_sets.push(ambient_set);
     }
-    println!(
-        "directional_sets in create descriptor sets length:{}",
-        directional_sets.len()
-    );
-    println!("directional_subsetslength:{}", directional_sets[0].len());
     (view_proj_sets, model_sets, directional_sets, ambient_sets)
 }
 pub fn create_framebuffers(
