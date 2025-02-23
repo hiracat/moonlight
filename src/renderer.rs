@@ -1,16 +1,25 @@
-use std::{f32::consts::FRAC_PI_4, sync::Arc};
+use std::{f32::consts::FRAC_PI_4, sync::Arc, time::Instant};
 
-use ultraviolet::{projection, Vec3};
+use ultraviolet::{projection, Mat4, Vec3};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
+    command_buffer::{
+        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
+        AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
+        SubpassContents, SubpassEndInfo,
+    },
     descriptor_set::{
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
         layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType},
         PersistentDescriptorSet, WriteDescriptorSet,
     },
-    device::Device,
+    device::{
+        physical::{PhysicalDevice, PhysicalDeviceType},
+        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
+    },
     format::Format,
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
+    instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
@@ -24,12 +33,13 @@ use vulkano::{
             multisample::MultisampleState,
             rasterization::{CullMode, FrontFace, RasterizationState},
             subpass::PipelineSubpassType,
-            vertex_input::{Vertex, VertexDefinition},
+            vertex_input::{self, Vertex as _, VertexDefinition},
             viewport::{Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
         },
         layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
-        DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
     },
     render_pass::{
         AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
@@ -37,53 +47,514 @@ use vulkano::{
         SubpassDependency, SubpassDescription,
     },
     shader::ShaderStages,
-    swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
-    sync::{AccessFlags, DependencyFlags, GpuFuture, PipelineStages},
+    swapchain::{
+        acquire_next_image, PresentMode, Surface, Swapchain, SwapchainCreateInfo,
+        SwapchainPresentInfo,
+    },
+    sync::{self, AccessFlags, DependencyFlags, GpuFuture, HostAccessError, PipelineStages},
+    Validated, VulkanError, VulkanLibrary,
 };
-use winit::window::Window;
+use winit::{event_loop::ActiveEventLoop, window::Window};
+pub const FRAMES_IN_FLIGHT: usize = 2;
 
-use crate::{
-    resources::{self, AmbientLightUBO, DirectionalLightUBO, ModelData, ViewProjUBO},
-    FRAMES_IN_FLIGHT,
-};
-
-//marker
-
-pub struct Context {
-    pub recreate_swapchain: bool,
-    pub current_frame: usize,
-    pub frame_counter: u128,
-
-    pub swapchain: Arc<Swapchain>,
-    pub render_pass: Arc<RenderPass>,
-
-    pub deferred_pipeline: Arc<GraphicsPipeline>,
-    pub directional_pipeline: Arc<GraphicsPipeline>,
-    pub ambient_pipeline: Arc<GraphicsPipeline>,
-
-    pub viewport: Viewport,
-
-    pub framebuffers: Vec<Arc<Framebuffer>>,
-
-    pub view_proj_buffers: Vec<Subbuffer<ViewProjUBO>>,
-    pub model_buffers: Vec<Subbuffer<ModelData>>,
-    pub ambient_buffers: Vec<Subbuffer<AmbientLightUBO>>,
-    pub directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>>,
-    pub color_buffers: Vec<Arc<ImageView>>,
-    pub normal_buffers: Vec<Arc<ImageView>>,
-
-    pub view_proj_sets: Vec<Arc<PersistentDescriptorSet>>,
-    pub model_sets: Vec<Arc<PersistentDescriptorSet>>,
-    pub directional_sets: Vec<Vec<Arc<PersistentDescriptorSet>>>,
-    pub ambient_sets: Vec<Arc<PersistentDescriptorSet>>,
-
-    pub memory_allocator: Arc<dyn MemoryAllocator>,
-
-    pub frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
+#[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct Vertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub color: [f32; 3],
 }
 
-impl Context {
-    pub fn init(device: &Arc<Device>, window: &Arc<Window>, surface: &Arc<Surface>) -> Self {
+impl DummyVertex {
+    pub fn screen_quad() -> [DummyVertex; 6] {
+        [
+            DummyVertex {
+                position: [-1.0, -1.0],
+            },
+            DummyVertex {
+                position: [-1.0, 1.0],
+            },
+            DummyVertex {
+                position: [1.0, 1.0],
+            },
+            DummyVertex {
+                position: [-1.0, -1.0],
+            },
+            DummyVertex {
+                position: [1.0, 1.0],
+            },
+            DummyVertex {
+                position: [1.0, -1.0],
+            },
+        ]
+    }
+}
+
+#[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
+#[repr(C)]
+pub struct DummyVertex {
+    #[format(R32G32_SFLOAT)]
+    pub position: [f32; 2],
+}
+
+#[derive(Default, Debug)]
+pub struct Scene {
+    pub camera: Camera,
+    pub ambient: AmbientLight,
+
+    pub lights: Vec<PointLight>,
+    pub models: Vec<Model>,
+}
+
+#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+pub struct Camera {
+    pub view: ultraviolet::Mat4,
+    pub proj: ultraviolet::Mat4,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+pub struct PointLight {
+    pub position: [f32; 4],
+    pub color: [f32; 3],
+}
+
+#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+pub struct AmbientLight {
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(Default, Debug)]
+pub struct Model {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub model: Mat4,
+    pub requires_update: bool,
+
+    pub normals: Mat4,
+    pub ubo: Option<Vec<Subbuffer<ModelUBO>>>,
+    pub vertex_buffer: Option<Subbuffer<[Vertex]>>,
+    pub index_buffer: Option<Subbuffer<[u32]>>,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+pub struct ModelUBO {
+    pub view: Mat4,
+    pub normal: Mat4,
+}
+impl Model {
+    pub fn model_buffer(&self) -> ModelUBO {
+        ModelUBO {
+            view: self.model,
+            normal: self.normals,
+        }
+    }
+}
+
+pub struct Renderer {
+    pub window: Arc<Window>,
+    pub recreate_swapchain: bool,
+    pub memory_allocator: Arc<dyn MemoryAllocator>,
+
+    surface: Arc<Surface>,
+    aspect_ratio: f32,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    dummy_verts: Subbuffer<[DummyVertex]>,
+    start_time: Instant,
+    current_frame: usize,
+    frame_counter: u128,
+
+    swapchain: Arc<Swapchain>,
+    render_pass: Arc<RenderPass>,
+    deferred_pipeline: Arc<GraphicsPipeline>,
+    directional_pipeline: Arc<GraphicsPipeline>,
+    ambient_pipeline: Arc<GraphicsPipeline>,
+
+    viewport: Viewport,
+
+    framebuffers: Vec<Arc<Framebuffer>>,
+
+    view_proj_buffers: Vec<Subbuffer<Camera>>,
+    ambient_buffers: Vec<Subbuffer<AmbientLight>>,
+    directional_buffers: Vec<Vec<Subbuffer<PointLight>>>,
+    color_buffers: Vec<Arc<ImageView>>,
+    normal_buffers: Vec<Arc<ImageView>>,
+
+    view_proj_sets: Vec<Arc<PersistentDescriptorSet>>,
+    model_sets: Vec<Arc<PersistentDescriptorSet>>,
+    directional_sets: Vec<Vec<Arc<PersistentDescriptorSet>>>,
+    ambient_sets: Vec<Arc<PersistentDescriptorSet>>,
+
+    frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
+}
+
+impl Renderer {
+    pub fn draw(&mut self, scene: &mut Scene) {
+        self.frames_resources_free[self.current_frame]
+            .as_mut()
+            .take()
+            .unwrap()
+            .cleanup_finished();
+
+        self.window.request_redraw();
+        let window_size = self.window.inner_size();
+        if window_size.width == 0 || window_size.height == 0 {
+            return;
+        }
+
+        self.frame_counter += 1;
+        dbg!(self.frame_counter);
+
+        if self.recreate_swapchain {
+            // Use the new dimensions of the window.
+            dbg!(self.recreate_swapchain);
+            let new_images;
+            (self.swapchain, new_images) = self
+                .swapchain
+                .recreate(SwapchainCreateInfo {
+                    image_extent: window_size.into(),
+                    ..self.swapchain.create_info()
+                })
+                .expect("failed to create swapchain");
+            // Because framebuffers contains a reference to the old swapchain, we need to
+            // recreate framebuffers as well.
+            (self.framebuffers, self.color_buffers, self.normal_buffers) = create_framebuffers(
+                &new_images,
+                &self.render_pass,
+                self.memory_allocator.clone(),
+            );
+            self.viewport.extent = self.window.inner_size().into();
+            self.aspect_ratio = self.viewport.extent[0] as f32 / self.viewport.extent[1] as f32;
+
+            let mut view_proj_buffers: Vec<Subbuffer<Camera>> = vec![];
+            for _ in 0..self.swapchain.image_count() {
+                view_proj_buffers.push(
+                    Buffer::from_data(
+                        self.memory_allocator.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                        Camera {
+                            view: ultraviolet::Mat4::look_at(
+                                Vec3::new(0.0, 0.0, 5.0), // Move camera back slightly
+                                Vec3::new(0.0, 0.0, 0.0), // Look at origin
+                                Vec3::new(0.0, 1.0, 0.0), // Up vector
+                            ),
+                            proj: projection::perspective_vk(
+                                FRAC_PI_4,
+                                self.aspect_ratio,
+                                0.1,
+                                10.0,
+                            ),
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+
+            (
+                self.view_proj_sets,
+                self.model_sets,
+                self.directional_sets,
+                self.ambient_sets,
+            ) = create_descriptor_sets(
+                &self.device,
+                &self.deferred_pipeline,
+                &self.directional_pipeline,
+                &self.ambient_pipeline,
+                &view_proj_buffers,
+                &scene.models,
+                &self.ambient_buffers,
+                &self.directional_buffers,
+                &self.color_buffers,
+                &self.normal_buffers,
+                new_images.len(),
+            );
+
+            self.recreate_swapchain = false;
+        }
+
+        // NOTE: RENDERING START
+
+        let (image_index, is_suboptimal, acquire_future) =
+            match acquire_next_image(self.swapchain.clone(), None).map_err(Validated::unwrap) {
+                Ok(r) => r,
+                Err(VulkanError::OutOfDate) => {
+                    self.recreate_swapchain = true;
+                    return;
+                }
+                Err(e) => panic!("failed to acquire next image: {e}"),
+            };
+
+        if is_suboptimal {
+            self.recreate_swapchain = true;
+        }
+        let image_index = image_index as usize;
+
+        dbg!(self.current_frame);
+
+        for model in &mut scene.models {
+            let data = model.model_buffer();
+            let buffer = &mut model.ubo.as_mut().unwrap();
+            loop {
+                match buffer[self.current_frame].write() {
+                    Ok(mut write) => {
+                        *write = data;
+                        break;
+                    }
+                    Err(error) => match error {
+                        HostAccessError::AccessConflict(_) => {
+                            println!("failed loop");
+                            self.frames_resources_free[self.current_frame]
+                                .as_mut()
+                                .take()
+                                .unwrap()
+                                .cleanup_finished();
+                        }
+                        _ => {
+                            panic!("failed to write to model buffer");
+                        }
+                    },
+                }
+            }
+        }
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        // Before we can draw, we have to *enter a render pass*.
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                    // others should use none as their value
+                    clear_values: vec![
+                        Some([0.1, 0.1, 0.1, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some(1.0.into()),
+                    ],
+                    ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index].clone())
+                },
+                SubpassBeginInfo {
+                    // The contents of the first (and only) subpass. This can be either
+                    // `Inline` or `SecondaryCommandBuffers`
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .set_viewport(0, [self.viewport.clone()].into_iter().collect())
+            .unwrap()
+            .bind_pipeline_graphics(self.deferred_pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.deferred_pipeline.layout().clone(),
+                0,
+                (
+                    self.view_proj_sets[image_index].clone(),
+                    self.model_sets[self.current_frame].clone(),
+                ),
+            )
+            .unwrap();
+
+        for model in &scene.models {
+            builder
+                .bind_vertex_buffers(0, model.vertex_buffer.as_ref().unwrap().clone())
+                .unwrap()
+                .bind_index_buffer(model.index_buffer.as_ref().unwrap().clone())
+                .unwrap()
+                .draw_indexed(
+                    model.index_buffer.as_ref().unwrap().len() as u32,
+                    1,
+                    0,
+                    0,
+                    0,
+                )
+                .unwrap()
+                .next_subpass(
+                    SubpassEndInfo::default(),
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        dbg!(self.dummy_verts.len());
+        builder
+            .bind_vertex_buffers(0, self.dummy_verts.clone())
+            .unwrap()
+            .bind_pipeline_graphics(self.directional_pipeline.clone())
+            .unwrap();
+        for i in 0..self.directional_sets[image_index].len() {
+            builder
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.directional_pipeline.layout().clone(),
+                    0,
+                    self.directional_sets[image_index][i].clone(),
+                )
+                .unwrap()
+                .draw(self.dummy_verts.len() as u32, 1, 0, 0)
+                .unwrap();
+        }
+
+        builder
+            .bind_pipeline_graphics(self.ambient_pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.ambient_pipeline.layout().clone(),
+                0,
+                self.ambient_sets[image_index].clone(),
+            )
+            .unwrap()
+            .bind_vertex_buffers(0, self.dummy_verts.clone())
+            .unwrap()
+            .draw(self.dummy_verts.len() as u32, 1, 0, 0)
+            .unwrap();
+
+        builder.end_render_pass(SubpassEndInfo::default()).unwrap();
+
+        let command_buffer = builder.build().unwrap();
+        let future = self.frames_resources_free[self.current_frame]
+            .take()
+            .unwrap()
+            .join(acquire_future)
+            .then_execute(self.queue.clone(), command_buffer)
+            .unwrap()
+            // dosent present imediately but submits a present command to
+            // the queue, so the triangle will finish rendering
+            .then_swapchain_present(
+                self.queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index as u32,
+                ),
+            )
+            .then_signal_fence_and_flush(); // signal will tell gpu to finish and use fence
+
+        match future.map_err(Validated::unwrap) {
+            Ok(future) => {
+                self.frames_resources_free[self.current_frame] = Some(future.boxed());
+            }
+            Err(VulkanError::OutOfDate) => {
+                self.recreate_swapchain = true;
+                self.frames_resources_free[self.current_frame] =
+                    Some(sync::now(self.device.clone()).boxed());
+            }
+            Err(e) => {
+                self.frames_resources_free[self.current_frame] =
+                    Some(Box::new(sync::now(self.device.clone())).boxed());
+                println!("Failed to flush future: {:?}", e);
+            }
+        }
+        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
+    }
+
+    pub fn init(event_loop: &ActiveEventLoop, scene: &mut Scene) -> Self {
+        let start_time = Instant::now();
+        let instance = create_instance(event_loop);
+        let window = create_window(event_loop);
+        let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
+        let device_extensions = DeviceExtensions {
+            khr_swapchain: true,
+            ..DeviceExtensions::empty()
+        };
+        let (physical_device, queue_family_index) =
+            create_physical_device(&instance, &surface, &device_extensions);
+        let (device, queue) =
+            create_device(physical_device, queue_family_index, &device_extensions);
+
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
+            device.clone(),
+            StandardCommandBufferAllocatorCreateInfo {
+                primary_buffer_count: FRAMES_IN_FLIGHT,
+                ..Default::default()
+            },
+        ));
+        let window_size = window.inner_size();
+        let aspect_ratio = {
+            let windowsize: [f32; 2] = window_size.into();
+            windowsize[0] / windowsize[1]
+        };
+
+        for model in &mut scene.models {
+            let vertex_buffer: Subbuffer<[Vertex]>;
+            let index_buffer: Subbuffer<[u32]>;
+            vertex_buffer = Buffer::from_iter(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::VERTEX_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                model.vertices.clone(),
+            )
+            .unwrap();
+            model.vertex_buffer = Some(vertex_buffer);
+            index_buffer = Buffer::from_iter(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::INDEX_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                model.indices.clone(),
+            )
+            .unwrap();
+            model.index_buffer = Some(index_buffer);
+        }
+
+        let dummy_verts = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            DummyVertex::screen_quad(),
+        )
+        .unwrap();
+
         let (swapchain, swapchain_images) = create_swapchain(&device, &window, &surface);
 
         let render_pass = create_renderpass(&device, swapchain.image_format());
@@ -93,10 +564,9 @@ impl Context {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let (framebuffers, color_buffers, normal_buffers) =
             create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
-        let mut view_proj_buffers: Vec<Subbuffer<ViewProjUBO>> = vec![];
-        let mut model_buffers: Vec<Subbuffer<ModelData>> = vec![];
-        let mut ambient_buffers: Vec<Subbuffer<AmbientLightUBO>> = vec![];
-        let mut directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>> = vec![];
+        let mut view_proj_buffers: Vec<Subbuffer<Camera>> = vec![];
+        let mut ambient_buffers: Vec<Subbuffer<AmbientLight>> = vec![];
+        let mut directional_buffers: Vec<Vec<Subbuffer<PointLight>>> = vec![];
 
         let window_size = window.inner_size();
         let ratio = window_size.width as f32 / window_size.height as f32;
@@ -112,7 +582,7 @@ impl Context {
                         memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    ViewProjUBO {
+                    Camera {
                         view: ultraviolet::Mat4::look_at(
                             Vec3::new(0.0, 0.0, 3.0), // Move camera back slightly
                             Vec3::new(0.0, 0.0, 0.0), // Look at origin
@@ -125,21 +595,25 @@ impl Context {
             );
         }
 
-        for _ in 0..FRAMES_IN_FLIGHT {
-            model_buffers.push(
-                Buffer::new_sized(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            );
+        for model in &mut scene.models {
+            let mut model_buffers: Vec<Subbuffer<ModelUBO>> = vec![];
+            for _ in 0..FRAMES_IN_FLIGHT {
+                model_buffers.push(
+                    Buffer::new_sized(
+                        memory_allocator.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+            model.ubo = Some(model_buffers);
         }
 
         for _ in 0..swapchain_images.len() {
@@ -154,7 +628,7 @@ impl Context {
                         memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    AmbientLightUBO {
+                    AmbientLight {
                         color: [1.0, 1.0, 1.0],
                         intensity: 0.1,
                     },
@@ -175,7 +649,7 @@ impl Context {
                         memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    DirectionalLightUBO {
+                    PointLight {
                         position: [-4.0, 0.0, 4.0, 1.0],
                         color: [1.0, 0.0, 0.0],
                     },
@@ -191,7 +665,7 @@ impl Context {
                         memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    DirectionalLightUBO {
+                    PointLight {
                         position: [0.0, -4.0, 1.0, 1.0],
                         color: [0.0, 1.0, 0.0],
                     },
@@ -207,7 +681,7 @@ impl Context {
                         memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    DirectionalLightUBO {
+                    PointLight {
                         position: [4.0, -2.0, 1.0, 1.0],
                         color: [0.0, 0.0, 1.0],
                     },
@@ -236,14 +710,14 @@ impl Context {
             &directional_pipeline,
             &ambient_pipeline,
             &view_proj_buffers,
-            &model_buffers,
+            &scene.models,
             &ambient_buffers,
             &directional_buffers,
             &color_buffers,
             &normal_buffers,
             swapchain_images.len(),
         );
-        Context {
+        Renderer {
             recreate_swapchain: false,
             current_frame: 0,
             frame_counter: 0,
@@ -253,11 +727,18 @@ impl Context {
             render_pass,
             memory_allocator,
             viewport,
+            surface,
+            command_buffer_allocator,
+            dummy_verts,
+            device,
+            queue,
+            start_time,
+            window: window.clone(),
+            aspect_ratio,
 
             color_buffers,
             normal_buffers,
 
-            model_buffers,
             view_proj_buffers,
             ambient_buffers,
             directional_buffers,
@@ -320,10 +801,10 @@ pub fn create_descriptor_sets(
     directional_pipeline: &Arc<GraphicsPipeline>,
     ambient_pipeline: &Arc<GraphicsPipeline>,
 
-    view_proj_buffers: &[Subbuffer<ViewProjUBO>],
-    model_buffers: &[Subbuffer<ModelData>],
-    ambient_buffers: &[Subbuffer<AmbientLightUBO>],
-    directional_buffers: &[Vec<Subbuffer<DirectionalLightUBO>>],
+    view_proj_buffers: &[Subbuffer<Camera>],
+    models: &[Model],
+    ambient_buffers: &[Subbuffer<AmbientLight>],
+    directional_buffers: &[Vec<Subbuffer<PointLight>>],
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
     swapchain_image_count: usize,
@@ -351,15 +832,20 @@ pub fn create_descriptor_sets(
     let mut directional_sets = vec![];
     let mut ambient_sets = vec![];
 
-    for i in 0..FRAMES_IN_FLIGHT {
-        let model_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            model_layout.clone(),
-            [WriteDescriptorSet::buffer(0, model_buffers[i].clone())],
-            [],
-        )
-        .unwrap();
-        model_sets.push(model_set);
+    for model in models {
+        for i in 0..FRAMES_IN_FLIGHT {
+            let model_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                model_layout.clone(),
+                [WriteDescriptorSet::buffer(
+                    0,
+                    model.ubo.as_ref().unwrap()[i].clone(),
+                )],
+                [],
+            )
+            .unwrap();
+            model_sets.push(model_set);
+        }
     }
 
     for i in 0..swapchain_image_count {
@@ -656,11 +1142,11 @@ fn create_graphics_pipelines(
         .entry_point("main")
         .unwrap();
 
-    let vertex_input_state = resources::Vertex::per_vertex()
+    let vertex_input_state = Vertex::per_vertex()
         .definition(&deferred_vert.info().input_interface)
         .unwrap();
 
-    let dummy_vertex_input_state = resources::DummyVertex::per_vertex()
+    let dummy_vertex_input_state = DummyVertex::per_vertex()
         .definition(&directional_vert.info().input_interface)
         .unwrap();
 
@@ -959,4 +1445,94 @@ fn create_graphics_pipelines(
     .expect("failed to create lighting graphics pipeline");
 
     (deferred_pipeline, directional_pipeline, ambient_pipeline)
+}
+fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
+    Arc::new(
+        event_loop
+            .create_window(Window::default_attributes().with_title("moonlight"))
+            .expect("failed to create window"),
+    )
+}
+
+fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
+    let library =
+        VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
+    let required_extensions = Surface::required_extensions(event_loop);
+
+    let validation_layer = "VK_LAYER_KHRONOS_validation";
+
+    Instance::new(
+        library,
+        InstanceCreateInfo {
+            enabled_extensions: required_extensions,
+            enabled_layers: vec![validation_layer.to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("failed to create instance")
+}
+fn create_physical_device(
+    instance: &Arc<Instance>,
+    surface: &Arc<Surface>,
+    required_extensions: &DeviceExtensions,
+) -> (Arc<PhysicalDevice>, u32) {
+    instance
+        .enumerate_physical_devices()
+        .unwrap()
+        .filter(|physical_device| {
+            physical_device
+                .supported_extensions()
+                .contains(required_extensions)
+        })
+        .filter_map(|physical_device| {
+            physical_device
+                .queue_family_properties()
+                .iter() // iterate over all available queues for each device
+                .enumerate() // returns an iterator of type (physicaldevice, u32)
+                .position(|(index, queue_family_properties)| {
+                    queue_family_properties
+                        .queue_flags
+                        .intersects(QueueFlags::GRAPHICS)
+                        && physical_device
+                            .surface_support(index as u32, surface)
+                            .unwrap()
+                })
+                .map(|index| (physical_device, index as u32))
+        })
+        .min_by_key(
+            |(physical_device, _)| match physical_device.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
+            },
+        )
+        .expect("no qualified gpu")
+}
+fn create_device(
+    physical_device: Arc<PhysicalDevice>,
+    queue_family_index: u32,
+    required_extensions: &DeviceExtensions,
+) -> (Arc<Device>, Arc<Queue>) {
+    let (device, mut queues) = Device::new(
+        physical_device,
+        DeviceCreateInfo {
+            enabled_features: Features {
+                separate_depth_stencil_layouts: true, // MUST ENABLE THIS
+                ..Default::default()
+            },
+            enabled_extensions: *required_extensions,
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let queue = queues.next().unwrap();
+    (device, queue)
 }
