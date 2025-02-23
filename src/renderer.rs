@@ -101,7 +101,7 @@ pub struct DummyVertex {
     pub position: [f32; 2],
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct Scene {
     pub camera: Camera,
     pub ambient: AmbientLight,
@@ -134,7 +134,7 @@ pub struct AmbientLight {
     pub intensity: f32,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct Model {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -143,6 +143,7 @@ pub struct Model {
     pub normals: Mat4,
 
     pub ubo: Option<Vec<Subbuffer<ModelUBO>>>,
+    pub descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
     pub vertex_buffer: Option<Subbuffer<[Vertex]>>,
     pub index_buffer: Option<Subbuffer<[u32]>>,
 }
@@ -192,7 +193,6 @@ pub struct Renderer {
     normal_buffers: Vec<Arc<ImageView>>,
 
     view_proj_sets: Vec<Arc<PersistentDescriptorSet>>,
-    model_sets: Vec<Arc<PersistentDescriptorSet>>,
     directional_sets: Vec<Vec<Arc<PersistentDescriptorSet>>>,
     ambient_sets: Vec<Arc<PersistentDescriptorSet>>,
 
@@ -270,7 +270,6 @@ impl Renderer {
 
             (
                 self.view_proj_sets,
-                self.model_sets,
                 self.directional_sets,
                 self.ambient_sets,
             ) = create_descriptor_sets(
@@ -279,7 +278,7 @@ impl Renderer {
                 &self.directional_pipeline,
                 &self.ambient_pipeline,
                 &view_proj_buffers,
-                &scene.models,
+                &mut scene.models,
                 &self.ambient_buffers,
                 &self.directional_buffers,
                 &self.color_buffers,
@@ -374,20 +373,20 @@ impl Renderer {
             .set_viewport(0, [self.viewport.clone()].into_iter().collect())
             .unwrap()
             .bind_pipeline_graphics(self.deferred_pipeline.clone())
-            .unwrap()
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.deferred_pipeline.layout().clone(),
-                0,
-                (
-                    self.view_proj_sets[image_index].clone(),
-                    self.model_sets[self.current_frame].clone(),
-                ),
-            )
             .unwrap();
 
         for model in &scene.models {
             builder
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.deferred_pipeline.layout().clone(),
+                    0,
+                    (
+                        self.view_proj_sets[image_index].clone(),
+                        model.descriptor_set.as_ref().unwrap()[self.current_frame].clone(),
+                    ),
+                )
+                .unwrap()
                 .bind_vertex_buffers(0, model.vertex_buffer.as_ref().unwrap().clone())
                 .unwrap()
                 .bind_index_buffer(model.index_buffer.as_ref().unwrap().clone())
@@ -710,13 +709,13 @@ impl Renderer {
             frames_resources_free.push(Some(vulkano::sync::now(device.clone()).boxed()));
         }
 
-        let (view_proj_sets, model_sets, directional_sets, ambient_sets) = create_descriptor_sets(
+        let (view_proj_sets, directional_sets, ambient_sets) = create_descriptor_sets(
             &device,
             &deferred_pipeline,
             &directional_pipeline,
             &ambient_pipeline,
             &view_proj_buffers,
-            &scene.models,
+            &mut scene.models,
             &ambient_buffers,
             &directional_buffers,
             &color_buffers,
@@ -754,7 +753,6 @@ impl Renderer {
             ambient_pipeline,
 
             view_proj_sets,
-            model_sets,
             directional_sets,
             ambient_sets,
         }
@@ -808,7 +806,7 @@ pub fn create_descriptor_sets(
     ambient_pipeline: &Arc<GraphicsPipeline>,
 
     view_proj_buffers: &[Subbuffer<Camera>],
-    models: &[Model],
+    models: &mut [Model],
     ambient_buffers: &[Subbuffer<AmbientLight>],
     directional_buffers: &[Vec<Subbuffer<PointLight>>],
     color_buffer: &[Arc<ImageView>],
@@ -816,7 +814,6 @@ pub fn create_descriptor_sets(
     swapchain_image_count: usize,
 ) -> (
     Vec<Arc<PersistentDescriptorSet>>,      // view projection
-    Vec<Arc<PersistentDescriptorSet>>,      // model
     Vec<Vec<Arc<PersistentDescriptorSet>>>, // directional
     Vec<Arc<PersistentDescriptorSet>>,      // ambient
 ) {
@@ -834,11 +831,11 @@ pub fn create_descriptor_sets(
     let ambient_layout = ambient_pipeline.layout().set_layouts().get(0).unwrap();
 
     let mut view_proj_sets = vec![];
-    let mut model_sets = vec![];
     let mut directional_sets = vec![];
     let mut ambient_sets = vec![];
 
     for model in models {
+        let mut model_sets = vec![];
         for i in 0..FRAMES_IN_FLIGHT {
             let model_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
@@ -852,6 +849,7 @@ pub fn create_descriptor_sets(
             .unwrap();
             model_sets.push(model_set);
         }
+        model.descriptor_set = Some(model_sets);
     }
 
     for i in 0..swapchain_image_count {
@@ -894,7 +892,7 @@ pub fn create_descriptor_sets(
         .unwrap();
         ambient_sets.push(ambient_set);
     }
-    (view_proj_sets, model_sets, directional_sets, ambient_sets)
+    (view_proj_sets, directional_sets, ambient_sets)
 }
 pub fn create_framebuffers(
     swapchain_images: &[Arc<Image>],

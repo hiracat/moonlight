@@ -92,6 +92,7 @@ impl ApplicationHandler for App {
                 println!("frame start");
                 self.scene.models[0].model =
                     App::calculate_current_transform(self.renderer.as_mut().unwrap().start_time);
+
                 self.renderer.as_mut().unwrap().draw(&mut self.scene);
             }
             _ => (),
