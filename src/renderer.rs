@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{f32::consts::FRAC_PI_4, sync::Arc};
 
+use ultraviolet::{projection, Vec3};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     descriptor_set::{
@@ -42,7 +43,7 @@ use vulkano::{
 use winit::window::Window;
 
 use crate::{
-    resources::{self, AmbientLightUBO, DirectionalLightUBO, TransformationUBO},
+    resources::{self, AmbientLightUBO, DirectionalLightUBO, ModelData, ViewProjUBO},
     FRAMES_IN_FLIGHT,
 };
 
@@ -64,14 +65,15 @@ pub struct Context {
 
     pub framebuffers: Vec<Arc<Framebuffer>>,
 
+    pub view_proj_buffers: Vec<Subbuffer<ViewProjUBO>>,
+    pub model_buffers: Vec<Subbuffer<ModelData>>,
+    pub ambient_buffers: Vec<Subbuffer<AmbientLightUBO>>,
+    pub directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>>,
     pub color_buffers: Vec<Arc<ImageView>>,
     pub normal_buffers: Vec<Arc<ImageView>>,
 
-    pub transform_buffers: Vec<Subbuffer<TransformationUBO>>,
-    pub ambient_buffers: Vec<Subbuffer<AmbientLightUBO>>,
-    pub directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>>,
-
-    pub deferred_sets: Vec<Arc<PersistentDescriptorSet>>,
+    pub view_proj_sets: Vec<Arc<PersistentDescriptorSet>>,
+    pub model_sets: Vec<Arc<PersistentDescriptorSet>>,
     pub directional_sets: Vec<Vec<Arc<PersistentDescriptorSet>>>,
     pub ambient_sets: Vec<Arc<PersistentDescriptorSet>>,
 
@@ -82,7 +84,6 @@ pub struct Context {
 
 impl Context {
     pub fn init(device: &Arc<Device>, window: &Arc<Window>, surface: &Arc<Surface>) -> Self {
-        let window_size = window.inner_size();
         let (swapchain, swapchain_images) = create_swapchain(&device, &window, &surface);
 
         let render_pass = create_renderpass(&device, swapchain.image_format());
@@ -92,12 +93,40 @@ impl Context {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let (framebuffers, color_buffers, normal_buffers) =
             create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
-        let mut transform_buffers: Vec<Subbuffer<TransformationUBO>> = vec![];
+        let mut view_proj_buffers: Vec<Subbuffer<ViewProjUBO>> = vec![];
+        let mut model_buffers: Vec<Subbuffer<ModelData>> = vec![];
         let mut ambient_buffers: Vec<Subbuffer<AmbientLightUBO>> = vec![];
         let mut directional_buffers: Vec<Vec<Subbuffer<DirectionalLightUBO>>> = vec![];
 
+        let window_size = window.inner_size();
+        let ratio = window_size.width as f32 / window_size.height as f32;
         for _ in 0..swapchain_images.len() {
-            transform_buffers.push(
+            view_proj_buffers.push(
+                Buffer::from_data(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    ViewProjUBO {
+                        view: ultraviolet::Mat4::look_at(
+                            Vec3::new(0.0, 0.0, 3.0), // Move camera back slightly
+                            Vec3::new(0.0, 0.0, 0.0), // Look at origin
+                            Vec3::new(0.0, 1.0, 0.0), // Up vector
+                        ),
+                        proj: projection::perspective_vk(FRAC_PI_4, ratio, 0.1, 5.0),
+                    },
+                )
+                .unwrap(),
+            );
+        }
+
+        for _ in 0..swapchain_images.len() {
+            model_buffers.push(
                 Buffer::new_sized(
                     memory_allocator.clone(),
                     BufferCreateInfo {
@@ -204,12 +233,13 @@ impl Context {
             }
             vec
         };
-        let (deferred_sets, directional_sets, ambient_sets) = create_descriptor_sets(
+        let (view_proj_sets, model_sets, directional_sets, ambient_sets) = create_descriptor_sets(
             &device,
             &deferred_pipeline,
             &directional_pipeline,
             &ambient_pipeline,
-            &transform_buffers,
+            &view_proj_buffers,
+            &model_buffers,
             &ambient_buffers,
             &directional_buffers,
             &color_buffers,
@@ -236,7 +266,8 @@ impl Context {
             color_buffers,
             normal_buffers,
 
-            transform_buffers,
+            model_buffers,
+            view_proj_buffers,
             ambient_buffers,
             directional_buffers,
 
@@ -244,7 +275,8 @@ impl Context {
             directional_pipeline,
             ambient_pipeline,
 
-            deferred_sets,
+            view_proj_sets,
+            model_sets,
             directional_sets,
             ambient_sets,
         }
@@ -296,42 +328,55 @@ pub fn create_descriptor_sets(
     directional_pipeline: &Arc<GraphicsPipeline>,
     ambient_pipeline: &Arc<GraphicsPipeline>,
 
-    transform_buffers: &[Subbuffer<TransformationUBO>],
+    view_proj_buffers: &[Subbuffer<ViewProjUBO>],
+    model_buffers: &[Subbuffer<ModelData>],
     ambient_buffers: &[Subbuffer<AmbientLightUBO>],
     directional_buffers: &[Vec<Subbuffer<DirectionalLightUBO>>],
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
     swapchain_image_count: usize,
 ) -> (
-    Vec<Arc<PersistentDescriptorSet>>,      // deferred
+    Vec<Arc<PersistentDescriptorSet>>,      // view projection
+    Vec<Arc<PersistentDescriptorSet>>,      // model
     Vec<Vec<Arc<PersistentDescriptorSet>>>, // directional
     Vec<Arc<PersistentDescriptorSet>>,      // ambient
 ) {
     let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
         device.clone(),
         StandardDescriptorSetAllocatorCreateInfo {
-            set_count: 3 * swapchain_image_count,
+            set_count: 4 * swapchain_image_count,
             ..Default::default()
         },
     );
 
-    let deferred_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+    let view_proj_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+    let model_layout = deferred_pipeline.layout().set_layouts().get(1).unwrap();
     let directional_layout = directional_pipeline.layout().set_layouts().get(0).unwrap();
     let ambient_layout = ambient_pipeline.layout().set_layouts().get(0).unwrap();
 
-    let mut deferred_sets = vec![];
+    let mut view_proj_sets = vec![];
+    let mut model_sets = vec![];
     let mut directional_sets = vec![];
     let mut ambient_sets = vec![];
 
     for i in 0..swapchain_image_count {
-        let deferred_set = PersistentDescriptorSet::new(
+        let view_proj_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
-            deferred_layout.clone(),
-            [WriteDescriptorSet::buffer(0, transform_buffers[i].clone())],
+            view_proj_layout.clone(),
+            [WriteDescriptorSet::buffer(0, view_proj_buffers[i].clone())],
             [],
         )
         .unwrap();
-        deferred_sets.push(deferred_set);
+        view_proj_sets.push(view_proj_set);
+
+        let model_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            model_layout.clone(),
+            [WriteDescriptorSet::buffer(0, model_buffers[i].clone())],
+            [],
+        )
+        .unwrap();
+        model_sets.push(model_set);
 
         let mut directional_subset = vec![];
         for j in 0..directional_buffers[0].len() {
@@ -339,10 +384,9 @@ pub fn create_descriptor_sets(
                 &descriptor_set_allocator,
                 directional_layout.clone(),
                 [
-                    WriteDescriptorSet::buffer(0, transform_buffers[i].clone()),
-                    WriteDescriptorSet::image_view(1, color_buffer[i].clone()),
-                    WriteDescriptorSet::image_view(2, normal_buffer[i].clone()),
-                    WriteDescriptorSet::buffer(3, directional_buffers[i][j].clone()),
+                    WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
+                    WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
+                    WriteDescriptorSet::buffer(2, directional_buffers[i][j].clone()),
                 ],
                 [],
             )
@@ -357,10 +401,9 @@ pub fn create_descriptor_sets(
             &descriptor_set_allocator,
             ambient_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, transform_buffers[i].clone()),
-                WriteDescriptorSet::image_view(1, color_buffer[i].clone()),
-                WriteDescriptorSet::image_view(2, normal_buffer[i].clone()),
-                WriteDescriptorSet::buffer(3, ambient_buffers[i].clone()),
+                WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
+                WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
+                WriteDescriptorSet::buffer(2, ambient_buffers[i].clone()),
             ],
             [],
         )
@@ -372,7 +415,7 @@ pub fn create_descriptor_sets(
         directional_sets.len()
     );
     println!("directional_subsetslength:{}", directional_sets[0].len());
-    (deferred_sets, directional_sets, ambient_sets)
+    (view_proj_sets, model_sets, directional_sets, ambient_sets)
 }
 pub fn create_framebuffers(
     swapchain_images: &[Arc<Image>],
@@ -592,29 +635,29 @@ fn create_graphics_pipelines(
     mod ambient_vert {
         vulkano_shaders::shader! {
             ty: "vertex",
-            path: "src/shaders/ambient.vert",
+            path: "src/shaders/ambient_vert.glsl",
         }
     }
     mod ambient_frag {
         vulkano_shaders::shader! {
             ty: "fragment",
-            path: "src/shaders/ambient.frag",
+            path: "src/shaders/ambient_frag.glsl",
         }
     }
 
-    let defered_vert = defered_vert::load(device.clone())
+    let deferred_vert = defered_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let defered_frag = defered_frag::load(device.clone())
+    let deferred_frag = defered_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let lighting_vert = lighting_vert::load(device.clone())
+    let directional_vert = lighting_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let lighting_frag = lighting_frag::load(device.clone())
+    let directional_frag = lighting_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
@@ -628,16 +671,20 @@ fn create_graphics_pipelines(
         .unwrap();
 
     let vertex_input_state = resources::Vertex::per_vertex()
-        .definition(&defered_vert.info().input_interface)
+        .definition(&deferred_vert.info().input_interface)
+        .unwrap();
+
+    let dummy_vertex_input_state = resources::DummyVertex::per_vertex()
+        .definition(&directional_vert.info().input_interface)
         .unwrap();
 
     let deferred_stagse = [
-        PipelineShaderStageCreateInfo::new(defered_vert),
-        PipelineShaderStageCreateInfo::new(defered_frag),
+        PipelineShaderStageCreateInfo::new(deferred_vert),
+        PipelineShaderStageCreateInfo::new(deferred_frag),
     ];
     let directional_stages = [
-        PipelineShaderStageCreateInfo::new(lighting_vert),
-        PipelineShaderStageCreateInfo::new(lighting_frag),
+        PipelineShaderStageCreateInfo::new(directional_vert),
+        PipelineShaderStageCreateInfo::new(directional_frag),
     ];
     let ambient_stages = [
         PipelineShaderStageCreateInfo::new(ambient_vert),
@@ -657,19 +704,38 @@ fn create_graphics_pipelines(
     let deferred_layout = PipelineLayout::new(
         device.clone(),
         PipelineDescriptorSetLayoutCreateInfo {
-            set_layouts: vec![DescriptorSetLayoutCreateInfo {
-                bindings: [(
-                    0,
-                    DescriptorSetLayoutBinding {
-                        stages: ShaderStages::VERTEX,
-                        descriptor_type: DescriptorType::UniformBuffer,
-                        descriptor_count: 1,
-                        ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::UniformBuffer)
-                    },
-                )]
-                .into(),
-                ..Default::default()
-            }],
+            set_layouts: vec![
+                DescriptorSetLayoutCreateInfo {
+                    bindings: [(
+                        0,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::VERTEX,
+                            descriptor_type: DescriptorType::UniformBuffer,
+                            descriptor_count: 1,
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::UniformBuffer,
+                            )
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                },
+                DescriptorSetLayoutCreateInfo {
+                    bindings: [(
+                        0,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::VERTEX,
+                            descriptor_type: DescriptorType::UniformBuffer,
+                            descriptor_count: 1,
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::UniformBuffer,
+                            )
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                },
+            ],
             push_constant_ranges: vec![],
             flags: PipelineLayoutCreateFlags::empty(),
         }
@@ -684,18 +750,7 @@ fn create_graphics_pipelines(
             set_layouts: vec![DescriptorSetLayoutCreateInfo {
                 bindings: [
                     (
-                        0, // transform data
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
-                            descriptor_type: DescriptorType::UniformBuffer,
-                            descriptor_count: 1,
-                            ..DescriptorSetLayoutBinding::descriptor_type(
-                                DescriptorType::UniformBuffer,
-                            )
-                        },
-                    ),
-                    (
-                        1, // Binding 1 for color input attachment
+                        0, // Binding 0 for color input attachment
                         DescriptorSetLayoutBinding {
                             stages: ShaderStages::FRAGMENT,
                             descriptor_type: DescriptorType::InputAttachment,
@@ -706,7 +761,7 @@ fn create_graphics_pipelines(
                         },
                     ),
                     (
-                        2, // Binding 2 for normals input attachment
+                        1, // Binding 2 for normals input attachment
                         DescriptorSetLayoutBinding {
                             stages: ShaderStages::FRAGMENT,
                             descriptor_type: DescriptorType::InputAttachment,
@@ -717,7 +772,7 @@ fn create_graphics_pipelines(
                         },
                     ),
                     (
-                        3, // directional light data
+                        2, // directional light data
                         DescriptorSetLayoutBinding {
                             stages: ShaderStages::FRAGMENT,
                             descriptor_type: DescriptorType::UniformBuffer,
@@ -747,8 +802,8 @@ fn create_graphics_pipelines(
                     (
                         0,
                         DescriptorSetLayoutBinding {
-                            stages: ShaderStages::VERTEX,
-                            descriptor_type: DescriptorType::UniformBuffer,
+                            stages: ShaderStages::FRAGMENT,
+                            descriptor_type: DescriptorType::InputAttachment,
                             descriptor_count: 1,
                             ..DescriptorSetLayoutBinding::descriptor_type(
                                 DescriptorType::UniformBuffer,
@@ -768,17 +823,6 @@ fn create_graphics_pipelines(
                     ),
                     (
                         2,
-                        DescriptorSetLayoutBinding {
-                            stages: ShaderStages::FRAGMENT,
-                            descriptor_type: DescriptorType::InputAttachment,
-                            descriptor_count: 1,
-                            ..DescriptorSetLayoutBinding::descriptor_type(
-                                DescriptorType::UniformBuffer,
-                            )
-                        },
-                    ),
-                    (
-                        3,
                         DescriptorSetLayoutBinding {
                             stages: ShaderStages::FRAGMENT,
                             descriptor_type: DescriptorType::UniformBuffer,
@@ -858,7 +902,7 @@ fn create_graphics_pipelines(
         None,
         GraphicsPipelineCreateInfo {
             stages: directional_stages.into_iter().collect(),
-            vertex_input_state: Some(vertex_input_state.clone()),
+            vertex_input_state: Some(dummy_vertex_input_state.clone()),
             input_assembly_state: Some(InputAssemblyState::default()),
             viewport_state: Some(ViewportState::default()),
             rasterization_state: Some(RasterizationState {
@@ -896,7 +940,7 @@ fn create_graphics_pipelines(
         None,
         GraphicsPipelineCreateInfo {
             stages: ambient_stages.into_iter().collect(),
-            vertex_input_state: Some(vertex_input_state),
+            vertex_input_state: Some(dummy_vertex_input_state.clone()),
             input_assembly_state: Some(InputAssemblyState::default()),
             viewport_state: Some(ViewportState::default()),
             rasterization_state: Some(RasterizationState {

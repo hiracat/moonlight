@@ -2,12 +2,6 @@
 
 layout(location = 0) in vec3 position;
 
-layout(set = 0, binding = 0) uniform TransformationUBO {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-} uniforms;
-
 layout(location = 0) out vec3 frag_pos;
 
 void main() {
