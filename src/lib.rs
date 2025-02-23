@@ -23,7 +23,7 @@ mod model;
 mod renderer;
 mod resources;
 
-pub const FRAMES_IN_FLIGHT: usize = 2;
+pub const FRAMES_IN_FLIGHT: usize = 3;
 #[derive(Default)]
 pub struct App {
     render_context: Option<renderer::Context>,
@@ -89,8 +89,9 @@ impl ApplicationHandler for App {
                             &rcx.render_pass,
                             rcx.memory_allocator.clone(),
                         );
-                    rcx.viewport.extent = window_size.into();
-                    acx.aspect_ratio = window_size.width as f32 / window_size.height as f32;
+                    rcx.viewport.extent = acx.window.inner_size().into();
+                    acx.aspect_ratio =
+                        rcx.viewport.extent[0] as f32 / rcx.viewport.extent[1] as f32;
 
                     let mut view_proj_buffers: Vec<Subbuffer<ViewProjUBO>> = vec![];
                     for _ in 0..rcx.swapchain.image_count() {
@@ -133,7 +134,7 @@ impl ApplicationHandler for App {
                         &rcx.deferred_pipeline,
                         &rcx.directional_pipeline,
                         &rcx.ambient_pipeline,
-                        &rcx.view_proj_buffers,
+                        &view_proj_buffers,
                         &rcx.model_buffers,
                         &rcx.ambient_buffers,
                         &rcx.directional_buffers,
@@ -161,9 +162,7 @@ impl ApplicationHandler for App {
                     rcx.recreate_swapchain = true;
                 }
 
-                let mut write = rcx.model_buffers[swapchain_image_index as usize]
-                    .write()
-                    .unwrap();
+                let mut write = rcx.model_buffers[rcx.current_frame].write().unwrap();
                 *write = App::calculate_current_transform(acx.start_time);
                 drop(write);
 
@@ -217,7 +216,7 @@ impl ApplicationHandler for App {
                         0,
                         (
                             rcx.view_proj_sets[swapchain_image_index as usize].clone(),
-                            rcx.model_sets[swapchain_image_index as usize].clone(),
+                            rcx.model_sets[rcx.current_frame].clone(),
                         ),
                     )
                     .unwrap()
@@ -311,8 +310,7 @@ impl ApplicationHandler for App {
         }
     }
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let app_context = self.app_context.as_mut().unwrap();
-        app_context.window.request_redraw();
+        self.app_context.as_mut().unwrap().window.request_redraw();
     }
 }
 impl App {

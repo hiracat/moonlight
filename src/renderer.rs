@@ -37,7 +37,7 @@ use vulkano::{
         SubpassDependency, SubpassDescription,
     },
     shader::ShaderStages,
-    swapchain::{Surface, Swapchain, SwapchainCreateInfo},
+    swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
     sync::{AccessFlags, DependencyFlags, GpuFuture, PipelineStages},
 };
 use winit::window::Window;
@@ -125,7 +125,7 @@ impl Context {
             );
         }
 
-        for _ in 0..swapchain_images.len() {
+        for _ in 0..FRAMES_IN_FLIGHT {
             model_buffers.push(
                 Buffer::new_sized(
                     memory_allocator.clone(),
@@ -317,6 +317,7 @@ fn create_swapchain(
                 .into_iter()
                 .next()
                 .unwrap(),
+            present_mode: PresentMode::Fifo,
             ..Default::default()
         },
     )
@@ -359,6 +360,17 @@ pub fn create_descriptor_sets(
     let mut directional_sets = vec![];
     let mut ambient_sets = vec![];
 
+    for i in 0..FRAMES_IN_FLIGHT {
+        let model_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            model_layout.clone(),
+            [WriteDescriptorSet::buffer(0, model_buffers[i].clone())],
+            [],
+        )
+        .unwrap();
+        model_sets.push(model_set);
+    }
+
     for i in 0..swapchain_image_count {
         let view_proj_set = PersistentDescriptorSet::new(
             &descriptor_set_allocator,
@@ -368,16 +380,6 @@ pub fn create_descriptor_sets(
         )
         .unwrap();
         view_proj_sets.push(view_proj_set);
-
-        let model_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            model_layout.clone(),
-            [WriteDescriptorSet::buffer(0, model_buffers[i].clone())],
-            [],
-        )
-        .unwrap();
-        model_sets.push(model_set);
-
         let mut directional_subset = vec![];
         for j in 0..directional_buffers[0].len() {
             let directional_set = PersistentDescriptorSet::new(

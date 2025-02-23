@@ -65,7 +65,7 @@ impl Context {
             windowsize[0] / windowsize[1]
         };
 
-        let input = BufReader::new(File::open("data/models/low poly fox.obj").unwrap());
+        let input = BufReader::new(File::open("data/models/stressball.obj").unwrap());
         let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
         let vertices: Vec<resources::Vertex> = model
             .vertices
