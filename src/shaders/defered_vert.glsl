@@ -12,7 +12,7 @@ layout(set = 0, binding = 0) uniform ViewProjUBO{
     mat4 projection;
 } vp_uniforms;
 
-layout(set = 1, binding = 0) uniform ModelData {
+layout(set = 1, binding = 0) uniform ModelUBO {
     mat4 model;
     mat4 normals;
 } model;

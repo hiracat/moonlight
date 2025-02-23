@@ -35,10 +35,31 @@ impl ApplicationHandler for App {
             .collect();
         let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
 
-        let model = Model {
+        let model1 = Model {
             vertices,
             indices,
-            requires_update: true,
+            model: App::calculate_current_transform(Instant::now()),
+
+            ..Default::default()
+        };
+
+        let input = BufReader::new(File::open("data/models/twospheres.obj").unwrap());
+        let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+
+        let vertices: Vec<Vertex> = model
+            .vertices
+            .iter()
+            .map(|v| Vertex {
+                position: v.position,
+                normal: v.normal,
+                color: [1.0, 1.0, 1.0], // map other fields as needed
+            })
+            .collect();
+        let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
+
+        let model2 = Model {
+            vertices,
+            indices,
             model: App::calculate_current_transform(Instant::now()),
 
             ..Default::default()
@@ -54,7 +75,7 @@ impl ApplicationHandler for App {
                 intensity: 0.1,
             },
             lights: vec![],
-            models: vec![model],
+            models: vec![model1, model2],
         };
         self.renderer = Some(Renderer::init(&event_loop, &mut self.scene));
     }
@@ -69,6 +90,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => self.renderer.as_mut().unwrap().recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
                 println!("frame start");
+                self.scene.models[0].model =
+                    App::calculate_current_transform(self.renderer.as_mut().unwrap().start_time);
                 self.renderer.as_mut().unwrap().draw(&mut self.scene);
             }
             _ => (),

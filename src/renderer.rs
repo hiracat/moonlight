@@ -138,10 +138,10 @@ pub struct AmbientLight {
 pub struct Model {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
-    pub model: Mat4,
-    pub requires_update: bool,
 
+    pub model: Mat4,
     pub normals: Mat4,
+
     pub ubo: Option<Vec<Subbuffer<ModelUBO>>>,
     pub vertex_buffer: Option<Subbuffer<[Vertex]>>,
     pub index_buffer: Option<Subbuffer<[u32]>>,
@@ -151,15 +151,12 @@ pub struct Model {
 #[repr(C)]
 #[derive(Debug)]
 pub struct ModelUBO {
-    pub view: Mat4,
+    pub model: Mat4,
     pub normal: Mat4,
 }
 impl Model {
-    pub fn model_buffer(&self) -> ModelUBO {
-        ModelUBO {
-            view: self.model,
-            normal: self.normals,
-        }
+    pub fn update_normals(&mut self) {
+        self.normals = self.model.inversed().transposed();
     }
 }
 
@@ -167,6 +164,7 @@ pub struct Renderer {
     pub window: Arc<Window>,
     pub recreate_swapchain: bool,
     pub memory_allocator: Arc<dyn MemoryAllocator>,
+    pub start_time: Instant,
 
     surface: Arc<Surface>,
     aspect_ratio: f32,
@@ -174,7 +172,6 @@ pub struct Renderer {
     queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     dummy_verts: Subbuffer<[DummyVertex]>,
-    start_time: Instant,
     current_frame: usize,
     frame_counter: u128,
 
@@ -313,7 +310,14 @@ impl Renderer {
         dbg!(self.current_frame);
 
         for model in &mut scene.models {
-            let data = model.model_buffer();
+            model.update_normals()
+        }
+
+        for model in &mut scene.models {
+            let data = ModelUBO {
+                model: model.model,
+                normal: model.normals,
+            };
             let buffer = &mut model.ubo.as_mut().unwrap();
             loop {
                 match buffer[self.current_frame].write() {
@@ -337,6 +341,7 @@ impl Renderer {
                 }
             }
         }
+
         let mut builder = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
             self.queue.queue_family_index(),
@@ -394,16 +399,17 @@ impl Renderer {
                     0,
                     0,
                 )
-                .unwrap()
-                .next_subpass(
-                    SubpassEndInfo::default(),
-                    SubpassBeginInfo {
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    },
-                )
                 .unwrap();
         }
+        builder
+            .next_subpass(
+                SubpassEndInfo::default(),
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         dbg!(self.dummy_verts.len());
         builder
@@ -857,6 +863,7 @@ pub fn create_descriptor_sets(
         )
         .unwrap();
         view_proj_sets.push(view_proj_set);
+
         let mut directional_subset = vec![];
         for j in 0..directional_buffers[0].len() {
             let directional_set = PersistentDescriptorSet::new(
