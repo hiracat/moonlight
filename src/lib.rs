@@ -1,7 +1,7 @@
 use obj::load_obj;
-use renderer::{AmbientLight, Camera, Model, Renderer, Scene, Vertex};
+use renderer::{AmbientLight, Camera, DirectionalLight, Model, Renderer, Scene, Vertex};
 use std::{fs::File, io::BufReader, sync::Arc, time::Instant};
-use ultraviolet::Mat4;
+use ultraviolet::{Mat4, Vec3};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::ActiveEventLoop,
     window::WindowId,
@@ -35,49 +35,31 @@ impl ApplicationHandler for App {
             .collect();
         let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
 
-        let model1 = Model {
+        let model1 = Model::new(
             vertices,
             indices,
-            model: App::calculate_current_transform(Instant::now()),
+            App::calculate_current_transform(Instant::now()),
+        );
 
-            ..Default::default()
-        };
+        let light = DirectionalLight::new([4.0, -2.0, 1.0, 1.0], [0.1, 0.1, 1.0]);
 
-        let input = BufReader::new(File::open("data/models/twospheres.obj").unwrap());
-        let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+        let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.1);
 
-        let vertices: Vec<Vertex> = model
-            .vertices
-            .iter()
-            .map(|v| Vertex {
-                position: v.position,
-                normal: v.normal,
-                color: [1.0, 1.0, 1.0], // map other fields as needed
-            })
-            .collect();
-        let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
-
-        let model2 = Model {
-            vertices,
-            indices,
-            model: App::calculate_current_transform(Instant::now()),
-
-            ..Default::default()
-        };
-
+        let window = renderer::create_window(event_loop);
         self.scene = Scene {
-            camera: Camera {
-                view: Mat4::identity(),
-                proj: Mat4::identity(),
-            },
-            ambient: AmbientLight {
-                color: [1.0, 1.0, 1.0],
-                intensity: 0.1,
-            },
-            lights: vec![],
-            models: vec![model1, model2],
+            camera: Camera::new(
+                Vec3::new(0.0, 0.0, 3.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                60.0,
+                1.0,
+                100.0,
+                &window,
+            ),
+            ambient,
+            lights: vec![light],
+            models: vec![model1], //model2],
         };
-        self.renderer = Some(Renderer::init(&event_loop, &mut self.scene));
+        self.renderer = Some(Renderer::init(&event_loop, &mut self.scene, &window));
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // INFO: RCX = render_context, acx is the app context
