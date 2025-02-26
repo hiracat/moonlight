@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use ultraviolet::{projection, Mat4, Vec3};
+use ultraviolet::{projection, Mat4, Rotor3, Vec3, Vec4};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
@@ -238,9 +238,11 @@ impl DirectionalLight {
 pub struct Model {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
-    pub model: Mat4,
+    pub requires_update: bool,
+    pub position: Vec4,
+    pub rotation: Rotor3,
 
-    normals: Mat4,
+    model: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
     descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
     vertex_buffer: Option<Subbuffer<[Vertex]>>,
@@ -255,12 +257,14 @@ struct ModelUBO {
     normal: Mat4,
 }
 impl Model {
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, model: Mat4) -> Self {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4) -> Self {
         Model {
             vertices,
             indices,
-            model,
-            normals: model.inversed().transposed(),
+            model: Mat4::identity(),
+            rotation: Rotor3::identity(),
+            requires_update: true,
+            position,
 
             index_buffer: None,
             vertex_buffer: None,
@@ -268,9 +272,6 @@ impl Model {
             u_buffer: None,
             descriptor_set: None,
         }
-    }
-    pub fn update_normals(&mut self) {
-        self.normals = self.model.inversed().transposed();
     }
 }
 
@@ -382,13 +383,18 @@ impl Renderer {
         dbg!(self.current_frame);
 
         for model in &mut scene.models {
-            model.update_normals()
-        }
+            if model.requires_update {
+                let rotation_mat = model.rotation.into_matrix().into_homogeneous();
+                let translation_mat = Mat4::from_translation(model.position.xyz());
+                let model_mat = translation_mat * rotation_mat;
 
-        for model in &mut scene.models {
+                model.model = model_mat;
+                model.requires_update = false;
+            };
+
             let data = ModelUBO {
                 model: model.model,
-                normal: model.normals,
+                normal: model.model.inversed().transposed(),
             };
             let buffer = &mut model.u_buffer.as_mut().unwrap();
             loop {
@@ -1355,8 +1361,8 @@ fn create_graphics_pipelines(
     )
     .unwrap();
 
-    let cull_mode = CullMode::None;
-    let front_face = FrontFace::Clockwise;
+    let cull_mode = CullMode::Back;
+    let front_face = FrontFace::CounterClockwise;
     // We have to indicate which subpass of which render pass this pipeline is going to be
     // used in. The pipeline will only be usable from this particular subpass.
     let deferred_pipeline = GraphicsPipeline::new(
