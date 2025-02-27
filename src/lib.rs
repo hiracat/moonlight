@@ -1,5 +1,7 @@
 use obj::load_obj;
-use renderer::{AmbientLight, Camera, DirectionalLight, Model, Renderer, Scene, Vertex};
+use renderer::{
+    AmbientLight, Camera, DirectionalLight, Model, PointLight, Renderer, Scene, Vertex,
+};
 use std::{
     collections::HashSet,
     fs::File,
@@ -78,46 +80,16 @@ impl ApplicationHandler for App {
 
             Model::new(vertices, indices, Vec4::zero())
         };
-        let red_ball = {
-            let input = BufReader::new(File::open("data/models/smallsphere.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
 
-            Model::new(vertices, indices, Vec4::new(2.0, 1.0, 0.0, 1.0))
-        };
-        let green_ball = {
-            let input = BufReader::new(File::open("data/models/smallsphere.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
+        // let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.0, 0.0, 0.0]);
 
-            Model::new(vertices, indices, Vec4::new(-2.0, 1.0, 0.0, 1.0))
-        };
-
-        let blue = DirectionalLight::new([0.0, 4.0, 0.0, 1.0], [0.1, 0.1, 1.0]);
-        let red = DirectionalLight::new([2.0, 1.0, 0.0, 1.0], [1.0, 0.1, 0.1]);
-        let green = DirectionalLight::new([-2.0, 1.0, 0.0, 1.0], [0.1, 1.1, 0.1]);
-
-        let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.1);
+        let ambient = AmbientLight::new([0.9, 0.9, 1.0], 0.0);
 
         let window = renderer::create_window(event_loop);
+
+        let red = PointLight::new([2.0, 2.0, 0.0, 1.0], [1.0, 0.0, 0.0], None, None, None);
+        let green = PointLight::new([-2.0, 2.0, 0.0, 1.0], [0.0, 1.0, 0.0], None, None, None);
+        let blue = PointLight::new([0.0, 2.0, -3.0, 1.0], [0.0, 0.0, 1.0], None, None, None);
 
         self.scene = Scene {
             camera: Camera::new(
@@ -129,8 +101,9 @@ impl ApplicationHandler for App {
                 &window,
             ),
             ambient,
-            lights: vec![blue, red, green],
-            models: vec![fox, green_ball, red_ball, ground],
+            points: vec![red, green, blue],
+            directionals: vec![], //sun],
+            models: vec![fox, ground],
         };
         self.renderer = Some(Renderer::init(&event_loop, &mut self.scene, &window));
     }
