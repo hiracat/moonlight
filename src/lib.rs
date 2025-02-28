@@ -6,11 +6,9 @@ use std::{
     collections::HashSet,
     fs::File,
     io::BufReader,
-    sync::Arc,
-    thread::sleep,
     time::{Duration, Instant},
 };
-use ultraviolet::{Mat4, Rotor3, Vec3, Vec4};
+use ultraviolet::{Rotor3, Vec3, Vec4};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -19,6 +17,7 @@ use winit::{
     window::WindowId,
 };
 
+mod ecs;
 mod renderer;
 
 pub struct App {
@@ -81,9 +80,9 @@ impl ApplicationHandler for App {
             Model::new(vertices, indices, Vec4::zero())
         };
 
-        // let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.0, 0.0, 0.0]);
+        let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
 
-        let ambient = AmbientLight::new([0.9, 0.9, 1.0], 0.0);
+        let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.05);
 
         let window = renderer::create_window(event_loop);
 
@@ -102,7 +101,7 @@ impl ApplicationHandler for App {
             ),
             ambient,
             points: vec![red, green, blue],
-            directionals: vec![], //sun],
+            directionals: vec![sun],
             models: vec![fox, ground],
         };
         self.renderer = Some(Renderer::init(&event_loop, &mut self.scene, &window));
@@ -118,10 +117,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => self.renderer.as_mut().unwrap().recreate_swapchain = true,
             WindowEvent::RedrawRequested => {
                 println!("frame start");
+
                 let mut velocity = Vec4::zero();
                 let mut rotation = Rotor3::identity();
-
-                let mut rotation_amount = 1.0;
+                let mut rotation_amount = 5.0;
                 rotation_amount *= self.delta_time.as_secs_f32();
                 if self.keys.contains(&KeyCode::KeyW) {
                     velocity += Vec4::new(0.0, 0.0, 1.0, 0.0)
@@ -129,25 +128,21 @@ impl ApplicationHandler for App {
                 if self.keys.contains(&KeyCode::KeyS) {
                     velocity += Vec4::new(0.0, 0.0, -1.0, 0.0)
                 }
-
                 if self.keys.contains(&KeyCode::KeyD) {
                     rotation = rotation * Rotor3::from_rotation_xz(rotation_amount)
                 }
                 if self.keys.contains(&KeyCode::KeyA) {
                     rotation = rotation * Rotor3::from_rotation_xz(-rotation_amount)
                 }
-
                 self.scene.models[0].rotation = rotation * self.scene.models[0].rotation;
-
+                velocity *= 5.0;
                 velocity *= self.delta_time.as_secs_f32();
                 velocity =
                     (self.scene.models[0].rotation * velocity.xyz()).into_homogeneous_vector();
-
                 self.scene.models[0].position += velocity;
                 self.scene.models[0].requires_update = true;
 
                 self.renderer.as_mut().unwrap().draw(&mut self.scene);
-
                 self.delta_time = self.prev_frame_end.elapsed();
                 self.prev_frame_end = Instant::now();
             }

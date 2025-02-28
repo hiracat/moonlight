@@ -1,5 +1,12 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    any::{Any, TypeId},
+    collections::{hash_set, HashMap, HashSet},
+    error::Error,
+    sync::Arc,
+    time::Instant,
+};
 
+use bytemuck::ByteHash;
 use ultraviolet::{projection, Mat4, Rotor3, Vec3, Vec4};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -57,6 +64,102 @@ use vulkano::{
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
+
+#[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
+pub struct EntityId(pub u32);
+struct World {
+    entities: HashSet<EntityId>,
+    components: HashMap<EntityId, Vec<Component>>,
+    next_free: u32,
+    last_dead: Vec<u32>,
+}
+#[derive(Debug)]
+pub enum WorldError {
+    EntityNotFound,
+    DuplicateComponent,
+}
+
+impl World {
+    fn add(&mut self) -> EntityId {
+        let free = {
+            if self.last_dead.is_empty() {
+                let tmp = self.next_free;
+                self.next_free += 1;
+                tmp
+            } else {
+                self.last_dead.pop().unwrap() // litterally just checked so is safe
+            }
+        };
+        EntityId(free)
+    }
+    fn remove(&mut self, entity: EntityId) {
+        self.entities.remove(&entity);
+        self.components.remove(&entity);
+        self.last_dead.push(entity.0);
+    }
+    fn add_component(
+        &mut self,
+        entity: EntityId,
+        component: Component,
+    ) -> Result<EntityId, WorldError> {
+        match self.components.get_mut(&entity) {
+            Some(x) => {
+                if x.iter().any(|x| x.get_type() == component.get_type()) {
+                    return Err(WorldError::DuplicateComponent);
+                }
+                x.push(component)
+            }
+            None => return Err(WorldError::EntityNotFound),
+        };
+        Ok(entity)
+    }
+    fn remove_component(
+        &mut self,
+        entity: EntityId,
+        component: ComponentType,
+    ) -> Result<EntityId, WorldError> {
+        match self.components.get_mut(&entity) {
+            Some(x) => {
+                x.retain(|x| x.get_type() != component);
+                Ok(entity)
+            }
+            None => Err(WorldError::EntityNotFound),
+        }
+    }
+    /// may return an empty vec
+    fn get_by_type(&self, t: ComponentType) -> Vec<EntityId> {
+        let mut matched = HashSet::new();
+        for pair in &self.components {
+            for component in pair.1 {
+                if t == component.get_type() {
+                    matched.insert(*pair.0);
+                }
+            }
+        }
+        matched.into_iter().collect()
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum ComponentType {
+    Transform,
+}
+enum Component {
+    Transform(Transform),
+}
+impl Component {
+    fn get_type(&self) -> ComponentType {
+        match self {
+            Component::Transform(_) => ComponentType::Transform,
+        }
+    }
+}
+
+struct Transform {
+    position: Vec3,
+    orientation: Rotor3,
+    scale: Vec3,
+}
 
 #[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
 #[repr(C)]
