@@ -13,6 +13,5 @@ winit = { version = "0.30.5", features = ["rwh_04", "rwh_05"] }
 version = "0.34"  # or your version
 features = ["shaderc-debug"]
 
-# Cargo.toml
 [profile.dev]
-codegen-units = 16  # Faster compile times for development
+codegen-units = 16

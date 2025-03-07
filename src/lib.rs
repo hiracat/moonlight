@@ -17,7 +17,6 @@ use winit::{
     window::WindowId,
 };
 
-mod ecs;
 mod renderer;
 
 pub struct App {
@@ -58,7 +57,7 @@ impl ApplicationHandler for App {
                     color: [1.0, 1.0, 1.0], // map other fields as needed
                 })
                 .collect();
-            let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
+            let indices: Vec<u32> = model.indices.clone();
 
             Model::new(vertices, indices, Vec4::zero())
         };
@@ -75,7 +74,7 @@ impl ApplicationHandler for App {
                     color: [1.0, 1.0, 1.0], // map other fields as needed
                 })
                 .collect();
-            let indices: Vec<u32> = model.indices.iter().map(|i| *i as u32).collect();
+            let indices: Vec<u32> = model.indices.clone();
 
             Model::new(vertices, indices, Vec4::zero())
         };
@@ -104,7 +103,7 @@ impl ApplicationHandler for App {
             directionals: vec![sun],
             models: vec![fox, ground],
         };
-        self.renderer = Some(Renderer::init(&event_loop, &mut self.scene, &window));
+        self.renderer = Some(Renderer::init(event_loop, &mut self.scene, &window));
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // INFO: RCX = render_context, acx is the app context
@@ -123,16 +122,16 @@ impl ApplicationHandler for App {
                 let mut rotation_amount = 5.0;
                 rotation_amount *= self.delta_time.as_secs_f32();
                 if self.keys.contains(&KeyCode::KeyW) {
-                    velocity += Vec4::new(0.0, 0.0, 1.0, 0.0)
+                    velocity += Vec4::new(0.0, 0.0, 1.0, 0.0);
                 }
                 if self.keys.contains(&KeyCode::KeyS) {
-                    velocity += Vec4::new(0.0, 0.0, -1.0, 0.0)
+                    velocity += Vec4::new(0.0, 0.0, -1.0, 0.0);
                 }
                 if self.keys.contains(&KeyCode::KeyD) {
-                    rotation = rotation * Rotor3::from_rotation_xz(rotation_amount)
+                    rotation = rotation * Rotor3::from_rotation_xz(rotation_amount);
                 }
                 if self.keys.contains(&KeyCode::KeyA) {
-                    rotation = rotation * Rotor3::from_rotation_xz(-rotation_amount)
+                    rotation = rotation * Rotor3::from_rotation_xz(-rotation_amount);
                 }
                 self.scene.models[0].rotation = rotation * self.scene.models[0].rotation;
                 velocity *= 5.0;

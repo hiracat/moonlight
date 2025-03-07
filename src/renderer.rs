@@ -1,12 +1,11 @@
+#![allow(clippy::cast_possible_truncation)]
+#![allow(dead_code)]
 use std::{
-    any::{Any, TypeId},
-    collections::{hash_set, HashMap, HashSet},
-    error::Error,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
 
-use bytemuck::ByteHash;
 use ultraviolet::{projection, Mat4, Rotor3, Vec3, Vec4};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -55,7 +54,7 @@ use vulkano::{
     },
     shader::ShaderStages,
     swapchain::{
-        acquire_next_image, PresentMode, Surface, Swapchain, SwapchainCreateInfo,
+        acquire_next_image, PresentMode, Surface, SurfaceInfo, Swapchain, SwapchainCreateInfo,
         SwapchainPresentInfo,
     },
     sync::{self, AccessFlags, DependencyFlags, GpuFuture, HostAccessError, PipelineStages},
@@ -107,7 +106,7 @@ impl World {
                 if x.iter().any(|x| x.get_type() == component.get_type()) {
                     return Err(WorldError::DuplicateComponent);
                 }
-                x.push(component)
+                x.push(component);
             }
             None => return Err(WorldError::EntityNotFound),
         };
@@ -116,22 +115,22 @@ impl World {
     fn remove_component(
         &mut self,
         entity: EntityId,
-        component: ComponentType,
+        component: &ComponentType,
     ) -> Result<EntityId, WorldError> {
         match self.components.get_mut(&entity) {
             Some(x) => {
-                x.retain(|x| x.get_type() != component);
+                x.retain(|x| x.get_type() != *component);
                 Ok(entity)
             }
             None => Err(WorldError::EntityNotFound),
         }
     }
     /// may return an empty vec
-    fn get_by_type(&self, t: ComponentType) -> Vec<EntityId> {
+    fn get_by_type(&self, t: &ComponentType) -> Vec<EntityId> {
         let mut matched = HashSet::new();
         for pair in &self.components {
             for component in pair.1 {
-                if t == component.get_type() {
+                if *t == component.get_type() {
                     matched.insert(*pair.0);
                 }
             }
@@ -387,7 +386,7 @@ pub struct Model {
     pub position: Vec4,
     pub rotation: Rotor3,
 
-    model: Mat4,
+    matrix: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
     descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
     vertex_buffer: Option<Subbuffer<[Vertex]>>,
@@ -406,7 +405,7 @@ impl Model {
         Model {
             vertices,
             indices,
-            model: Mat4::identity(),
+            matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
             requires_update: true,
             position,
@@ -452,6 +451,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    #[allow(clippy::too_many_lines)]
     pub fn draw(&mut self, scene: &mut Scene) {
         self.frames_resources_free[self.current_frame]
             .as_mut()
@@ -492,7 +492,7 @@ impl Renderer {
                 self.memory_allocator.clone(),
             );
             self.viewport.extent = self.window.inner_size().into();
-            self.aspect_ratio = self.viewport.extent[0] as f32 / self.viewport.extent[1] as f32;
+            self.aspect_ratio = self.viewport.extent[0] / self.viewport.extent[1];
 
             scene.camera.recreate(&self.window, &self.memory_allocator);
 
@@ -538,15 +538,15 @@ impl Renderer {
                 let translation_mat = Mat4::from_translation(model.position.xyz());
                 let model_mat = translation_mat * rotation_mat;
 
-                model.model = model_mat;
+                model.matrix = model_mat;
                 model.requires_update = false;
             };
 
             let data = ModelUBO {
-                model: model.model,
-                normal: model.model.inversed().transposed(),
+                model: model.matrix,
+                normal: model.matrix.inversed().transposed(),
             };
-            let buffer = &mut model.u_buffer.as_mut().unwrap();
+            let buffer = model.u_buffer.as_mut().unwrap();
             loop {
                 match buffer[self.current_frame].write() {
                     Ok(mut write) => {
@@ -726,12 +726,13 @@ impl Renderer {
             Err(e) => {
                 self.frames_resources_free[self.current_frame] =
                     Some(Box::new(sync::now(self.device.clone())).boxed());
-                println!("Failed to flush future: {:?}", e);
+                println!("Failed to flush future: {e}");
             }
         }
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn init(event_loop: &ActiveEventLoop, scene: &mut Scene, window: &Arc<Window>) -> Self {
         let start_time = Instant::now();
         let instance = create_instance(event_loop);
@@ -753,16 +754,11 @@ impl Renderer {
                 ..Default::default()
             },
         ));
-        let window_size = window.inner_size();
-        let aspect_ratio = {
-            let windowsize: [f32; 2] = window_size.into();
-            windowsize[0] / windowsize[1]
-        };
+        let window_size: [f32; 2] = window.inner_size().into();
+        let aspect_ratio = window_size[0] / window_size[1];
 
         for model in &mut scene.models {
-            let vertex_buffer: Subbuffer<[Vertex]>;
-            let index_buffer: Subbuffer<[u32]>;
-            vertex_buffer = Buffer::from_iter(
+            let vertex_buffer = Buffer::from_iter(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::VERTEX_BUFFER,
@@ -777,7 +773,7 @@ impl Renderer {
             )
             .unwrap();
             model.vertex_buffer = Some(vertex_buffer);
-            index_buffer = Buffer::from_iter(
+            let index_buffer = Buffer::from_iter(
                 memory_allocator.clone(),
                 BufferCreateInfo {
                     usage: BufferUsage::INDEX_BUFFER,
@@ -809,7 +805,7 @@ impl Renderer {
         )
         .unwrap();
 
-        let (swapchain, swapchain_images) = create_swapchain(&device, &window, &surface);
+        let (swapchain, swapchain_images) = create_swapchain(&device, window, &surface);
 
         let render_pass = create_renderpass(&device, swapchain.image_format());
         let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
@@ -862,7 +858,7 @@ impl Renderer {
                         },
                     )
                     .unwrap(),
-                )
+                );
             }
             light.u_buffer = Some(light_buffers);
         }
@@ -890,7 +886,7 @@ impl Renderer {
                         },
                     )
                     .unwrap(),
-                )
+                );
             }
             light.u_buffer = Some(light_buffers);
         }
@@ -1004,11 +1000,11 @@ fn create_swapchain(
     let window_size = window.inner_size();
     let surface_capabilities = device
         .physical_device()
-        .surface_capabilities(surface, Default::default())
+        .surface_capabilities(surface, SurfaceInfo::default())
         .unwrap();
     let (image_format, _) = device
         .physical_device()
-        .surface_formats(surface, Default::default())
+        .surface_formats(surface, SurfaceInfo::default())
         .unwrap()[0]; // take the first available format
     Swapchain::new(
         device.clone(),
@@ -1036,6 +1032,7 @@ fn create_swapchain(
     )
     .unwrap()
 }
+#[allow(clippy::too_many_lines)]
 pub fn create_descriptor_sets(
     device: &Arc<Device>,
 
@@ -1060,11 +1057,27 @@ pub fn create_descriptor_sets(
         },
     );
 
-    let camera_layout = graphics_pipelines[0].layout().set_layouts().get(0).unwrap();
+    let camera_layout = graphics_pipelines[0]
+        .layout()
+        .set_layouts()
+        .first()
+        .unwrap();
     let model_layout = graphics_pipelines[0].layout().set_layouts().get(1).unwrap();
-    let directional_layout = graphics_pipelines[1].layout().set_layouts().get(0).unwrap();
-    let ambient_layout = graphics_pipelines[2].layout().set_layouts().get(0).unwrap();
-    let point_layout = graphics_pipelines[3].layout().set_layouts().get(0).unwrap();
+    let directional_layout = graphics_pipelines[1]
+        .layout()
+        .set_layouts()
+        .first()
+        .unwrap();
+    let ambient_layout = graphics_pipelines[2]
+        .layout()
+        .set_layouts()
+        .first()
+        .unwrap();
+    let point_layout = graphics_pipelines[3]
+        .layout()
+        .set_layouts()
+        .first()
+        .unwrap();
 
     for model in models {
         let mut model_sets = vec![];
@@ -1155,16 +1168,14 @@ pub fn create_descriptor_sets(
     ambient.descriptor_set = Some(ambient_sets);
     camera.descriptor_set = Some(camera_sets);
 }
+type Color = Vec<Arc<ImageView>>;
+type Normal = Vec<Arc<ImageView>>;
+type Position = Vec<Arc<ImageView>>;
 pub fn create_framebuffers(
     swapchain_images: &[Arc<Image>],
     render_pass: &Arc<RenderPass>,
     allocator: Arc<dyn MemoryAllocator>,
-) -> (
-    Vec<Arc<Framebuffer>>,
-    Vec<Arc<ImageView>>, // color
-    Vec<Arc<ImageView>>, // normal
-    Vec<Arc<ImageView>>, // position
-) {
+) -> (Vec<Arc<Framebuffer>>, Color, Normal, Position) {
     let mut framebuffers = vec![];
     let mut color_buffers = vec![];
     let mut normal_buffers = vec![];
@@ -1253,6 +1264,7 @@ pub fn create_framebuffers(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Arc<RenderPass> {
     RenderPass::new(
         device.clone(),
@@ -1386,90 +1398,43 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
     )
     .unwrap()
 }
+mod shaders;
+use shaders as s;
+#[allow(clippy::too_many_lines)]
 fn create_graphics_pipelines(
     device: &Arc<Device>,
     deferred_subpass: &Subpass,
     lighting_subpass: &Subpass,
 ) -> Vec<Arc<GraphicsPipeline>> {
-    mod defered_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/defered_vert.glsl",
-        }
-    }
-    mod defered_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/defered_frag.glsl"
-        }
-    }
-    mod lighting_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/directional_vert.glsl"
-        }
-    }
-    mod lighting_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/directional_frag.glsl"
-        }
-    }
-    mod ambient_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/ambient_vert.glsl",
-        }
-    }
-    mod ambient_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/ambient_frag.glsl",
-        }
-    }
-
-    mod point_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/point_vert.glsl",
-        }
-    }
-    mod point_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/point_frag.glsl"
-        }
-    }
-
-    let deferred_vert = defered_vert::load(device.clone())
+    let deferred_vert = s::defered_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let deferred_frag = defered_frag::load(device.clone())
+    let deferred_frag = s::defered_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let directional_vert = lighting_vert::load(device.clone())
+    let directional_vert = s::lighting_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let directional_frag = lighting_frag::load(device.clone())
+    let directional_frag = s::lighting_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let ambient_vert = ambient_vert::load(device.clone())
+    let ambient_vert = s::ambient_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let ambient_frag = ambient_frag::load(device.clone())
+    let ambient_frag = s::ambient_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let point_vert = point_vert::load(device.clone())
+    let point_vert = s::point_vert::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
-    let point_frag = point_frag::load(device.clone())
+    let point_frag = s::point_frag::load(device.clone())
         .unwrap()
         .entry_point("main")
         .unwrap();
