@@ -2,7 +2,6 @@ use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use thiserror::Error;
@@ -18,32 +17,12 @@ use winit::window::Window;
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
 
-pub struct ComponentMask(HashSet<TypeId>);
-impl ComponentMask {
-    fn new(components: &[TypeId]) -> Self {
-        Self {
-            0: HashSet::from_iter(components.to_vec()),
-        }
-    }
-}
-
-pub trait System {
-    fn required_components(&self) -> ComponentMask;
-    fn update(
-        &mut self,
-        components: &Vec<HashMap<TypeId, &mut dyn Any>>,
-        resources: &HashMap<TypeId, &mut dyn Any>,
-        delta_time: &Duration,
-    );
-}
-
 pub struct World {
-    entities: HashMap<EntityId, ComponentMask>,
+    entities: HashSet<EntityId>,
 
     component_storage: HashMap<EntityId, HashMap<TypeId, Box<dyn Any>>>,
-    resource_storage: HashMap<std::any::TypeId, Box<dyn Any>>,
+    resource_storage: HashMap<TypeId, Box<dyn Any>>,
 
-    systems: Vec<Box<dyn System>>,
     next_free: u32,
     last_dead: Vec<u32>,
 }
@@ -52,51 +31,23 @@ pub struct World {
 pub enum WorldError {
     #[error("entity not found")]
     EntityNotFound,
-    #[error("entity already had componenet")]
+    #[error("entity already has component")]
     ComponentAlreadyAdded,
     #[error("the requested entity does not have the component")]
     ComponentMissing,
-    #[error("the component you are tyring to add is not registered")]
-    ComponentUnregistered,
 }
 
 impl World {
+    // public api
     pub fn init() -> Self {
         Self {
-            entities: HashMap::new(),
+            entities: HashSet::new(),
             component_storage: HashMap::new(),
             resource_storage: HashMap::new(),
-            systems: Vec::new(),
 
             next_free: 0,
             last_dead: Vec::new(),
         }
-    }
-
-    pub fn update(&mut self, delta_time: Duration) {
-        for system in &mut self.systems {
-            let mut components = Vec::new();
-
-            for (_, component_map) in &mut self.component_storage {
-                let mut map = HashMap::new();
-                for (type_id, component) in component_map {
-                    if system.required_components().0.contains(&type_id) {
-                        map.insert(*type_id, component.as_mut());
-                    }
-                }
-                components.push(map);
-            }
-
-            let mut map = HashMap::new();
-            for (type_id, resource) in &mut self.resource_storage {
-                map.insert(*type_id, resource.as_mut());
-            }
-            system.update(&components, &map, &delta_time);
-        }
-    }
-
-    pub fn system_register(&mut self, system: Box<dyn System>) {
-        self.systems.push(system);
     }
 
     pub fn entity_create(&mut self) -> EntityId {
@@ -109,6 +60,10 @@ impl World {
                 self.last_dead.pop().unwrap() // litterally just checked so is safe
             }
         };
+        self.entities.insert(EntityId(free));
+        self.component_storage
+            .insert(EntityId(free), HashMap::new());
+
         EntityId(free)
     }
     pub fn entity_destroy(&mut self, entity: EntityId) {
@@ -116,19 +71,74 @@ impl World {
         self.entities.remove(&entity);
         self.component_storage.remove(&entity);
     }
-    pub fn entity_component_add(
+
+    pub fn component_add<T: 'static>(
         &mut self,
         entity: EntityId,
-        component: Box<dyn Any>,
+        component: T,
     ) -> Result<(), WorldError> {
         match self.component_storage.get_mut(&entity) {
-            Some(components) => Ok({
-                components.insert(component.type_id(), component);
-            }),
+            Some(components) => {
+                if components.contains_key(&component.type_id()) {
+                    return Err(WorldError::ComponentAlreadyAdded);
+                }
+                components.insert(TypeId::of::<T>(), Box::new(component));
+                return Ok(());
+            }
             None => Err(WorldError::EntityNotFound),
         }
     }
-    pub fn entity_component_remove(
+    pub fn component_remove<T: 'static>(&mut self, entity: EntityId) -> Result<(), WorldError> {
+        self.entity_component_remove(entity, &TypeId::of::<T>())
+    }
+    pub fn component_get<T: 'static>(&self, entity: EntityId) -> Result<&T, WorldError> {
+        self.entity_component_get(&entity, &TypeId::of::<T>())
+            .and_then(|component| {
+                component
+                    .downcast_ref::<T>()
+                    .ok_or(WorldError::ComponentMissing)
+            })
+    }
+    pub fn component_get_mut<T: 'static>(
+        &mut self,
+        entity: EntityId,
+    ) -> Result<&mut T, WorldError> {
+        self.entity_component_get_mut(&entity, &TypeId::of::<T>())
+            .and_then(|component| {
+                component
+                    .downcast_mut::<T>()
+                    .ok_or(WorldError::ComponentMissing)
+            })
+    }
+    pub fn resource_add<T: 'static>(&mut self, resource: T) {
+        self.resource_storage
+            .insert(TypeId::of::<T>(), Box::new(resource));
+    }
+
+    pub fn resource_get<T: 'static>(&self) -> Option<&T> {
+        let type_id = TypeId::of::<T>();
+        self.resource_storage
+            .get(&type_id)
+            .and_then(|res| res.downcast_ref::<T>())
+    }
+
+    pub fn query<T: 'static>(&self) -> Vec<(EntityId, &T)> {
+        let type_id = TypeId::of::<T>();
+        self.entities
+            .iter()
+            .filter_map(|entity| {
+                self.component_storage
+                    .get(entity)
+                    .and_then(|components| components.get(&type_id))
+                    .and_then(|component| {
+                        component.downcast_ref::<T>().map(|c| (entity.clone(), c))
+                    })
+            })
+            .collect()
+    }
+
+    // impl details
+    fn entity_component_remove(
         &mut self,
         entity: EntityId,
         component_type: &TypeId,
@@ -141,9 +151,9 @@ impl World {
             None => Err(WorldError::EntityNotFound),
         }
     }
-    pub fn entity_componenet_get(
+    fn entity_component_get(
         &self,
-        entity: EntityId,
+        entity: &EntityId,
         component_type: &TypeId,
     ) -> Result<&dyn Any, WorldError> {
         match self.component_storage.get(&entity) {
@@ -154,7 +164,7 @@ impl World {
             None => return Err(WorldError::EntityNotFound),
         }
     }
-    pub fn entity_componenet_get_mut(
+    fn entity_component_get_mut(
         &mut self,
         entity: &EntityId,
         component_type: &TypeId,
