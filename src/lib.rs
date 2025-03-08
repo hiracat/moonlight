@@ -17,6 +17,7 @@ use winit::{
     window::WindowId,
 };
 
+mod ecs;
 mod renderer;
 
 pub struct App {
