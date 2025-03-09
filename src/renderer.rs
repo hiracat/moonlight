@@ -2,7 +2,228 @@
 #![allow(dead_code)]
 use std::{sync::Arc, time::Instant};
 
-use ultraviolet::Mat4;
+struct Transform {
+    position: Vec3,
+    orientation: Rotor3,
+    scale: Vec3,
+}
+#[derive(Default)]
+pub struct Camera {
+    view: ultraviolet::Mat4,
+    proj: ultraviolet::Mat4,
+
+    fov_radians: f32,
+    near: f32,
+    far: f32,
+
+    u_buffer: Option<Vec<Subbuffer<CameraUBO>>>,
+    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+}
+impl Camera {
+    pub fn new(
+        position: Vec3,
+        look_at: Vec3,
+        fov: f32,
+        near: f32,
+        far: f32,
+        window: &Arc<Window>,
+    ) -> Self {
+        let fov_radians = fov * (std::f32::consts::PI / 180.0);
+        let size: [f32; 2] = window.inner_size().into();
+        let ratio = size[0] / size[1];
+        Self {
+            view: ultraviolet::Mat4::look_at(
+                position,
+                look_at,
+                Vec3::new(0.0, 1.0, 0.0), // Up vector
+            ),
+            fov_radians,
+            near,
+            far,
+            proj: projection::perspective_vk(fov_radians, ratio, near, far),
+            u_buffer: None,
+            descriptor_set: None,
+        }
+    }
+
+    pub fn recreate(&mut self, window: &Arc<Window>, memory_allocator: &Arc<dyn MemoryAllocator>) {
+        let size: [f32; 2] = window.inner_size().into();
+        let ratio = size[0] / size[1];
+        self.proj = projection::perspective_vk(self.fov_radians, ratio, self.near, self.far);
+
+        for buffer in self.u_buffer.as_mut().unwrap() {
+            *buffer = Buffer::from_data(
+                memory_allocator.clone(),
+                BufferCreateInfo {
+                    usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                CameraUBO {
+                    proj: self.proj,
+                    view: self.view,
+                },
+            )
+            .unwrap();
+        }
+    }
+}
+#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+struct CameraUBO {
+    view: ultraviolet::Mat4,
+    proj: ultraviolet::Mat4,
+}
+
+#[derive(Default)]
+pub struct AmbientLight {
+    pub color: [f32; 3],
+    pub intensity: f32,
+
+    u_buffer: Option<Vec<Subbuffer<AmbientLightUBO>>>,
+    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+}
+
+#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+struct AmbientLightUBO {
+    color: [f32; 3],
+    intensity: f32,
+}
+impl AmbientLight {
+    pub fn new(color: [f32; 3], intensity: f32) -> Self {
+        Self {
+            color,
+            intensity,
+            u_buffer: None,
+            descriptor_set: None,
+        }
+    }
+}
+
+pub struct PointLight {
+    pub position: [f32; 4],
+    pub color: [f32; 3],
+    pub brightness: f32,
+    pub linear: f32,
+    pub quadratic: f32,
+
+    u_buffer: Option<Vec<Subbuffer<PointLightUBO>>>,
+    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+struct PointLightUBO {
+    position: [f32; 4],
+    color: [f32; 3],
+    brightness: f32,
+    linear: f32,
+    quadratic: f32,
+}
+
+impl PointLight {
+    pub fn new(
+        position: [f32; 4],
+        color: [f32; 3],
+        brightness: Option<f32>,
+        linear: Option<f32>,
+        quadratic: Option<f32>,
+    ) -> Self {
+        Self {
+            brightness: brightness.unwrap_or(10.0),
+            linear: linear.unwrap_or(0.7),
+            quadratic: quadratic.unwrap_or(1.2),
+            position,
+            color,
+            descriptor_set: None,
+            u_buffer: None,
+        }
+    }
+}
+
+pub struct DirectionalLight {
+    pub position: [f32; 4],
+    pub color: [f32; 3],
+
+    u_buffer: Option<Vec<Subbuffer<DirectionalLightUBO>>>,
+    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
+#[repr(C)]
+struct DirectionalLightUBO {
+    position: [f32; 4],
+    color: [f32; 3],
+}
+
+impl DirectionalLight {
+    pub fn new(position: [f32; 4], color: [f32; 3]) -> Self {
+        Self {
+            position,
+            color,
+            descriptor_set: None,
+            u_buffer: None,
+        }
+    }
+}
+
+pub struct Model {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub requires_update: bool,
+    pub position: Vec4,
+    pub rotation: Rotor3,
+
+    matrix: Mat4,
+    u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
+    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+    vertex_buffer: Option<Subbuffer<[Vertex]>>,
+    index_buffer: Option<Subbuffer<[u32]>>,
+}
+
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+struct ModelUBO {
+    model: Mat4,
+    normal: Mat4,
+}
+impl Model {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4) -> Self {
+        Model {
+            vertices,
+            indices,
+            matrix: Mat4::identity(),
+            rotation: Rotor3::identity(),
+            requires_update: true,
+            position,
+
+            index_buffer: None,
+            vertex_buffer: None,
+
+            u_buffer: None,
+            descriptor_set: None,
+        }
+    }
+}
+#[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct Vertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub color: [f32; 3],
+}
+
+use ultraviolet::{projection, Mat4, Rotor3, Vec3, Vec4};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
@@ -124,7 +345,7 @@ pub struct Renderer {
 
 impl Renderer {
     #[allow(clippy::too_many_lines)]
-    pub fn draw(&mut self, scene: &mut Scene) {
+    pub fn draw(&mut self, world: &mut World) {
         self.frames_resources_free[self.current_frame]
             .as_mut()
             .take()
@@ -166,16 +387,15 @@ impl Renderer {
             self.viewport.extent = self.window.inner_size().into();
             self.aspect_ratio = self.viewport.extent[0] / self.viewport.extent[1];
 
-            scene.camera.recreate(&self.window, &self.memory_allocator);
+            world
+                .resource_get_mut::<Camera>()
+                .expect("camera should definately exist or something is very wrong")
+                .recreate(&self.window, &self.memory_allocator);
 
             create_descriptor_sets(
+                world,
                 &self.device,
                 &self.pipelines,
-                &mut scene.models,
-                &mut scene.points,
-                &mut scene.directionals,
-                &mut scene.ambient,
-                &mut scene.camera,
                 &self.color_buffers,
                 &self.normal_buffers,
                 &self.position_buffers,
@@ -204,7 +424,9 @@ impl Renderer {
 
         dbg!(self.current_frame);
 
-        for model in &mut scene.models {
+        let entities = world.query_entities::<Model>();
+        for entity in entities {
+            let model = world.component_get_mut::<Model>(entity).unwrap();
             if model.requires_update {
                 let rotation_mat = model.rotation.into_matrix().into_homogeneous();
                 let translation_mat = Mat4::from_translation(model.position.xyz());
@@ -277,14 +499,21 @@ impl Renderer {
             .bind_pipeline_graphics(self.pipelines[0].clone())
             .unwrap();
 
-        for model in &scene.models {
+        let camera_descripor_set = world
+            .resource_get::<Camera>()
+            .unwrap()
+            .descriptor_set
+            .clone();
+        let entities = world.query_entities::<Model>();
+        for entity in entities {
+            let model = world.component_get_mut::<Model>(entity).unwrap();
             builder
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.pipelines[0].layout().clone(),
                     0,
                     (
-                        scene.camera.descriptor_set.as_ref().unwrap()[image_index].clone(),
+                        camera_descripor_set.as_ref().unwrap()[image_index].clone(),
                         model.descriptor_set.as_ref().unwrap()[self.current_frame].clone(),
                     ),
                 )
@@ -312,25 +541,28 @@ impl Renderer {
             )
             .unwrap();
 
-        dbg!(self.dummy_verts.len());
         builder
             .bind_vertex_buffers(0, self.dummy_verts.clone())
-            .unwrap()
-            .bind_pipeline_graphics(self.pipelines[1].clone())
             .unwrap();
 
-        for light in &scene.directionals {
-            builder
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    self.pipelines[1].layout().clone(),
-                    0,
-                    light.descriptor_set.as_ref().unwrap()[image_index].clone(),
-                )
-                .unwrap()
-                .draw(self.dummy_verts.len() as u32, 1, 0, 0)
-                .unwrap();
-        }
+        builder
+            .bind_pipeline_graphics(self.pipelines[1].clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipelines[1].layout().clone(),
+                0,
+                world
+                    .resource_get::<DirectionalLight>()
+                    .unwrap()
+                    .descriptor_set
+                    .as_ref()
+                    .unwrap()[image_index]
+                    .clone(),
+            )
+            .unwrap()
+            .draw(self.dummy_verts.len() as u32, 1, 0, 0)
+            .unwrap();
 
         builder
             .bind_pipeline_graphics(self.pipelines[2].clone())
@@ -339,7 +571,13 @@ impl Renderer {
                 PipelineBindPoint::Graphics,
                 self.pipelines[2].layout().clone(),
                 0,
-                scene.ambient.descriptor_set.as_ref().unwrap()[image_index].clone(),
+                world
+                    .resource_get::<AmbientLight>()
+                    .unwrap()
+                    .descriptor_set
+                    .as_ref()
+                    .unwrap()[image_index]
+                    .clone(),
             )
             .unwrap()
             .bind_vertex_buffers(0, self.dummy_verts.clone())
@@ -353,7 +591,9 @@ impl Renderer {
             .bind_pipeline_graphics(self.pipelines[3].clone())
             .unwrap();
 
-        for light in &scene.points {
+        let entities = world.query_entities::<PointLight>();
+        for entity in entities {
+            let light = world.component_get_mut::<PointLight>(entity).unwrap();
             builder
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
@@ -405,7 +645,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn init(event_loop: &ActiveEventLoop, scene: &mut Scene, window: &Arc<Window>) -> Self {
+    pub fn init(event_loop: &ActiveEventLoop, world: &mut World, window: &Arc<Window>) -> Self {
         let start_time = Instant::now();
         let instance = create_instance(event_loop);
         let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
@@ -429,7 +669,36 @@ impl Renderer {
         let window_size: [f32; 2] = window.inner_size().into();
         let aspect_ratio = window_size[0] / window_size[1];
 
-        for model in &mut scene.models {
+        let dummy_verts = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            DummyVertex::screen_quad(),
+        )
+        .unwrap();
+
+        let (swapchain, swapchain_images) = create_swapchain(&device, window, &surface);
+
+        let render_pass = create_renderpass(&device, swapchain.image_format());
+        let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
+        let lighting_pass = Arc::new(Subpass::from(render_pass.clone(), 1).unwrap());
+
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        let (framebuffers, color_buffers, normal_buffers, position_buffers) =
+            create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
+
+        let window_size = window.inner_size();
+
+        let entities = world.query_entities::<Model>();
+        for entity in entities {
+            let model = world.component_get_mut::<Model>(entity).unwrap();
             let vertex_buffer = Buffer::from_iter(
                 memory_allocator.clone(),
                 BufferCreateInfo {
@@ -460,36 +729,7 @@ impl Renderer {
             )
             .unwrap();
             model.index_buffer = Some(index_buffer);
-        }
 
-        let dummy_verts = Buffer::from_iter(
-            memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            DummyVertex::screen_quad(),
-        )
-        .unwrap();
-
-        let (swapchain, swapchain_images) = create_swapchain(&device, window, &surface);
-
-        let render_pass = create_renderpass(&device, swapchain.image_format());
-        let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
-        let lighting_pass = Arc::new(Subpass::from(render_pass.clone(), 1).unwrap());
-
-        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let (framebuffers, color_buffers, normal_buffers, position_buffers) =
-            create_framebuffers(&swapchain_images, &render_pass, memory_allocator.clone());
-
-        let window_size = window.inner_size();
-
-        for model in &mut scene.models {
             let mut model_buffers: Vec<Subbuffer<ModelUBO>> = vec![];
             for _ in 0..FRAMES_IN_FLIGHT {
                 model_buffers.push(
@@ -510,32 +750,9 @@ impl Renderer {
             model.u_buffer = Some(model_buffers);
         }
 
-        for light in &mut scene.directionals {
-            let mut light_buffers: Vec<Subbuffer<DirectionalLightUBO>> = vec![];
-            for _ in 0..swapchain_images.len() {
-                light_buffers.push(
-                    Buffer::from_data(
-                        memory_allocator.clone(),
-                        BufferCreateInfo {
-                            usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                            ..Default::default()
-                        },
-                        AllocationCreateInfo {
-                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                            ..Default::default()
-                        },
-                        DirectionalLightUBO {
-                            position: light.position,
-                            color: light.color,
-                        },
-                    )
-                    .unwrap(),
-                );
-            }
-            light.u_buffer = Some(light_buffers);
-        }
-
-        for light in &mut scene.points {
+        let entities = world.query_entities::<PointLight>();
+        for entity in entities {
+            let light = world.component_get_mut::<PointLight>(entity).unwrap();
             let mut light_buffers: Vec<Subbuffer<PointLightUBO>> = vec![];
             for _ in 0..swapchain_images.len() {
                 light_buffers.push(
@@ -563,7 +780,37 @@ impl Renderer {
             light.u_buffer = Some(light_buffers);
         }
 
+        let mut directional_buffers = vec![];
+        let directional = world
+            .resource_get_mut::<DirectionalLight>()
+            .expect("should create ambient resource");
+        for _ in 0..swapchain_images.len() {
+            directional_buffers.push(
+                Buffer::from_data(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    DirectionalLightUBO {
+                        color: directional.color,
+                        position: directional.position,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        dbg!(&directional_buffers);
+        directional.u_buffer = Some(directional_buffers);
+
         let mut ambient_buffers = vec![];
+        let ambient = world
+            .resource_get_mut::<AmbientLight>()
+            .expect("should create ambient resource");
         for _ in 0..swapchain_images.len() {
             ambient_buffers.push(
                 Buffer::from_data(
@@ -577,16 +824,20 @@ impl Renderer {
                         ..Default::default()
                     },
                     AmbientLightUBO {
-                        color: scene.ambient.color,
-                        intensity: scene.ambient.intensity,
+                        color: ambient.color,
+                        intensity: ambient.intensity,
                     },
                 )
                 .unwrap(),
             );
         }
-        scene.ambient.u_buffer = Some(ambient_buffers);
+        dbg!(&ambient_buffers);
+        ambient.u_buffer = Some(ambient_buffers);
 
         let mut camera_buffers = vec![];
+        let camera = world
+            .resource_get_mut::<Camera>()
+            .expect("should create ambient resource");
         for _ in 0..swapchain_images.len() {
             camera_buffers.push(
                 Buffer::from_data(
@@ -600,14 +851,14 @@ impl Renderer {
                         ..Default::default()
                     },
                     CameraUBO {
-                        view: scene.camera.view,
-                        proj: scene.camera.proj,
+                        view: camera.view,
+                        proj: camera.proj,
                     },
                 )
                 .unwrap(),
             );
         }
-        scene.camera.u_buffer = Some(camera_buffers);
+        camera.u_buffer = Some(camera_buffers);
 
         let pipelines = create_graphics_pipelines(&device, &deferred_pass, &lighting_pass);
 
@@ -624,13 +875,9 @@ impl Renderer {
         }
 
         create_descriptor_sets(
+            world,
             &device,
             &pipelines,
-            &mut scene.models,
-            &mut scene.points,
-            &mut scene.directionals,
-            &mut scene.ambient,
-            &mut scene.camera,
             &color_buffers,
             &normal_buffers,
             &position_buffers,
@@ -706,16 +953,10 @@ fn create_swapchain(
 }
 #[allow(clippy::too_many_lines)]
 pub fn create_descriptor_sets(
+    world: &mut World,
+
     device: &Arc<Device>,
-
     graphics_pipelines: &[Arc<GraphicsPipeline>],
-
-    models: &mut [Model],
-    points: &mut [PointLight],
-    directionals: &mut [DirectionalLight],
-    ambient: &mut AmbientLight,
-    camera: &mut Camera,
-
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
     position_buffer: &[Arc<ImageView>],
@@ -751,8 +992,10 @@ pub fn create_descriptor_sets(
         .first()
         .unwrap();
 
-    for model in models {
+    let models = world.query_entities::<Model>();
+    for entity in models {
         let mut model_sets = vec![];
+        let model = world.component_get_mut::<Model>(entity).unwrap();
         for i in 0..FRAMES_IN_FLIGHT {
             let model_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
@@ -769,27 +1012,10 @@ pub fn create_descriptor_sets(
         model.descriptor_set = Some(model_sets);
     }
 
-    for light in directionals {
-        let mut dir_sets = vec![];
-        for i in 0..swapchain_image_count {
-            let dir_set = PersistentDescriptorSet::new(
-                &descriptor_set_allocator,
-                directional_layout.clone(),
-                [
-                    WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
-                    WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
-                    WriteDescriptorSet::buffer(2, light.u_buffer.as_ref().unwrap()[i].clone()),
-                ],
-                [],
-            )
-            .unwrap();
-            dir_sets.push(dir_set);
-        }
-        light.descriptor_set = Some(dir_sets);
-    }
-
-    for point in points {
+    let point_lights = world.query_entities::<PointLight>();
+    for entity in point_lights {
         let mut pt_sets = vec![];
+        let point = world.component_get_mut::<PointLight>(entity).unwrap();
         for i in 0..swapchain_image_count {
             let dir_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
@@ -808,37 +1034,62 @@ pub fn create_descriptor_sets(
         point.descriptor_set = Some(pt_sets);
     }
 
-    let mut ambient_sets = vec![];
-    let mut camera_sets = vec![];
-    for i in 0..swapchain_image_count {
-        let ambient_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            ambient_layout.clone(),
-            [
-                WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
-                WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
-                WriteDescriptorSet::buffer(2, ambient.u_buffer.as_ref().unwrap()[i].clone()),
-            ],
-            [],
-        )
-        .unwrap();
-        ambient_sets.push(ambient_set);
-
-        let camera_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
-            camera_layout.clone(),
-            [WriteDescriptorSet::buffer(
-                0,
-                camera.u_buffer.as_ref().unwrap()[i].clone(),
-            )],
-            [],
-        )
-        .unwrap();
-        camera_sets.push(camera_set);
+    if let Some(ambient) = world.resource_get_mut::<AmbientLight>() {
+        let mut ambient_sets = Vec::new();
+        for i in 0..swapchain_image_count {
+            let ambient_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                ambient_layout.clone(),
+                [
+                    WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
+                    WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
+                    WriteDescriptorSet::buffer(2, ambient.u_buffer.as_ref().unwrap()[i].clone()),
+                ],
+                [],
+            )
+            .unwrap();
+            ambient_sets.push(ambient_set);
+        }
+        ambient.descriptor_set = Some(ambient_sets);
     }
 
-    ambient.descriptor_set = Some(ambient_sets);
-    camera.descriptor_set = Some(camera_sets);
+    let directional_light = world.resource_get_mut::<DirectionalLight>();
+    if let Some(dir_light) = directional_light {
+        let mut dir_sets = Vec::new();
+        for i in 0..swapchain_image_count {
+            let directional_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                directional_layout.clone(),
+                [
+                    WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
+                    WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
+                    WriteDescriptorSet::buffer(2, dir_light.u_buffer.as_ref().unwrap()[i].clone()),
+                ],
+                [],
+            )
+            .unwrap();
+            dir_sets.push(directional_set);
+        }
+        dir_light.descriptor_set = Some(dir_sets);
+    }
+
+    if let Some(camera) = world.resource_get_mut::<Camera>() {
+        let mut camera_sets = vec![];
+        for i in 0..swapchain_image_count {
+            let camera_set = PersistentDescriptorSet::new(
+                &descriptor_set_allocator,
+                camera_layout.clone(),
+                [WriteDescriptorSet::buffer(
+                    0,
+                    camera.u_buffer.as_ref().unwrap()[i].clone(),
+                )],
+                [],
+            )
+            .unwrap();
+            camera_sets.push(camera_set);
+        }
+        camera.descriptor_set = Some(camera_sets);
+    }
 }
 type Color = Vec<Arc<ImageView>>;
 type Normal = Vec<Arc<ImageView>>;
@@ -1071,7 +1322,9 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
     .unwrap()
 }
 mod shaders;
-use shaders as s;
+use shaders::{self as s};
+
+use crate::ecs::World;
 #[allow(clippy::too_many_lines)]
 fn create_graphics_pipelines(
     device: &Arc<Device>,
