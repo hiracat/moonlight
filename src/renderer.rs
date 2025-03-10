@@ -1,10 +1,6 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(dead_code)]
-use std::{
-    sync::Arc,
-    thread::sleep,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 struct Transform {
     position: Vec3,
@@ -13,33 +9,27 @@ struct Transform {
 }
 #[derive(Default)]
 pub struct Camera {
-    position: Vec3,
-    look_at: Vec3,
+    pub position: Vec3,
+    pub rotation: Rotor3,
+    pub fov_rads: f32,
+    pub near: f32,
+    pub far: f32,
 
     aspect_ratio: f32,
-    fov_rads: f32,
-    near: f32,
-    far: f32,
 
     u_buffer: Option<Vec<Subbuffer<CameraUBO>>>,
     descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
 }
 impl Camera {
-    pub fn new(
-        position: Vec3,
-        look_at: Vec3,
-        fov: f32,
-        near: f32,
-        far: f32,
-        window: &Arc<Window>,
-    ) -> Self {
+    pub fn new(position: Vec3, fov: f32, near: f32, far: f32, window: &Arc<Window>) -> Self {
         let size: [f32; 2] = window.inner_size().into();
         let aspect_ratio = size[0] / size[1];
         let fov_rads = fov * (std::f32::consts::PI / 180.0);
+        let rotation = Rotor3::identity();
 
         Self {
             position,
-            look_at,
+            rotation,
             fov_rads,
             near,
             far,
@@ -50,10 +40,12 @@ impl Camera {
         }
     }
     fn get_ubo_data(&mut self) -> CameraUBO {
+        let forward = self.rotation * Vec3::new(0.0, 0.0, 1.0);
+        let look_at = self.position + forward;
         CameraUBO {
             view: ultraviolet::Mat4::look_at(
                 self.position,
-                self.look_at,
+                look_at,
                 Vec3::new(0.0, 1.0, 0.0), // Up vector
             ),
             proj: projection::perspective_vk(self.fov_rads, self.aspect_ratio, self.near, self.far),
@@ -200,6 +192,13 @@ pub struct Model {
     index_buffer: Option<Subbuffer<[u32]>>,
 }
 
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C)]
+#[derive(Debug)]
+struct ModelUBO {
+    model: Mat4,
+    normal: Mat4,
+}
 impl Model {
     fn get_ubo_data(&mut self) -> ModelUBO {
         if self.requires_update {
@@ -216,16 +215,6 @@ impl Model {
             normal: self.matrix.inversed().transposed(),
         }
     }
-}
-
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
-#[repr(C)]
-#[derive(Debug)]
-struct ModelUBO {
-    model: Mat4,
-    normal: Mat4,
-}
-impl Model {
     pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4) -> Self {
         Model {
             vertices,

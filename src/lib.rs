@@ -102,14 +102,7 @@ impl ApplicationHandler for App {
             PointLight::new([0.0, 2.0, -3.0, 1.0], [0.0, 0.0, 1.0], None, None, None),
         );
 
-        let camera = Camera::new(
-            Vec3::new(0.0, 2.0, 6.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            60.0,
-            1.0,
-            100.0,
-            &window,
-        );
+        let camera = Camera::new(Vec3::new(0.0, 2.0, 6.0), 60.0, 1.0, 100.0, &window);
         let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
         let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.05);
 
@@ -132,6 +125,19 @@ impl ApplicationHandler for App {
                 println!("frame start");
 
                 wasd_update(&mut self.world, self.delta_time);
+                let player = self.world.query::<Controllable>().first().unwrap().0;
+                let player = self.world.component_get::<Model>(player).unwrap();
+
+                let player_position = player.position.xyz();
+                let player_rotation = player.rotation;
+
+                let camera = self.world.resource_get_mut::<Camera>().unwrap();
+
+                let offset = player_rotation * Vec3::new(0.0, 2.0, -4.0);
+
+                camera.rotation = player_rotation;
+                camera.position = player_position + offset;
+
                 self.renderer.as_mut().unwrap().draw(&mut self.world);
                 self.delta_time = self.prev_frame_end.elapsed();
                 self.prev_frame_end = Instant::now();
