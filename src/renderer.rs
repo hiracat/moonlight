@@ -1,6 +1,10 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(dead_code)]
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 struct Transform {
     position: Vec3,
@@ -9,10 +13,11 @@ struct Transform {
 }
 #[derive(Default)]
 pub struct Camera {
-    view: ultraviolet::Mat4,
-    proj: ultraviolet::Mat4,
+    position: Vec3,
+    look_at: Vec3,
 
-    fov_radians: f32,
+    aspect_ratio: f32,
+    fov_rads: f32,
     near: f32,
     far: f32,
 
@@ -28,47 +33,56 @@ impl Camera {
         far: f32,
         window: &Arc<Window>,
     ) -> Self {
-        let fov_radians = fov * (std::f32::consts::PI / 180.0);
         let size: [f32; 2] = window.inner_size().into();
-        let ratio = size[0] / size[1];
+        let aspect_ratio = size[0] / size[1];
+        let fov_rads = fov * (std::f32::consts::PI / 180.0);
+
         Self {
-            view: ultraviolet::Mat4::look_at(
-                position,
-                look_at,
-                Vec3::new(0.0, 1.0, 0.0), // Up vector
-            ),
-            fov_radians,
+            position,
+            look_at,
+            fov_rads,
             near,
             far,
-            proj: projection::perspective_vk(fov_radians, ratio, near, far),
+            aspect_ratio,
+
             u_buffer: None,
             descriptor_set: None,
         }
     }
-
-    pub fn recreate(&mut self, window: &Arc<Window>, memory_allocator: &Arc<dyn MemoryAllocator>) {
-        let size: [f32; 2] = window.inner_size().into();
-        let ratio = size[0] / size[1];
-        self.proj = projection::perspective_vk(self.fov_radians, ratio, self.near, self.far);
-
-        for buffer in self.u_buffer.as_mut().unwrap() {
-            *buffer = Buffer::from_data(
-                memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                CameraUBO {
-                    proj: self.proj,
-                    view: self.view,
-                },
-            )
-            .unwrap();
+    fn get_ubo_data(&mut self) -> CameraUBO {
+        CameraUBO {
+            view: ultraviolet::Mat4::look_at(
+                self.position,
+                self.look_at,
+                Vec3::new(0.0, 1.0, 0.0), // Up vector
+            ),
+            proj: projection::perspective_vk(self.fov_rads, self.aspect_ratio, self.near, self.far),
         }
+    }
+    fn populate_u_buffer(
+        &mut self,
+        swapchain_image_count: u32,
+        memory_allocator: Arc<dyn MemoryAllocator>,
+    ) {
+        let mut camera_buffers = vec![];
+        for _ in 0..swapchain_image_count {
+            camera_buffers.push(
+                Buffer::from_data(
+                    memory_allocator.clone(),
+                    BufferCreateInfo {
+                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    self.get_ubo_data(),
+                )
+                .unwrap(),
+            );
+        }
+        self.u_buffer = Some(camera_buffers);
     }
 }
 #[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
@@ -184,6 +198,24 @@ pub struct Model {
     descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
     vertex_buffer: Option<Subbuffer<[Vertex]>>,
     index_buffer: Option<Subbuffer<[u32]>>,
+}
+
+impl Model {
+    fn get_ubo_data(&mut self) -> ModelUBO {
+        if self.requires_update {
+            let rotation_mat = self.rotation.into_matrix().into_homogeneous();
+            let translation_mat = Mat4::from_translation(self.position.xyz());
+            let model_mat = translation_mat * rotation_mat;
+
+            self.matrix = model_mat;
+            self.requires_update = false;
+        };
+
+        ModelUBO {
+            model: self.matrix,
+            normal: self.matrix.inversed().transposed(),
+        }
+    }
 }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
@@ -387,10 +419,11 @@ impl Renderer {
             self.viewport.extent = self.window.inner_size().into();
             self.aspect_ratio = self.viewport.extent[0] / self.viewport.extent[1];
 
-            world
+            let camera = world
                 .resource_get_mut::<Camera>()
-                .expect("camera should definately exist or something is very wrong")
-                .recreate(&self.window, &self.memory_allocator);
+                .expect("camera should definately exist or something is very wrong");
+            camera.aspect_ratio = self.aspect_ratio;
+            camera.populate_u_buffer(self.swapchain.image_count(), self.memory_allocator.clone());
 
             create_descriptor_sets(
                 world,
@@ -424,33 +457,23 @@ impl Renderer {
 
         dbg!(self.current_frame);
 
-        let entities = world.query_entities::<Model>();
-        for entity in entities {
-            let model = world.component_get_mut::<Model>(entity).unwrap();
-            if model.requires_update {
-                let rotation_mat = model.rotation.into_matrix().into_homogeneous();
-                let translation_mat = Mat4::from_translation(model.position.xyz());
-                let model_mat = translation_mat * rotation_mat;
-
-                model.matrix = model_mat;
-                model.requires_update = false;
-            };
-
-            let data = ModelUBO {
-                model: model.matrix,
-                normal: model.matrix.inversed().transposed(),
-            };
-            let buffer = model.u_buffer.as_mut().unwrap();
+        {
+            let camera = world
+                .resource_get_mut::<Camera>()
+                .expect("should have a camera resource");
+            let data = camera.get_ubo_data();
+            let buffer = camera.u_buffer.as_mut().unwrap();
             loop {
-                match buffer[self.current_frame].write() {
+                match buffer[image_index].write() {
                     Ok(mut write) => {
                         *write = data;
                         break;
                     }
                     Err(error) => match error {
                         HostAccessError::AccessConflict(_) => {
-                            println!("failed loop");
-                            self.frames_resources_free[self.current_frame]
+                            println!("camera failed loop");
+                            dbg!(error);
+                            self.frames_resources_free[image_index]
                                 .as_mut()
                                 .take()
                                 .unwrap()
@@ -460,6 +483,36 @@ impl Renderer {
                             panic!("failed to write to model buffer");
                         }
                     },
+                }
+            }
+        }
+
+        {
+            let entities = world.query_entities::<Model>();
+            for entity in entities {
+                let model = world.component_get_mut::<Model>(entity).unwrap();
+                let data = model.get_ubo_data();
+                let buffer = model.u_buffer.as_mut().unwrap();
+                loop {
+                    match buffer[self.current_frame].write() {
+                        Ok(mut write) => {
+                            *write = data;
+                            break;
+                        }
+                        Err(error) => match error {
+                            HostAccessError::AccessConflict(_) => {
+                                println!("model failed loop");
+                                self.frames_resources_free[self.current_frame]
+                                    .as_mut()
+                                    .take()
+                                    .unwrap()
+                                    .cleanup_finished();
+                            }
+                            _ => {
+                                panic!("failed to write to model buffer");
+                            }
+                        },
+                    }
                 }
             }
         }
@@ -834,31 +887,10 @@ impl Renderer {
         dbg!(&ambient_buffers);
         ambient.u_buffer = Some(ambient_buffers);
 
-        let mut camera_buffers = vec![];
         let camera = world
             .resource_get_mut::<Camera>()
             .expect("should create ambient resource");
-        for _ in 0..swapchain_images.len() {
-            camera_buffers.push(
-                Buffer::from_data(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    CameraUBO {
-                        view: camera.view,
-                        proj: camera.proj,
-                    },
-                )
-                .unwrap(),
-            );
-        }
-        camera.u_buffer = Some(camera_buffers);
+        camera.populate_u_buffer(swapchain_images.len() as u32, memory_allocator.clone());
 
         let pipelines = create_graphics_pipelines(&device, &deferred_pass, &lighting_pass);
 
