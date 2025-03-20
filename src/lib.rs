@@ -3,6 +3,7 @@ use obj::load_obj;
 use renderer::{AmbientLight, Camera, DirectionalLight, Model, PointLight, Renderer, Vertex};
 use std::{
     collections::HashSet,
+    f32::consts::PI,
     fs::File,
     io::BufReader,
     time::{Duration, Instant},
@@ -24,8 +25,8 @@ type Keyboard = HashSet<KeyCode>;
 struct Controllable;
 #[derive(Debug, Default, Clone, Copy)]
 struct MouseMovement {
-    x: f64,
-    y: f64,
+    x: f32,
+    y: f32,
 }
 
 pub struct App {
@@ -46,13 +47,14 @@ impl Default for App {
 }
 
 impl ApplicationHandler for App {
+    #[allow(clippy::too_many_lines)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             eprintln!("resumed called while renderer is already some");
             return;
         }
         let window = renderer::create_window(event_loop);
-        window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
         window.set_cursor_visible(false);
 
         let fox = self.world.entity_create();
@@ -61,6 +63,59 @@ impl ApplicationHandler for App {
         let red = self.world.entity_create();
         let blue = self.world.entity_create();
         let green = self.world.entity_create();
+
+        let x = self.world.entity_create();
+        let y = self.world.entity_create();
+        let z = self.world.entity_create();
+
+        let _ = self.world.component_add(x, {
+            let input = BufReader::new(File::open("data/models/square.obj").unwrap());
+            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+            let vertices: Vec<Vertex> = model
+                .vertices
+                .iter()
+                .map(|v| Vertex {
+                    position: v.position,
+                    normal: v.normal,
+                    color: [1.0, 1.0, 1.0], // map other fields as needed
+                })
+                .collect();
+            let indices: Vec<u32> = model.indices.clone();
+
+            Model::new(vertices, indices, Vec4::new(1.0, 0.0, 0.0, 1.0))
+        });
+        let _ = self.world.component_add(y, {
+            let input = BufReader::new(File::open("data/models/square.obj").unwrap());
+            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+            let vertices: Vec<Vertex> = model
+                .vertices
+                .iter()
+                .map(|v| Vertex {
+                    position: v.position,
+                    normal: v.normal,
+                    color: [1.0, 1.0, 1.0], // map other fields as needed
+                })
+                .collect();
+            let indices: Vec<u32> = model.indices.clone();
+
+            Model::new(vertices, indices, Vec4::new(0.0, 1.0, 0.0, 1.0))
+        });
+        let _ = self.world.component_add(z, {
+            let input = BufReader::new(File::open("data/models/smallsphere.obj").unwrap());
+            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+            let vertices: Vec<Vertex> = model
+                .vertices
+                .iter()
+                .map(|v| Vertex {
+                    position: v.position,
+                    normal: v.normal,
+                    color: [1.0, 1.0, 1.0], // map other fields as needed
+                })
+                .collect();
+            let indices: Vec<u32> = model.indices.clone();
+
+            Model::new(vertices, indices, Vec4::new(0.0, 0.0, 1.0, 1.0))
+        });
 
         let _ = self.world.component_add(fox, {
             let input = BufReader::new(File::open("data/models/low poly fox.obj").unwrap());
@@ -135,7 +190,6 @@ impl ApplicationHandler for App {
 
                 let delta_time = self.delta_time;
                 let world = &mut self.world;
-                camera_update(world, delta_time);
                 player_update(world, delta_time);
 
                 *self.world.resource_get_mut::<MouseMovement>().unwrap() = MouseMovement::default();
@@ -172,91 +226,78 @@ impl ApplicationHandler for App {
         self.renderer.as_mut().unwrap().window.request_redraw();
     }
 
+    #[allow(unused_variables)]
     fn device_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         device_id: winit::event::DeviceId,
         event: DeviceEvent,
     ) {
+        #[allow(clippy::cast_possible_truncation)]
         if let DeviceEvent::MouseMotion { delta } = event {
             let mvmt = self.world.resource_get_mut::<MouseMovement>().unwrap();
-            mvmt.x = delta.0;
-            mvmt.y = delta.1;
+            mvmt.x = delta.0 as f32;
+            mvmt.y = delta.1 as f32;
         }
     }
 }
 
-fn camera_update(world: &mut World, delta_time: Duration) {
-    let mouse_movement = *world.resource_get::<MouseMovement>().unwrap();
-    let player = world.query::<Controllable>().first().unwrap().0;
-    let player = world.component_get_mut::<Model>(player).unwrap();
-
-    let player_position = player.position.xyz();
-    let player_rotation = player.rotation;
-
-    dbg!(mouse_movement);
-    let camera = world.resource_get_mut::<Camera>().unwrap();
-
-    let offset = player_rotation * Vec3::new(0.0, 2.0, -4.0);
-
-    let mouse_sensativity = 0.2;
-
-    #[allow(clippy::cast_possible_truncation)]
-    #[allow(clippy::cast_precision_loss)]
-    let rotation = Rotor3::from_euler_angles(
-        0.0,
-        mouse_movement.y as f32 * mouse_sensativity * delta_time.as_secs_f32(),
-        mouse_movement.x as f32 * mouse_sensativity * delta_time.as_secs_f32(),
-    );
-    dbg!(rotation);
-
-    camera.rotation = rotation * camera.rotation;
-    camera.position = player_position + offset;
-}
 fn player_update(world: &mut World, delta_time: Duration) {
+    let player_entity = world.query::<Controllable>().first().unwrap().0;
     let keyboard = world
         .resource_get::<Keyboard>()
         .expect("keyboard should have been added during resumed");
 
-    let mut movement_direction = Vec3::zero();
+    let mut velocity = Vec3::zero();
+    let mut target_offset_yaw = 0.0;
     if keyboard.contains(&KeyCode::KeyW) {
-        movement_direction += Vec3::new(0.0, 0.0, 1.0);
+        velocity += Vec3::new(0.0, 0.0, -1.0); // left handed eww
     }
     if keyboard.contains(&KeyCode::KeyS) {
-        movement_direction += Vec3::new(0.0, 0.0, -1.0);
+        velocity += Vec3::new(0.0, 0.0, 1.0);
     }
     if keyboard.contains(&KeyCode::KeyD) {
-        movement_direction += Vec3::new(-1.0, 0.0, 0.0);
+        velocity += Vec3::new(1.0, 0.0, 0.0);
+        target_offset_yaw = 1.0;
     }
     if keyboard.contains(&KeyCode::KeyA) {
-        movement_direction += Vec3::new(1.0, 0.0, 0.0);
+        velocity += Vec3::new(-1.0, 0.0, 0.0);
+        target_offset_yaw = -1.0;
     }
-    if movement_direction == Vec3::zero() {
-        return;
-    }
-    movement_direction.normalize();
 
-    let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
-    let yaw_only = get_yaw_rotation(camera_rotation);
+    let turn_speed = 9.0 * delta_time.as_secs_f32();
 
-    let player_entity = world.query::<Controllable>().first().unwrap().0;
     let player = world
         .component_get_mut::<Model>(player_entity)
         .expect("player should have model component");
 
-    let speed = 5.0 * delta_time.as_secs_f32();
-
-    let velocity = (yaw_only * movement_direction) * speed;
-
-    player.position += velocity.into_homogeneous_vector();
-    if movement_direction != Vec3::zero() {
-        player.rotation = yaw_only;
+    if target_offset_yaw == 0.0 && velocity != Vec3::zero() {
+        if player.yaw_offset < 0.0 {
+            player.yaw_offset += turn_speed;
+        }
+        if player.yaw_offset > 0.0 {
+            player.yaw_offset -= turn_speed;
+        }
+        player.yaw_offset = player.yaw_offset.clamp(-PI / 2.0, PI / 2.0);
+    } else {
+        player.yaw_offset += target_offset_yaw * turn_speed;
+        player.yaw_offset = player.yaw_offset.clamp(-PI / 2.0, PI / 2.0);
     }
+
+    player.rotation = Rotor3::from_euler_angles(0.0, 0.0, player.yaw_offset);
+    let real_rotation = player.rotation * Rotor3::from_euler_angles(0.0, 0.0, -player.yaw_offset);
+
+    dbg!(player.yaw_offset, target_offset_yaw);
+
+    let speed = 2.0 * delta_time.as_secs_f32();
+    velocity = real_rotation * velocity;
+
+    if velocity != Vec3::zero() {
+        velocity.normalize();
+    }
+    velocity *= speed;
+    player.velocity = velocity.into_homogeneous_vector();
+
+    player.position += player.velocity;
     player.requires_update = true;
-}
-fn get_yaw_rotation(rotation: Rotor3) -> Rotor3 {
-    // This projects the rotation onto the XZ plane
-    let forward = rotation * Vec3::new(0.0, 0.0, 1.0);
-    let forward_xz = Vec3::new(forward.x, 0.0, forward.z).normalized();
-    Rotor3::from_rotation_between(Vec3::new(0.0, 0.0, 1.0), forward_xz)
 }

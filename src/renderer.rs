@@ -40,7 +40,7 @@ impl Camera {
         }
     }
     fn get_ubo_data(&mut self) -> CameraUBO {
-        let forward = self.rotation * Vec3::new(0.0, 0.0, 1.0);
+        let forward = self.rotation * Vec3::new(0.0, 0.0, -1.0);
         let look_at = self.position + forward;
         CameraUBO {
             view: ultraviolet::Mat4::look_at(
@@ -183,7 +183,9 @@ pub struct Model {
     pub indices: Vec<u32>,
     pub requires_update: bool,
     pub position: Vec4,
+    pub velocity: Vec4,
     pub rotation: Rotor3,
+    pub yaw_offset: f32,
 
     matrix: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
@@ -222,6 +224,8 @@ impl Model {
             matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
             requires_update: true,
+            velocity: Vec3::zero().into_homogeneous_vector(),
+            yaw_offset: 0.0,
             position,
 
             index_buffer: None,
@@ -369,7 +373,6 @@ impl Renderer {
     pub fn draw(&mut self, world: &mut World) {
         self.frames_resources_free[self.current_frame]
             .as_mut()
-            .take()
             .unwrap()
             .cleanup_finished();
 
@@ -464,7 +467,6 @@ impl Renderer {
                             dbg!(error);
                             self.frames_resources_free[image_index]
                                 .as_mut()
-                                .take()
                                 .unwrap()
                                 .cleanup_finished();
                         }
@@ -493,7 +495,6 @@ impl Renderer {
                                 println!("model failed loop");
                                 self.frames_resources_free[self.current_frame]
                                     .as_mut()
-                                    .take()
                                     .unwrap()
                                     .cleanup_finished();
                             }
