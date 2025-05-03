@@ -8,7 +8,7 @@ use std::{
     io::BufReader,
     time::{Duration, Instant},
 };
-use ultraviolet::{Rotor3, Vec3, Vec4};
+use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, WindowEvent},
@@ -249,53 +249,41 @@ fn player_update(world: &mut World, delta_time: Duration) {
         .expect("keyboard should have been added during resumed");
 
     let mut velocity = Vec3::zero();
-    let mut target_offset_yaw = 0.0;
     if keyboard.contains(&KeyCode::KeyW) {
-        velocity += Vec3::new(0.0, 0.0, -1.0); // left handed eww
+        velocity += Vec3::new(0.0, 0.0, -1.0); // right handed eww
     }
     if keyboard.contains(&KeyCode::KeyS) {
         velocity += Vec3::new(0.0, 0.0, 1.0);
     }
     if keyboard.contains(&KeyCode::KeyD) {
         velocity += Vec3::new(1.0, 0.0, 0.0);
-        target_offset_yaw = 1.0;
     }
     if keyboard.contains(&KeyCode::KeyA) {
         velocity += Vec3::new(-1.0, 0.0, 0.0);
-        target_offset_yaw = -1.0;
     }
-
-    let turn_speed = 9.0 * delta_time.as_secs_f32();
-
     let player = world
         .component_get_mut::<Model>(player_entity)
         .expect("player should have model component");
 
-    if target_offset_yaw == 0.0 && velocity != Vec3::zero() {
-        if player.yaw_offset < 0.0 {
-            player.yaw_offset += turn_speed;
-        }
-        if player.yaw_offset > 0.0 {
-            player.yaw_offset -= turn_speed;
-        }
-        player.yaw_offset = player.yaw_offset.clamp(-PI / 2.0, PI / 2.0);
-    } else {
-        player.yaw_offset += target_offset_yaw * turn_speed;
-        player.yaw_offset = player.yaw_offset.clamp(-PI / 2.0, PI / 2.0);
-    }
-
-    player.rotation = Rotor3::from_euler_angles(0.0, 0.0, player.yaw_offset);
-    let real_rotation = player.rotation * Rotor3::from_euler_angles(0.0, 0.0, -player.yaw_offset);
-
-    dbg!(player.yaw_offset, target_offset_yaw);
-
     let speed = 2.0 * delta_time.as_secs_f32();
-    velocity = real_rotation * velocity;
+    velocity = player.rotation * velocity;
 
     if velocity != Vec3::zero() {
         velocity.normalize();
     }
     velocity *= speed;
+
+    let turn_speed = 9.0 * delta_time.as_secs_f32();
+
+    let forward = Vec3::new(0.0, 0.0, -1.0);
+    let forward = player.rotation * forward;
+
+    let lean = Rotor3::from_rotation_between(forward, velocity);
+    dbg!(lean, forward, velocity);
+
+    player.lean = lean * player.lean;
+    dbg!(player.lean);
+
     player.velocity = velocity.into_homogeneous_vector();
 
     player.position += player.velocity;

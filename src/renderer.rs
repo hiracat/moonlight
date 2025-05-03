@@ -185,7 +185,7 @@ pub struct Model {
     pub position: Vec4,
     pub velocity: Vec4,
     pub rotation: Rotor3,
-    pub yaw_offset: f32,
+    pub lean: Rotor3,
 
     matrix: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
@@ -204,7 +204,7 @@ struct ModelUBO {
 impl Model {
     fn get_ubo_data(&mut self) -> ModelUBO {
         if self.requires_update {
-            let rotation_mat = self.rotation.into_matrix().into_homogeneous();
+            let rotation_mat = self.lean.into_matrix().into_homogeneous();
             let translation_mat = Mat4::from_translation(self.position.xyz());
             let model_mat = translation_mat * rotation_mat;
 
@@ -223,9 +223,9 @@ impl Model {
             indices,
             matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
+            lean: Rotor3::identity(),
             requires_update: true,
             velocity: Vec3::zero().into_homogeneous_vector(),
-            yaw_offset: 0.0,
             position,
 
             index_buffer: None,
