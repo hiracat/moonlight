@@ -14,6 +14,8 @@ pub struct Camera {
     pub fov_rads: f32,
     pub near: f32,
     pub far: f32,
+    pub pitch: f32,
+    pub yaw: f32,
 
     aspect_ratio: f32,
 
@@ -28,6 +30,8 @@ impl Camera {
         let rotation = Rotor3::identity();
 
         Self {
+            pitch: 0.0,
+            yaw: 0.0,
             position,
             rotation,
             fov_rads,
@@ -39,8 +43,8 @@ impl Camera {
             descriptor_set: None,
         }
     }
-    fn get_ubo_data(&mut self) -> CameraUBO {
-        let forward = self.rotation * Vec3::new(0.0, 0.0, -1.0);
+    fn get_ubo_data(&self) -> CameraUBO {
+        let forward = (-Vec3::unit_z()).rotated_by(self.rotation);
         let look_at = self.position + forward;
         CameraUBO {
             view: ultraviolet::Mat4::look_at(
@@ -185,7 +189,6 @@ pub struct Model {
     pub position: Vec4,
     pub velocity: Vec4,
     pub rotation: Rotor3,
-    pub lean: Rotor3,
 
     matrix: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
@@ -204,7 +207,7 @@ struct ModelUBO {
 impl Model {
     fn get_ubo_data(&mut self) -> ModelUBO {
         if self.requires_update {
-            let rotation_mat = self.lean.into_matrix().into_homogeneous();
+            let rotation_mat = self.rotation.into_matrix().into_homogeneous();
             let translation_mat = Mat4::from_translation(self.position.xyz());
             let model_mat = translation_mat * rotation_mat;
 
@@ -223,7 +226,6 @@ impl Model {
             indices,
             matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
-            lean: Rotor3::identity(),
             requires_update: true,
             velocity: Vec3::zero().into_homogeneous_vector(),
             position,

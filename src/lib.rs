@@ -1,11 +1,14 @@
+use bytemuck::Pod;
 use ecs::World;
 use obj::load_obj;
+use physics::{Aabb, Collider};
 use renderer::{AmbientLight, Camera, DirectionalLight, Model, PointLight, Renderer, Vertex};
 use std::{
     collections::HashSet,
     f32::consts::PI,
     fs::File,
     io::BufReader,
+    thread::sleep,
     time::{Duration, Instant},
 };
 use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
@@ -18,6 +21,7 @@ use winit::{
 };
 
 mod ecs;
+mod physics;
 mod renderer;
 
 type Keyboard = HashSet<KeyCode>;
@@ -117,6 +121,14 @@ impl ApplicationHandler for App {
             Model::new(vertices, indices, Vec4::new(0.0, 0.0, 1.0, 1.0))
         });
 
+        let _ = self.world.component_add(
+            z,
+            Collider::Aabb(Aabb::new(
+                Vec3::new(-0.5, -0.5, -0.5),
+                Vec3::new(0.5, 0.5, 0.5),
+            )),
+        );
+
         let _ = self.world.component_add(fox, {
             let input = BufReader::new(File::open("data/models/low poly fox.obj").unwrap());
             let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
@@ -134,6 +146,13 @@ impl ApplicationHandler for App {
             Model::new(vertices, indices, Vec4::zero())
         });
         let _ = self.world.component_add(fox, Controllable);
+        let _ = self.world.component_add(
+            fox,
+            Collider::Aabb(Aabb::new(
+                Vec3::new(-0.652, 0.0, -0.652),
+                Vec3::new(0.652, 0.905, 0.652),
+            )),
+        );
         let _ = self.world.component_add(ground, {
             let input = BufReader::new(File::open("data/models/groundplane.obj").unwrap());
             let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
@@ -164,7 +183,7 @@ impl ApplicationHandler for App {
             PointLight::new([0.0, 2.0, -3.0, 1.0], [0.0, 0.0, 1.0], None, None, None),
         );
 
-        let camera = Camera::new(Vec3::new(0.0, 2.0, 6.0), 60.0, 1.0, 100.0, &window);
+        let camera = Camera::new(Vec3::new(0.0, 5.0, -6.0), 60.0, 1.0, 100.0, &window);
         let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
         let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.05);
 
@@ -188,9 +207,11 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 println!("frame start");
 
-                let delta_time = self.delta_time;
+                let delta_time = self.delta_time.as_secs_f32();
                 let world = &mut self.world;
+                camera_update(world, delta_time);
                 player_update(world, delta_time);
+                // physics_update(world, delta_time);
 
                 *self.world.resource_get_mut::<MouseMovement>().unwrap() = MouseMovement::default();
                 self.renderer.as_mut().unwrap().draw(&mut self.world);
@@ -242,15 +263,87 @@ impl ApplicationHandler for App {
     }
 }
 
-fn player_update(world: &mut World, delta_time: Duration) {
-    let player_entity = world.query::<Controllable>().first().unwrap().0;
+// fn physics_update(world: &mut World, delta_time: f32) {
+//     let collidable = world.query::<Collider>().clone();
+//     let mut last = None;
+//     for (entity, collider) in collidable {
+//         let position = world.component_get::<Model>(entity).unwrap().position.xyz();
+//
+//         if let Collider::Aabb(aabb) = world.component_get_mut::<Collider>(entity).unwrap() {
+//             aabb.min = position + aabb.min;
+//             aabb.max = position + aabb.max;
+//         }
+//
+//         match last {
+//             Some(x) => {
+//                 dbg!(collider.penetration_vector(x));
+//                 last = Some(*collider);
+//             }
+//             None => {
+//                 last = Some(*collider);
+//             }
+//         }
+//     }
+// }
+
+fn camera_update(world: &mut World, delta_time: f32) {
+    let mouse = *world.resource_get::<MouseMovement>().unwrap();
+    let player = world.query::<Controllable>().first().unwrap().0;
+    let player_position = world.component_get::<Model>(player).unwrap().position.xyz();
+    let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
+    let camera = world.resource_get_mut::<Camera>().unwrap();
+    // let target_offset = Vec3 {
+    //     x: 0.0,
+    //     y: 5.0,
+    //     z: -10.0,
+    // };
+    // let local_target_offset = target_offset.rotated_by(player_rotation);
+    //
+    // let target = player_position.xyz() + local_target_offset;
+    if player_position.x > 10.0 {
+        sleep(Duration::from_nanos(1));
+    }
+
+    let sensativity = 0.002;
+    camera.pitch += mouse.y * sensativity;
+    camera.yaw -= mouse.x * sensativity;
+    if camera.pitch < -PI / 2.0 {
+        camera.pitch = -PI / 2.0 + 0.001;
+    }
+    if camera.pitch > PI / 2.0 {
+        camera.pitch = PI / 2.0 - 0.01;
+    }
+
+    camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
+    dbg!(camera.pitch, camera.yaw);
+
+    let target_distance = 20.0;
+
+    let backward = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    }
+    .rotated_by(camera.rotation)
+    .normalized();
+
+    let offset = backward * target_distance;
+
+    camera.position = player_position + offset;
+}
+
+fn player_update(world: &mut World, delta_time: f32) {
     let keyboard = world
         .resource_get::<Keyboard>()
         .expect("keyboard should have been added during resumed");
 
     let mut velocity = Vec3::zero();
+    let mut speed = 2.0 * delta_time;
+    if keyboard.contains(&KeyCode::ShiftLeft) {
+        speed *= 4.0;
+    }
     if keyboard.contains(&KeyCode::KeyW) {
-        velocity += Vec3::new(0.0, 0.0, -1.0); // right handed eww
+        velocity += Vec3::new(0.0, 0.0, -1.0);
     }
     if keyboard.contains(&KeyCode::KeyS) {
         velocity += Vec3::new(0.0, 0.0, 1.0);
@@ -261,31 +354,41 @@ fn player_update(world: &mut World, delta_time: Duration) {
     if keyboard.contains(&KeyCode::KeyA) {
         velocity += Vec3::new(-1.0, 0.0, 0.0);
     }
-    let player = world
-        .component_get_mut::<Model>(player_entity)
-        .expect("player should have model component");
-
-    let speed = 2.0 * delta_time.as_secs_f32();
-    velocity = player.rotation * velocity;
 
     if velocity != Vec3::zero() {
-        velocity.normalize();
+        let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
+
+        let player = world.query::<Controllable>().first().unwrap().0;
+        let player = world.component_get_mut::<Model>(player).unwrap();
+
+        velocity = camera_rotation * velocity;
+        let mut velocity = Vec3 {
+            x: velocity.x,
+            y: 0.0,
+            z: velocity.z,
+        };
+
+        velocity = velocity.normalized();
+
+        let forward = -Vec3::unit_z();
+        let face_direction = if forward.dot(velocity) < -1.0 + 0.0001 {
+            Rotor3::from_rotation_xz(PI)
+        } else {
+            Rotor3::from_rotation_between(forward, velocity)
+        };
+
+        dbg!(face_direction);
+        let rotation_speed = 5.0;
+        velocity *= speed;
+        player.velocity = velocity.into_homogeneous_vector();
+        dbg!(player.rotation.dot(face_direction));
+        player.rotation = player
+            .rotation
+            .slerp(face_direction, rotation_speed * delta_time)
+            .normalized();
+        dbg!(player.rotation);
+
+        player.position += player.velocity;
+        player.requires_update = true;
     }
-    velocity *= speed;
-
-    let turn_speed = 9.0 * delta_time.as_secs_f32();
-
-    let forward = Vec3::new(0.0, 0.0, -1.0);
-    let forward = player.rotation * forward;
-
-    let lean = Rotor3::from_rotation_between(forward, velocity);
-    dbg!(lean, forward, velocity);
-
-    player.lean = lean * player.lean;
-    dbg!(player.lean);
-
-    player.velocity = velocity.into_homogeneous_vector();
-
-    player.position += player.velocity;
-    player.requires_update = true;
 }
