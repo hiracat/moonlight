@@ -1,4 +1,3 @@
-use bytemuck::Pod;
 use ecs::World;
 use obj::load_obj;
 use physics::{Aabb, Collider};
@@ -124,8 +123,8 @@ impl ApplicationHandler for App {
         let _ = self.world.component_add(
             z,
             Collider::Aabb(Aabb::new(
-                Vec3::new(-0.5, -0.5, -0.5),
                 Vec3::new(0.5, 0.5, 0.5),
+                Vec3::new(0.0, 0.0, 0.0),
             )),
         );
 
@@ -149,8 +148,8 @@ impl ApplicationHandler for App {
         let _ = self.world.component_add(
             fox,
             Collider::Aabb(Aabb::new(
-                Vec3::new(-0.652, 0.0, -0.652),
-                Vec3::new(0.652, 0.905, 0.652),
+                Vec3::new(0.331, 0.88, 0.331),
+                Vec3::new(0.0, 0.44, 0.0),
             )),
         );
         let _ = self.world.component_add(ground, {
@@ -211,7 +210,7 @@ impl ApplicationHandler for App {
                 let world = &mut self.world;
                 camera_update(world, delta_time);
                 player_update(world, delta_time);
-                // physics_update(world, delta_time);
+                physics_update(world, delta_time);
 
                 *self.world.resource_get_mut::<MouseMovement>().unwrap() = MouseMovement::default();
                 self.renderer.as_mut().unwrap().draw(&mut self.world);
@@ -263,34 +262,34 @@ impl ApplicationHandler for App {
     }
 }
 
-// fn physics_update(world: &mut World, delta_time: f32) {
-//     let collidable = world.query::<Collider>().clone();
-//     let mut last = None;
-//     for (entity, collider) in collidable {
-//         let position = world.component_get::<Model>(entity).unwrap().position.xyz();
-//
-//         if let Collider::Aabb(aabb) = world.component_get_mut::<Collider>(entity).unwrap() {
-//             aabb.min = position + aabb.min;
-//             aabb.max = position + aabb.max;
-//         }
-//
-//         match last {
-//             Some(x) => {
-//                 dbg!(collider.penetration_vector(x));
-//                 last = Some(*collider);
-//             }
-//             None => {
-//                 last = Some(*collider);
-//             }
-//         }
-//     }
-// }
+fn physics_update(world: &mut World, delta_time: f32) {
+    let collidable = world.query2_mut::<Collider, Model>();
+    let mut last = None;
+    for (_, collider, model) in collidable {
+        collider.translate(model.velocity);
+        model.position += model.velocity.into_homogeneous_vector();
+        model.requires_update = true;
+        dbg!(&model.position);
+        dbg!(&collider);
+
+        match last {
+            Some(x) => {
+                dbg!(collider.penetration_vector(x));
+                dbg!(collider.intersects(x));
+                last = Some(*collider);
+            }
+            None => {
+                last = Some(*collider);
+            }
+        }
+    }
+}
 
 fn camera_update(world: &mut World, delta_time: f32) {
     let mouse = *world.resource_get::<MouseMovement>().unwrap();
     let player = world.query::<Controllable>().first().unwrap().0;
     let player_position = world.component_get::<Model>(player).unwrap().position.xyz();
-    let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
+    // let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
     let camera = world.resource_get_mut::<Camera>().unwrap();
     // let target_offset = Vec3 {
     //     x: 0.0,
@@ -355,12 +354,12 @@ fn player_update(world: &mut World, delta_time: f32) {
         velocity += Vec3::new(-1.0, 0.0, 0.0);
     }
 
-    if velocity != Vec3::zero() {
-        let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
-
-        let player = world.query::<Controllable>().first().unwrap().0;
-        let player = world.component_get_mut::<Model>(player).unwrap();
-
+    let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
+    let player = world.query::<Controllable>().first().unwrap().0;
+    let player = world.component_get_mut::<Model>(player).unwrap();
+    if velocity == Vec3::zero() {
+        player.velocity = Vec3::zero();
+    } else {
         velocity = camera_rotation * velocity;
         let mut velocity = Vec3 {
             x: velocity.x,
@@ -380,15 +379,12 @@ fn player_update(world: &mut World, delta_time: f32) {
         dbg!(face_direction);
         let rotation_speed = 5.0;
         velocity *= speed;
-        player.velocity = velocity.into_homogeneous_vector();
+        player.velocity = velocity;
         dbg!(player.rotation.dot(face_direction));
         player.rotation = player
             .rotation
             .slerp(face_direction, rotation_speed * delta_time)
             .normalized();
         dbg!(player.rotation);
-
-        player.position += player.velocity;
-        player.requires_update = true;
     }
 }

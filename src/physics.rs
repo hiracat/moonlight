@@ -1,17 +1,27 @@
 use ultraviolet::Vec3;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Aabb {
     pub min: Vec3,
     pub max: Vec3,
 }
 impl Aabb {
-    pub fn new(min: Vec3, max: Vec3) -> Aabb {
-        Aabb { min, max }
+    pub fn new(half_extent: Vec3, position: Vec3) -> Aabb {
+        let global_max = position + half_extent;
+        let global_min = position - half_extent;
+
+        Aabb {
+            min: global_min,
+            max: global_max,
+        }
+    }
+    pub fn translate(&mut self, delta: Vec3) {
+        self.min += delta;
+        self.max += delta;
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Collider {
     Aabb(Aabb),
 }
@@ -49,6 +59,13 @@ impl Collider {
                     || s.min.y > o.max.y
                     || s.max.z < o.min.z
                     || s.min.z > o.max.z)
+            }
+        }
+    }
+    pub fn translate(&mut self, delta: Vec3) {
+        match self {
+            Collider::Aabb(x) => {
+                x.translate(delta);
             }
         }
     }

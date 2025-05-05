@@ -145,6 +145,64 @@ impl World {
             })
             .collect()
     }
+    // is safe because entity_id is guaranteed to be unique, then we only need to index the inner
+    // hashmap once
+    //
+    /// returns an empty array if nothing matches
+    pub fn query_mut<T: 'static>(&mut self) -> Vec<(EntityId, &mut T)> {
+        let type_id = TypeId::of::<T>();
+        let mut result = Vec::new();
+        let storage_pointer: *mut HashMap<EntityId, HashMap<TypeId, Box<dyn Any>>> =
+            &raw mut self.component_storage;
+
+        for entity in &self.entities {
+            unsafe {
+                let storage = &mut *storage_pointer;
+                if let Some(components) = storage.get_mut(entity) {
+                    if let Some(component) = components.get_mut(&type_id) {
+                        if let Some(typed_component) = component.downcast_mut::<T>() {
+                            result.push((*entity, typed_component));
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    ///Panics: panics if type a and type b are the same
+    pub fn query2_mut<A: 'static, B: 'static>(&mut self) -> Vec<(EntityId, &mut A, &mut B)> {
+        let type_a = TypeId::of::<A>();
+        let type_b = TypeId::of::<B>();
+        assert!(type_a != type_b);
+
+        let mut result = Vec::new();
+        let component_storage: *mut HashMap<EntityId, HashMap<TypeId, Box<dyn Any>>> =
+            &raw mut self.component_storage;
+
+        for entity in &self.entities {
+            unsafe {
+                if let Some(components) = (*component_storage).get_mut(entity) {
+                    let comp_storage_pointer: *mut HashMap<TypeId, Box<dyn Any>> =
+                        components as *mut _;
+
+                    if let (Some(comp_a), Some(comp_b)) = (
+                        (*comp_storage_pointer).get_mut(&type_a),
+                        (*comp_storage_pointer).get_mut(&type_b),
+                    ) {
+                        if let (Some(a), Some(b)) =
+                            (comp_a.downcast_mut::<A>(), comp_b.downcast_mut::<B>())
+                        {
+                            result.push((*entity, a, b));
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
 
     // impl details
     fn entity_component_remove(
@@ -187,5 +245,3 @@ impl World {
         }
     }
 }
-
-// marker

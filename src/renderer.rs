@@ -187,7 +187,7 @@ pub struct Model {
     pub indices: Vec<u32>,
     pub requires_update: bool,
     pub position: Vec4,
-    pub velocity: Vec4,
+    pub velocity: Vec3,
     pub rotation: Rotor3,
 
     matrix: Mat4,
@@ -227,7 +227,7 @@ impl Model {
             matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
             requires_update: true,
-            velocity: Vec3::zero().into_homogeneous_vector(),
+            velocity: Vec3::zero(),
             position,
 
             index_buffer: None,
