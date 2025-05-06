@@ -26,7 +26,7 @@ pub enum Collider {
     Aabb(Aabb),
 }
 impl Collider {
-    pub fn penetration_vector(&self, other: Collider) -> Vec3 {
+    pub fn penetration_vector(&self, other: &Collider) -> Vec3 {
         match (self, other) {
             (Collider::Aabb(s), Collider::Aabb(o)) => {
                 let dx1 = s.max.x - o.min.x;
@@ -50,7 +50,7 @@ impl Collider {
             }
         }
     }
-    pub fn intersects(&self, other: Collider) -> bool {
+    pub fn intersects(&self, other: &Collider) -> bool {
         match (self, other) {
             (Collider::Aabb(s), Collider::Aabb(o)) => {
                 !(s.max.x < o.min.x

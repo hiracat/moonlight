@@ -189,6 +189,7 @@ pub struct Model {
     pub position: Vec4,
     pub velocity: Vec3,
     pub rotation: Rotor3,
+    pub is_static: bool,
 
     matrix: Mat4,
     u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
@@ -220,10 +221,11 @@ impl Model {
             normal: self.matrix.inversed().transposed(),
         }
     }
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4) -> Self {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4, is_static: bool) -> Self {
         Model {
             vertices,
             indices,
+            is_static,
             matrix: Mat4::identity(),
             rotation: Rotor3::identity(),
             requires_update: true,

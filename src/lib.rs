@@ -85,7 +85,7 @@ impl ApplicationHandler for App {
                 .collect();
             let indices: Vec<u32> = model.indices.clone();
 
-            Model::new(vertices, indices, Vec4::new(1.0, 0.0, 0.0, 1.0))
+            Model::new(vertices, indices, Vec4::new(1.0, 0.0, 0.0, 1.0), true)
         });
         let _ = self.world.component_add(y, {
             let input = BufReader::new(File::open("data/models/square.obj").unwrap());
@@ -101,7 +101,7 @@ impl ApplicationHandler for App {
                 .collect();
             let indices: Vec<u32> = model.indices.clone();
 
-            Model::new(vertices, indices, Vec4::new(0.0, 1.0, 0.0, 1.0))
+            Model::new(vertices, indices, Vec4::new(0.0, 1.0, 0.0, 1.0), true)
         });
         let _ = self.world.component_add(z, {
             let input = BufReader::new(File::open("data/models/smallsphere.obj").unwrap());
@@ -117,7 +117,7 @@ impl ApplicationHandler for App {
                 .collect();
             let indices: Vec<u32> = model.indices.clone();
 
-            Model::new(vertices, indices, Vec4::new(0.0, 0.0, 1.0, 1.0))
+            Model::new(vertices, indices, Vec4::new(0.0, 0.0, 1.0, 1.0), true)
         });
 
         let _ = self.world.component_add(
@@ -142,7 +142,7 @@ impl ApplicationHandler for App {
                 .collect();
             let indices: Vec<u32> = model.indices.clone();
 
-            Model::new(vertices, indices, Vec4::zero())
+            Model::new(vertices, indices, Vec4::zero(), false)
         });
         let _ = self.world.component_add(fox, Controllable);
         let _ = self.world.component_add(
@@ -166,7 +166,7 @@ impl ApplicationHandler for App {
                 .collect();
             let indices: Vec<u32> = model.indices.clone();
 
-            Model::new(vertices, indices, Vec4::zero())
+            Model::new(vertices, indices, Vec4::zero(), true)
         });
 
         let _ = self.world.component_add(
@@ -263,25 +263,53 @@ impl ApplicationHandler for App {
 }
 
 fn physics_update(world: &mut World, delta_time: f32) {
-    let collidable = world.query2_mut::<Collider, Model>();
-    let mut last = None;
-    for (_, collider, model) in collidable {
-        collider.translate(model.velocity);
-        model.position += model.velocity.into_homogeneous_vector();
-        model.requires_update = true;
-        dbg!(&model.position);
-        dbg!(&collider);
+    let mut entities = world.query2_mut::<Collider, Model>();
+    for i in 0..entities.len() {
+        for j in i + 1..entities.len() {
+            if entities[i].1.intersects(entities[j].1) {
+                let min = {
+                    let pen_vec3 = entities[i].1.penetration_vector(entities[j].1);
+                    let abs = pen_vec3.abs();
+                    let min_index = if abs.x <= abs.y && abs.x <= abs.z {
+                        0
+                    } else if abs.y <= abs.z {
+                        1
+                    } else {
+                        2
+                    };
+                    // Construct the output Vec3
+                    match min_index {
+                        0 => Vec3::new(pen_vec3.x, 0.0, 0.0),
+                        1 => Vec3::new(0.0, pen_vec3.y, 0.0),
+                        2 => Vec3::new(0.0, 0.0, pen_vec3.z),
+                        _ => unreachable!(),
+                    }
+                };
 
-        match last {
-            Some(x) => {
-                dbg!(collider.penetration_vector(x));
-                dbg!(collider.intersects(x));
-                last = Some(*collider);
-            }
-            None => {
-                last = Some(*collider);
+                if !entities[i].2.is_static && !entities[j].2.is_static {
+                    entities[i].2.velocity -= min * 0.5;
+                    entities[j].2.velocity += min * 0.5;
+                } else {
+                    if !entities[i].2.is_static {
+                        entities[i].2.velocity -= min;
+                    }
+                    if !entities[j].2.is_static {
+                        entities[j].2.velocity += min;
+                    }
+                }
             }
         }
+    }
+
+    for i in 0..entities.len() {
+        dbg!(&entities[i].0);
+        dbg!(&entities[i].2.position);
+        dbg!(&entities[i].2.velocity);
+        let velocity = entities[i].2.velocity;
+        entities[i].2.position += velocity.into_homogeneous_vector();
+        entities[i].1.translate(velocity);
+        entities[i].2.requires_update = true;
+        entities[i].2.velocity *= 0.5 * delta_time;
     }
 }
 
