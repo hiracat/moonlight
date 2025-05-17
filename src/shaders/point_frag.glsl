@@ -5,7 +5,8 @@ layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput u_
 layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput u_position;
 
 layout(set = 0, binding = 3) uniform PointLight {
-    vec4 position;
+    vec3 position;
+    float _padding;
     vec3 color;
     float brightness;
     float linear;      // Controls linear distance falloff
@@ -30,8 +31,8 @@ vec3 toneMap(vec3 color, float exposure) {
 
 void main() {
     vec3 fragPos = subpassLoad(u_position).xyz;
-    vec3 lightDirection = normalize(point.position.xyz - fragPos);
-    float distance = length(point.position.xyz - fragPos);
+    vec3 lightDirection = normalize(point.position - fragPos);
+    float distance = length(point.position - fragPos);
     float attenuation = 1.0 / (1 + point.linear * distance + point.quadratic * distance * distance);
 
     float diffuseIntensity = max(dot(normalize(subpassLoad(u_normals).rgb), lightDirection), 0.0);

@@ -102,6 +102,7 @@ impl World {
                     .ok_or(WorldError::ComponentMissing)
             })
     }
+
     pub fn resource_add<T: 'static>(&mut self, resource: T) {
         self.resource_storage
             .insert(TypeId::of::<T>(), Box::new(resource));
@@ -119,6 +120,11 @@ impl World {
         self.resource_storage
             .get_mut(&type_id)
             .and_then(|res| res.downcast_mut::<T>())
+    }
+    pub fn has_component<T: 'static>(&self, id: EntityId) -> bool {
+        self.component_storage
+            .get(&id)
+            .map_or(false, |x| x.contains_key(&TypeId::of::<T>()))
     }
 
     pub fn query_entities<T: 'static>(&self) -> Vec<EntityId> {
@@ -195,6 +201,45 @@ impl World {
                             (comp_a.downcast_mut::<A>(), comp_b.downcast_mut::<B>())
                         {
                             result.push((*entity, a, b));
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    ///Panics: panics if type a and type b are the same
+    pub fn query3_mut<A: 'static, B: 'static, C: 'static>(
+        &mut self,
+    ) -> Vec<(EntityId, &mut A, &mut B, &mut C)> {
+        let type_a = TypeId::of::<A>();
+        let type_b = TypeId::of::<B>();
+        let type_c = TypeId::of::<C>();
+        assert!(type_a != type_b && type_a != type_c);
+
+        let mut result = Vec::new();
+        let component_storage: *mut HashMap<EntityId, HashMap<TypeId, Box<dyn Any>>> =
+            &raw mut self.component_storage;
+
+        for entity in &self.entities {
+            unsafe {
+                if let Some(components) = (*component_storage).get_mut(entity) {
+                    let comp_storage_pointer: *mut HashMap<TypeId, Box<dyn Any>> =
+                        components as *mut _;
+
+                    if let (Some(comp_a), Some(comp_b), Some(comp_c)) = (
+                        (*comp_storage_pointer).get_mut(&type_a),
+                        (*comp_storage_pointer).get_mut(&type_b),
+                        (*comp_storage_pointer).get_mut(&type_c),
+                    ) {
+                        if let (Some(a), Some(b), Some(c)) = (
+                            comp_a.downcast_mut::<A>(),
+                            comp_b.downcast_mut::<B>(),
+                            comp_c.downcast_mut::<C>(),
+                        ) {
+                            result.push((*entity, a, b, c));
                         }
                     }
                 }

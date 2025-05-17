@@ -1,7 +1,12 @@
-use ecs::World;
+use ecs::{EntityId, World};
+use engine::{
+    components::{
+        Aabb, AmbientLight, Collider, DirectionalLight, Dynamic, Model, PointLight, RigidBody,
+        Transform,
+    },
+    renderer::{self, Camera, Renderer, Vertex},
+};
 use obj::load_obj;
-use physics::{Aabb, Collider};
-use renderer::{AmbientLight, Camera, DirectionalLight, Model, PointLight, Renderer, Vertex};
 use std::{
     collections::HashSet,
     f32::consts::PI,
@@ -10,7 +15,7 @@ use std::{
     thread::sleep,
     time::{Duration, Instant},
 };
-use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
+use ultraviolet::{Rotor3, Slerp, Vec3};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, WindowEvent},
@@ -20,8 +25,8 @@ use winit::{
 };
 
 mod ecs;
-mod physics;
-mod renderer;
+mod engine;
+mod shaders;
 
 type Keyboard = HashSet<KeyCode>;
 #[derive(Debug)]
@@ -49,6 +54,23 @@ impl Default for App {
     }
 }
 
+fn load_model(path: &str, renderer: &Renderer) -> Model {
+    let input = BufReader::new(File::open(path).unwrap());
+    let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
+    let vertices: Vec<Vertex> = model
+        .vertices
+        .iter()
+        .map(|v| Vertex {
+            position: v.position,
+            normal: v.normal,
+            color: [1.0, 1.0, 1.0], // map other fields as needed
+        })
+        .collect();
+    let indices: Vec<u32> = model.indices.clone();
+
+    Model::create(renderer, vertices, indices)
+}
+
 impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -62,124 +84,31 @@ impl ApplicationHandler for App {
 
         let fox = self.world.entity_create();
         let ground = self.world.entity_create();
+        let red_light = self.world.entity_create();
+        let blue_light = self.world.entity_create();
+        let green_light = self.world.entity_create();
+        let x_axis = self.world.entity_create();
+        let y_axis = self.world.entity_create();
+        let z_axis = self.world.entity_create();
 
-        let red = self.world.entity_create();
-        let blue = self.world.entity_create();
-        let green = self.world.entity_create();
-
-        let x = self.world.entity_create();
-        let y = self.world.entity_create();
-        let z = self.world.entity_create();
-
-        let _ = self.world.component_add(x, {
-            let input = BufReader::new(File::open("data/models/square.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.clone();
-
-            Model::new(vertices, indices, Vec4::new(1.0, 0.0, 0.0, 1.0), true)
-        });
-        let _ = self.world.component_add(y, {
-            let input = BufReader::new(File::open("data/models/square.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.clone();
-
-            Model::new(vertices, indices, Vec4::new(0.0, 1.0, 0.0, 1.0), true)
-        });
-        let _ = self.world.component_add(z, {
-            let input = BufReader::new(File::open("data/models/smallsphere.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.clone();
-
-            Model::new(vertices, indices, Vec4::new(0.0, 0.0, 1.0, 1.0), true)
-        });
+        let _ = self.world.component_add(fox, Transform::new());
+        let _ = self.world.component_add(fox, Controllable);
+        let _ = self.world.component_add(ground, Transform::new());
 
         let _ = self.world.component_add(
-            z,
+            z_axis,
             Collider::Aabb(Aabb::new(
                 Vec3::new(0.5, 0.5, 0.5),
                 Vec3::new(0.0, 0.0, 0.0),
             )),
         );
 
-        let _ = self.world.component_add(fox, {
-            let input = BufReader::new(File::open("data/models/low poly fox.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.clone();
-
-            Model::new(vertices, indices, Vec4::zero(), false)
-        });
-        let _ = self.world.component_add(fox, Controllable);
         let _ = self.world.component_add(
             fox,
             Collider::Aabb(Aabb::new(
                 Vec3::new(0.331, 0.88, 0.331),
                 Vec3::new(0.0, 0.44, 0.0),
             )),
-        );
-        let _ = self.world.component_add(ground, {
-            let input = BufReader::new(File::open("data/models/groundplane.obj").unwrap());
-            let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-            let vertices: Vec<Vertex> = model
-                .vertices
-                .iter()
-                .map(|v| Vertex {
-                    position: v.position,
-                    normal: v.normal,
-                    color: [1.0, 1.0, 1.0], // map other fields as needed
-                })
-                .collect();
-            let indices: Vec<u32> = model.indices.clone();
-
-            Model::new(vertices, indices, Vec4::zero(), true)
-        });
-
-        let _ = self.world.component_add(
-            red,
-            PointLight::new([2.0, 2.0, 0.0, 1.0], [1.0, 0.0, 0.0], None, None, None),
-        );
-        let _ = self.world.component_add(
-            green,
-            PointLight::new([-2.0, 2.0, 0.0, 1.0], [0.0, 1.0, 0.0], None, None, None),
-        );
-        let _ = self.world.component_add(
-            blue,
-            PointLight::new([0.0, 2.0, -3.0, 1.0], [0.0, 0.0, 1.0], None, None, None),
         );
 
         let camera = Camera::new(Vec3::new(0.0, 5.0, -6.0), 60.0, 1.0, 100.0, &window);
@@ -190,11 +119,86 @@ impl ApplicationHandler for App {
         self.world.resource_add(sun);
         self.world.resource_add(ambient);
         self.world.resource_add(window.clone());
-
         self.world.resource_add(Keyboard::new());
         self.world.resource_add(MouseMovement::default());
 
         self.renderer = Some(Renderer::init(event_loop, &mut self.world, &window));
+        let renderer = self.renderer.as_ref().unwrap();
+
+        let _ = self.world.component_add(fox, RigidBody::new());
+
+        let _ = self.world.component_add(
+            red_light,
+            PointLight::create(
+                renderer,
+                Vec3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                10.0,
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            red_light,
+            Transform::from(Some(Vec3::new(5.0, 2.0, 0.0)), None, None),
+        );
+
+        let _ = self.world.component_add(
+            green_light,
+            PointLight::create(
+                renderer,
+                Vec3 {
+                    x: 0.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                10.0,
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            green_light,
+            Transform::from(Some(Vec3::new(-5.0, 2.0, 0.0)), None, None),
+        );
+
+        let _ = self.world.component_add(
+            blue_light,
+            PointLight::create(
+                renderer,
+                Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
+                10.0,
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            blue_light,
+            Transform::from(Some(Vec3::new(0.0, 2.0, 5.0)), None, None),
+        );
+
+        let _ = self
+            .world
+            .component_add(x_axis, load_model("data/models/square.obj", renderer));
+        let _ = self
+            .world
+            .component_add(y_axis, load_model("data/models/square.obj", renderer));
+        let _ = self
+            .world
+            .component_add(z_axis, load_model("data/models/smallsphere.obj", renderer));
+        let _ = self
+            .world
+            .component_add(fox, load_model("data/models/low poly fox.obj", renderer));
+        let _ = self
+            .world
+            .component_add(ground, load_model("data/models/groundplane.obj", renderer));
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
@@ -263,60 +267,69 @@ impl ApplicationHandler for App {
 }
 
 fn physics_update(world: &mut World, delta_time: f32) {
-    let mut entities = world.query2_mut::<Collider, Model>();
+    let dynamic_entities: HashSet<EntityId> =
+        world.query_entities::<Dynamic>().into_iter().collect();
+
+    let mut entities = world.query3_mut::<Collider, Model, Transform>();
     for i in 0..entities.len() {
         for j in i + 1..entities.len() {
-            if entities[i].1.intersects(entities[j].1) {
-                let min = {
-                    let pen_vec3 = entities[i].1.penetration_vector(entities[j].1);
-                    let abs = pen_vec3.abs();
-                    let min_index = if abs.x <= abs.y && abs.x <= abs.z {
-                        0
-                    } else if abs.y <= abs.z {
-                        1
-                    } else {
-                        2
-                    };
-                    // Construct the output Vec3
-                    match min_index {
-                        0 => Vec3::new(pen_vec3.x, 0.0, 0.0),
-                        1 => Vec3::new(0.0, pen_vec3.y, 0.0),
-                        2 => Vec3::new(0.0, 0.0, pen_vec3.z),
-                        _ => unreachable!(),
-                    }
-                };
-
-                if !entities[i].2.is_static && !entities[j].2.is_static {
-                    entities[i].2.velocity -= min * 0.5;
-                    entities[j].2.velocity += min * 0.5;
+            if !entities[i].1.intersects(entities[j].1) {
+                continue;
+            }
+            let min = {
+                let pen_vec3 = entities[i].1.penetration_vector(entities[j].1);
+                let abs = pen_vec3.abs();
+                let min_index = if abs.x <= abs.y && abs.x <= abs.z {
+                    0
+                } else if abs.y <= abs.z {
+                    1
                 } else {
-                    if !entities[i].2.is_static {
-                        entities[i].2.velocity -= min;
-                    }
-                    if !entities[j].2.is_static {
-                        entities[j].2.velocity += min;
-                    }
+                    2
+                };
+                // Construct the output Vec3
+                match min_index {
+                    0 => Vec3::new(pen_vec3.x, 0.0, 0.0),
+                    1 => Vec3::new(0.0, pen_vec3.y, 0.0),
+                    2 => Vec3::new(0.0, 0.0, pen_vec3.z),
+                    _ => unreachable!(),
+                }
+            };
+
+            if dynamic_entities.contains(&entities[i].0)
+                && dynamic_entities.contains(&entities[j].0)
+            {
+                entities[i].3.position -= min * 0.5;
+                entities[j].3.position += min * 0.5;
+            } else {
+                if dynamic_entities.contains(&entities[i].0) {
+                    entities[i].3.position -= min;
+                }
+                if dynamic_entities.contains(&entities[i].0) {
+                    entities[j].3.position += min;
                 }
             }
         }
     }
 
+    let mut entities = world.query3_mut::<Model, Transform, RigidBody>();
     for i in 0..entities.len() {
         dbg!(&entities[i].0);
         dbg!(&entities[i].2.position);
-        dbg!(&entities[i].2.velocity);
-        let velocity = entities[i].2.velocity;
-        entities[i].2.position += velocity.into_homogeneous_vector();
-        entities[i].1.translate(velocity);
-        entities[i].2.requires_update = true;
-        entities[i].2.velocity *= 0.5 * delta_time;
+        let velocity = entities[i].3.velocity;
+        entities[i].2.position += velocity;
+        entities[i].3.velocity *= 0.5 * delta_time;
+
+        entities[i].2.dirty = true;
     }
 }
 
-fn camera_update(world: &mut World, delta_time: f32) {
+fn camera_update(world: &mut World, _delta_time: f32) {
     let mouse = *world.resource_get::<MouseMovement>().unwrap();
+
     let player = world.query::<Controllable>().first().unwrap().0;
-    let player_position = world.component_get::<Model>(player).unwrap().position.xyz();
+
+    let player_position = world.component_get::<Transform>(player).unwrap().position;
+
     // let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
     let camera = world.resource_get_mut::<Camera>().unwrap();
     // let target_offset = Vec3 {
@@ -383,10 +396,12 @@ fn player_update(world: &mut World, delta_time: f32) {
     }
 
     let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
-    let player = world.query::<Controllable>().first().unwrap().0;
-    let player = world.component_get_mut::<Model>(player).unwrap();
+
+    let mut binding = world.query3_mut::<Controllable, Transform, RigidBody>();
+    let (_, _, transform, rigidbody) = binding.first_mut().expect("player should exist!");
+
     if velocity == Vec3::zero() {
-        player.velocity = Vec3::zero();
+        rigidbody.velocity = Vec3::zero();
     } else {
         velocity = camera_rotation * velocity;
         let mut velocity = Vec3 {
@@ -407,12 +422,12 @@ fn player_update(world: &mut World, delta_time: f32) {
         dbg!(face_direction);
         let rotation_speed = 5.0;
         velocity *= speed;
-        player.velocity = velocity;
-        dbg!(player.rotation.dot(face_direction));
-        player.rotation = player
+        rigidbody.velocity = velocity;
+        dbg!(transform.rotation.dot(face_direction));
+        transform.rotation = transform
             .rotation
             .slerp(face_direction, rotation_speed * delta_time)
             .normalized();
-        dbg!(player.rotation);
+        dbg!(transform.rotation);
     }
 }

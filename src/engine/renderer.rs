@@ -2,11 +2,62 @@
 #![allow(dead_code)]
 use std::{sync::Arc, time::Instant};
 
-struct Transform {
-    position: Vec3,
-    orientation: Rotor3,
-    scale: Vec3,
-}
+use ultraviolet::{projection, Rotor3, Vec3};
+use vulkano::{
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
+    command_buffer::{
+        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
+        AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
+        SubpassContents, SubpassEndInfo,
+    },
+    descriptor_set::{
+        allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
+        layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType},
+        PersistentDescriptorSet, WriteDescriptorSet,
+    },
+    device::{
+        physical::{PhysicalDevice, PhysicalDeviceType},
+        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
+    },
+    format::Format,
+    image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
+    instance::{Instance, InstanceCreateInfo},
+    memory::allocator::{
+        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
+    },
+    pipeline::{
+        graphics::{
+            color_blend::{
+                AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
+            },
+            depth_stencil::{DepthState, DepthStencilState},
+            input_assembly::InputAssemblyState,
+            multisample::MultisampleState,
+            rasterization::{CullMode, FrontFace, RasterizationState},
+            subpass::PipelineSubpassType,
+            vertex_input::{self, Vertex as _, VertexDefinition},
+            viewport::{Viewport, ViewportState},
+            GraphicsPipelineCreateInfo,
+        },
+        layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
+        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+        PipelineShaderStageCreateInfo,
+    },
+    render_pass::{
+        AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
+        SubpassDependency, SubpassDescription,
+    },
+    shader::ShaderStages,
+    swapchain::{
+        acquire_next_image, PresentMode, Surface, SurfaceInfo, Swapchain, SwapchainCreateInfo,
+        SwapchainPresentInfo,
+    },
+    sync::{self, AccessFlags, DependencyFlags, GpuFuture, HostAccessError, PipelineStages},
+    Validated, VulkanError, VulkanLibrary,
+};
+use winit::{event_loop::ActiveEventLoop, window::Window};
+
 #[derive(Default)]
 pub struct Camera {
     pub position: Vec3,
@@ -88,158 +139,6 @@ struct CameraUBO {
     proj: ultraviolet::Mat4,
 }
 
-#[derive(Default)]
-pub struct AmbientLight {
-    pub color: [f32; 3],
-    pub intensity: f32,
-
-    u_buffer: Option<Vec<Subbuffer<AmbientLightUBO>>>,
-    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
-}
-
-#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
-#[repr(C)]
-#[derive(Debug)]
-struct AmbientLightUBO {
-    color: [f32; 3],
-    intensity: f32,
-}
-impl AmbientLight {
-    pub fn new(color: [f32; 3], intensity: f32) -> Self {
-        Self {
-            color,
-            intensity,
-            u_buffer: None,
-            descriptor_set: None,
-        }
-    }
-}
-
-pub struct PointLight {
-    pub position: [f32; 4],
-    pub color: [f32; 3],
-    pub brightness: f32,
-    pub linear: f32,
-    pub quadratic: f32,
-
-    u_buffer: Option<Vec<Subbuffer<PointLightUBO>>>,
-    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
-}
-
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
-#[repr(C)]
-struct PointLightUBO {
-    position: [f32; 4],
-    color: [f32; 3],
-    brightness: f32,
-    linear: f32,
-    quadratic: f32,
-}
-
-impl PointLight {
-    pub fn new(
-        position: [f32; 4],
-        color: [f32; 3],
-        brightness: Option<f32>,
-        linear: Option<f32>,
-        quadratic: Option<f32>,
-    ) -> Self {
-        Self {
-            brightness: brightness.unwrap_or(10.0),
-            linear: linear.unwrap_or(0.7),
-            quadratic: quadratic.unwrap_or(1.2),
-            position,
-            color,
-            descriptor_set: None,
-            u_buffer: None,
-        }
-    }
-}
-
-pub struct DirectionalLight {
-    pub position: [f32; 4],
-    pub color: [f32; 3],
-
-    u_buffer: Option<Vec<Subbuffer<DirectionalLightUBO>>>,
-    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
-}
-
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
-#[repr(C)]
-struct DirectionalLightUBO {
-    position: [f32; 4],
-    color: [f32; 3],
-}
-
-impl DirectionalLight {
-    pub fn new(position: [f32; 4], color: [f32; 3]) -> Self {
-        Self {
-            position,
-            color,
-            descriptor_set: None,
-            u_buffer: None,
-        }
-    }
-}
-
-pub struct Model {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
-    pub requires_update: bool,
-    pub position: Vec4,
-    pub velocity: Vec3,
-    pub rotation: Rotor3,
-    pub is_static: bool,
-
-    matrix: Mat4,
-    u_buffer: Option<Vec<Subbuffer<ModelUBO>>>,
-    descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
-    vertex_buffer: Option<Subbuffer<[Vertex]>>,
-    index_buffer: Option<Subbuffer<[u32]>>,
-}
-
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
-#[repr(C)]
-#[derive(Debug)]
-struct ModelUBO {
-    model: Mat4,
-    normal: Mat4,
-}
-impl Model {
-    fn get_ubo_data(&mut self) -> ModelUBO {
-        if self.requires_update {
-            let rotation_mat = self.rotation.into_matrix().into_homogeneous();
-            let translation_mat = Mat4::from_translation(self.position.xyz());
-            let model_mat = translation_mat * rotation_mat;
-
-            self.matrix = model_mat;
-            self.requires_update = false;
-        };
-
-        ModelUBO {
-            model: self.matrix,
-            normal: self.matrix.inversed().transposed(),
-        }
-    }
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, position: Vec4, is_static: bool) -> Self {
-        Model {
-            vertices,
-            indices,
-            is_static,
-            matrix: Mat4::identity(),
-            rotation: Rotor3::identity(),
-            requires_update: true,
-            velocity: Vec3::zero(),
-            position,
-
-            index_buffer: None,
-            vertex_buffer: None,
-
-            u_buffer: None,
-            descriptor_set: None,
-        }
-    }
-}
 #[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -251,62 +150,6 @@ pub struct Vertex {
     #[format(R32G32B32_SFLOAT)]
     pub color: [f32; 3],
 }
-
-use ultraviolet::{projection, Mat4, Rotor3, Vec3, Vec4};
-use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
-    command_buffer::{
-        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
-        AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
-        SubpassContents, SubpassEndInfo,
-    },
-    descriptor_set::{
-        allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
-        layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType},
-        PersistentDescriptorSet, WriteDescriptorSet,
-    },
-    device::{
-        physical::{PhysicalDevice, PhysicalDeviceType},
-        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
-    },
-    format::Format,
-    image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
-    instance::{Instance, InstanceCreateInfo},
-    memory::allocator::{
-        AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
-    },
-    pipeline::{
-        graphics::{
-            color_blend::{
-                AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
-            },
-            depth_stencil::{DepthState, DepthStencilState},
-            input_assembly::InputAssemblyState,
-            multisample::MultisampleState,
-            rasterization::{CullMode, FrontFace, RasterizationState},
-            subpass::PipelineSubpassType,
-            vertex_input::{self, Vertex as _, VertexDefinition},
-            viewport::{Viewport, ViewportState},
-            GraphicsPipelineCreateInfo,
-        },
-        layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateFlags},
-        DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
-        PipelineShaderStageCreateInfo,
-    },
-    render_pass::{
-        AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
-        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
-        SubpassDependency, SubpassDescription,
-    },
-    shader::ShaderStages,
-    swapchain::{
-        acquire_next_image, PresentMode, Surface, SurfaceInfo, Swapchain, SwapchainCreateInfo,
-        SwapchainPresentInfo,
-    },
-    sync::{self, AccessFlags, DependencyFlags, GpuFuture, HostAccessError, PipelineStages},
-    Validated, VulkanError, VulkanLibrary,
-};
-use winit::{event_loop::ActiveEventLoop, window::Window};
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
@@ -346,6 +189,8 @@ pub struct Renderer {
     pub recreate_swapchain: bool,
     pub memory_allocator: Arc<dyn MemoryAllocator>,
     pub start_time: Instant,
+    pub pipelines: Vec<Arc<GraphicsPipeline>>,
+    pub(in crate::engine) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
 
     surface: Arc<Surface>,
     aspect_ratio: f32,
@@ -356,18 +201,16 @@ pub struct Renderer {
     current_frame: usize,
     frame_counter: u128,
 
-    swapchain: Arc<Swapchain>,
+    pub(in crate::engine) swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
-
-    pipelines: Vec<Arc<GraphicsPipeline>>,
 
     viewport: Viewport,
 
     framebuffers: Vec<Arc<Framebuffer>>,
 
-    color_buffers: Vec<Arc<ImageView>>,
-    normal_buffers: Vec<Arc<ImageView>>,
-    position_buffers: Vec<Arc<ImageView>>,
+    pub(in crate::engine) color_buffers: Vec<Arc<ImageView>>,
+    pub(in crate::engine) normal_buffers: Vec<Arc<ImageView>>,
+    pub(in crate::engine) position_buffers: Vec<Arc<ImageView>>,
 
     frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
@@ -421,9 +264,9 @@ impl Renderer {
             camera.aspect_ratio = self.aspect_ratio;
             camera.populate_u_buffer(self.swapchain.image_count(), self.memory_allocator.clone());
 
-            create_descriptor_sets(
+            write_descriptor_sets(
                 world,
-                &self.device,
+                self.descriptor_set_allocator.clone(),
                 &self.pipelines,
                 &self.color_buffers,
                 &self.normal_buffers,
@@ -435,7 +278,6 @@ impl Renderer {
         }
 
         // NOTE: RENDERING START
-
         let (image_index, is_suboptimal, acquire_future) =
             match acquire_next_image(self.swapchain.clone(), None).map_err(Validated::unwrap) {
                 Ok(r) => r,
@@ -483,13 +325,69 @@ impl Renderer {
         }
 
         {
+            let entities = world.query_entities::<PointLight>();
+            for entity in entities {
+                let transform;
+                if !world.has_component::<Transform>(entity) {
+                    eprintln!(
+                        "WARNING: light {:?} does not have transform component, giving identity matrix", entity
+                    );
+                    transform = Transform::new();
+                } else {
+                    transform = *world
+                        .component_get_mut::<Transform>(entity)
+                        .expect("what the fuck, impossible");
+                }
+                let point_light = world
+                    .component_get_mut::<PointLight>(entity)
+                    .expect("what the fuck, impossible");
+
+                let data = point_light.as_point_ubo(transform);
+                dbg!(data);
+
+                loop {
+                    match point_light.u_buffers[image_index].write() {
+                        Ok(mut write) => {
+                            *write = data;
+                            break;
+                        }
+                        Err(error) => match error {
+                            HostAccessError::AccessConflict(_) => {
+                                println!("light failed loop");
+                                self.frames_resources_free[self.current_frame]
+                                    .as_mut()
+                                    .unwrap()
+                                    .cleanup_finished();
+                            }
+                            _ => {
+                                panic!("failed to write to light buffer");
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+        {
             let entities = world.query_entities::<Model>();
             for entity in entities {
-                let model = world.component_get_mut::<Model>(entity).unwrap();
-                let data = model.get_ubo_data();
-                let buffer = model.u_buffer.as_mut().unwrap();
+                let data;
+                if !world.has_component::<Transform>(entity) {
+                    eprintln!(
+                        "WARNING: model {:?} does not have transform component, giving identity matrix", entity
+                    );
+                    data = ModelUBO::new(Vec3::zero(), Rotor3::identity());
+                } else {
+                    let transform = world
+                        .component_get_mut::<Transform>(entity)
+                        .expect("what the fuck, impossible");
+                    data = transform.as_model_ubo();
+                }
+                let model = world
+                    .component_get_mut::<Model>(entity)
+                    .expect("what the fuck, impossible");
                 loop {
-                    match buffer[self.current_frame].write() {
+                    match model.u_buffer[self.current_frame].write() {
                         Ok(mut write) => {
                             *write = data;
                             break;
@@ -551,9 +449,8 @@ impl Renderer {
             .unwrap()
             .descriptor_set
             .clone();
-        let entities = world.query_entities::<Model>();
-        for entity in entities {
-            let model = world.component_get_mut::<Model>(entity).unwrap();
+        let entities = world.query_mut::<Model>();
+        for (_entity, model) in entities {
             builder
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
@@ -561,21 +458,15 @@ impl Renderer {
                     0,
                     (
                         camera_descripor_set.as_ref().unwrap()[image_index].clone(),
-                        model.descriptor_set.as_ref().unwrap()[self.current_frame].clone(),
+                        model.descriptor_set[self.current_frame].clone(),
                     ),
                 )
                 .unwrap()
-                .bind_vertex_buffers(0, model.vertex_buffer.as_ref().unwrap().clone())
+                .bind_vertex_buffers(0, model.vertex_buffer.clone())
                 .unwrap()
-                .bind_index_buffer(model.index_buffer.as_ref().unwrap().clone())
+                .bind_index_buffer(model.index_buffer.clone())
                 .unwrap()
-                .draw_indexed(
-                    model.index_buffer.as_ref().unwrap().len() as u32,
-                    1,
-                    0,
-                    0,
-                    0,
-                )
+                .draw_indexed(model.index_buffer.len() as u32, 1, 0, 0, 0)
                 .unwrap();
         }
         builder
@@ -638,15 +529,14 @@ impl Renderer {
             .bind_pipeline_graphics(self.pipelines[3].clone())
             .unwrap();
 
-        let entities = world.query_entities::<PointLight>();
-        for entity in entities {
-            let light = world.component_get_mut::<PointLight>(entity).unwrap();
+        let entities = world.query_mut::<PointLight>();
+        for (_entity, light) in entities {
             builder
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.pipelines[3].layout().clone(),
                     0,
-                    light.descriptor_set.as_ref().unwrap()[image_index].clone(),
+                    light.descriptor_set[image_index].clone(),
                 )
                 .unwrap()
                 .draw(self.dummy_verts.len() as u32, 1, 0, 0)
@@ -743,66 +633,10 @@ impl Renderer {
 
         let window_size = window.inner_size();
 
-        let entities = world.query_entities::<Model>();
-        for entity in entities {
-            let model = world.component_get_mut::<Model>(entity).unwrap();
-            let vertex_buffer = Buffer::from_iter(
-                memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                model.vertices.clone(),
-            )
-            .unwrap();
-            model.vertex_buffer = Some(vertex_buffer);
-            let index_buffer = Buffer::from_iter(
-                memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::INDEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                model.indices.clone(),
-            )
-            .unwrap();
-            model.index_buffer = Some(index_buffer);
-
-            let mut model_buffers: Vec<Subbuffer<ModelUBO>> = vec![];
-            for _ in 0..FRAMES_IN_FLIGHT {
-                model_buffers.push(
-                    Buffer::new_sized(
-                        memory_allocator.clone(),
-                        BufferCreateInfo {
-                            usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                            ..Default::default()
-                        },
-                        AllocationCreateInfo {
-                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap(),
-                );
-            }
-            model.u_buffer = Some(model_buffers);
-        }
-
-        let entities = world.query_entities::<PointLight>();
-        for entity in entities {
-            let light = world.component_get_mut::<PointLight>(entity).unwrap();
-            let mut light_buffers: Vec<Subbuffer<PointLightUBO>> = vec![];
+        let mut directional_buffers = vec![];
+        if let Some(directional) = world.resource_get_mut::<DirectionalLight>() {
             for _ in 0..swapchain_images.len() {
-                light_buffers.push(
+                directional_buffers.push(
                     Buffer::from_data(
                         memory_allocator.clone(),
                         BufferCreateInfo {
@@ -813,77 +647,49 @@ impl Renderer {
                             memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                             ..Default::default()
                         },
-                        PointLightUBO {
-                            position: light.position,
-                            color: light.color,
-                            brightness: light.brightness,
-                            linear: light.linear,
-                            quadratic: light.quadratic,
+                        DirectionalLightUBO {
+                            color: directional.color,
+                            position: directional.position,
                         },
                     )
                     .unwrap(),
                 );
             }
-            light.u_buffer = Some(light_buffers);
+            dbg!(&directional_buffers);
+            directional.u_buffer = Some(directional_buffers);
+        } else {
+            eprintln!("no  directional resource, skipping");
         }
-
-        let mut directional_buffers = vec![];
-        let directional = world
-            .resource_get_mut::<DirectionalLight>()
-            .expect("should create ambient resource");
-        for _ in 0..swapchain_images.len() {
-            directional_buffers.push(
-                Buffer::from_data(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    DirectionalLightUBO {
-                        color: directional.color,
-                        position: directional.position,
-                    },
-                )
-                .unwrap(),
-            );
-        }
-        dbg!(&directional_buffers);
-        directional.u_buffer = Some(directional_buffers);
 
         let mut ambient_buffers = vec![];
-        let ambient = world
-            .resource_get_mut::<AmbientLight>()
-            .expect("should create ambient resource");
-        for _ in 0..swapchain_images.len() {
-            ambient_buffers.push(
-                Buffer::from_data(
-                    memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                    AmbientLightUBO {
-                        color: ambient.color,
-                        intensity: ambient.intensity,
-                    },
-                )
-                .unwrap(),
-            );
+        if let Some(ambient) = world.resource_get_mut::<AmbientLight>() {
+            for _ in 0..swapchain_images.len() {
+                ambient_buffers.push(
+                    Buffer::from_data(
+                        memory_allocator.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                        AmbientLightUBO {
+                            color: ambient.color,
+                            intensity: ambient.intensity,
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+            dbg!(&ambient_buffers);
+            ambient.u_buffer = Some(ambient_buffers);
         }
-        dbg!(&ambient_buffers);
-        ambient.u_buffer = Some(ambient_buffers);
 
         let camera = world
             .resource_get_mut::<Camera>()
-            .expect("should create ambient resource");
+            .expect("should create camera resource");
         camera.populate_u_buffer(swapchain_images.len() as u32, memory_allocator.clone());
 
         let pipelines = create_graphics_pipelines(&device, &deferred_pass, &lighting_pass);
@@ -900,9 +706,16 @@ impl Renderer {
             frames_resources_free.push(Some(vulkano::sync::now(device.clone()).boxed()));
         }
 
-        create_descriptor_sets(
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                set_count: 2,
+                ..Default::default()
+            },
+        ));
+        write_descriptor_sets(
             world,
-            &device,
+            descriptor_set_allocator.clone(),
             &pipelines,
             &color_buffers,
             &normal_buffers,
@@ -927,6 +740,7 @@ impl Renderer {
             start_time,
             window: window.clone(),
             aspect_ratio,
+            descriptor_set_allocator: descriptor_set_allocator.into(),
 
             color_buffers,
             normal_buffers,
@@ -978,24 +792,18 @@ fn create_swapchain(
     .unwrap()
 }
 #[allow(clippy::too_many_lines)]
-pub fn create_descriptor_sets(
+pub fn write_descriptor_sets(
     world: &mut World,
 
-    device: &Arc<Device>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     graphics_pipelines: &[Arc<GraphicsPipeline>],
+
     color_buffer: &[Arc<ImageView>],
     normal_buffer: &[Arc<ImageView>],
     position_buffer: &[Arc<ImageView>],
+
     swapchain_image_count: usize,
 ) {
-    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(
-        device.clone(),
-        StandardDescriptorSetAllocatorCreateInfo {
-            set_count: 2,
-            ..Default::default()
-        },
-    );
-
     let camera_layout = graphics_pipelines[0]
         .layout()
         .set_layouts()
@@ -1026,22 +834,18 @@ pub fn create_descriptor_sets(
             let model_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
                 model_layout.clone(),
-                [WriteDescriptorSet::buffer(
-                    0,
-                    model.u_buffer.as_ref().unwrap()[i].clone(),
-                )],
+                [WriteDescriptorSet::buffer(0, model.u_buffer[i].clone())],
                 [],
             )
             .unwrap();
             model_sets.push(model_set);
         }
-        model.descriptor_set = Some(model_sets);
+        model.descriptor_set = model_sets;
     }
 
-    let point_lights = world.query_entities::<PointLight>();
-    for entity in point_lights {
+    let point_lights = world.query_mut::<PointLight>();
+    for (_entity, point) in point_lights {
         let mut pt_sets = vec![];
-        let point = world.component_get_mut::<PointLight>(entity).unwrap();
         for i in 0..swapchain_image_count {
             let dir_set = PersistentDescriptorSet::new(
                 &descriptor_set_allocator,
@@ -1050,16 +854,15 @@ pub fn create_descriptor_sets(
                     WriteDescriptorSet::image_view(0, color_buffer[i].clone()),
                     WriteDescriptorSet::image_view(1, normal_buffer[i].clone()),
                     WriteDescriptorSet::image_view(2, position_buffer[i].clone()),
-                    WriteDescriptorSet::buffer(3, point.u_buffer.as_ref().unwrap()[i].clone()),
+                    WriteDescriptorSet::buffer(3, point.u_buffers[i].clone()),
                 ],
                 [],
             )
             .unwrap();
             pt_sets.push(dir_set);
         }
-        point.descriptor_set = Some(pt_sets);
+        point.descriptor_set = pt_sets;
     }
-
     if let Some(ambient) = world.resource_get_mut::<AmbientLight>() {
         let mut ambient_sets = Vec::new();
         for i in 0..swapchain_image_count {
@@ -1347,10 +1150,15 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
     )
     .unwrap()
 }
-mod shaders;
-use shaders::{self as s};
+use crate::shaders as s;
 
-use crate::ecs::World;
+use crate::{
+    ecs::World,
+    engine::components::{
+        AmbientLight, AmbientLightUBO, DirectionalLight, DirectionalLightUBO, Transform,
+    },
+    engine::components::{Model, ModelUBO, PointLight},
+};
 #[allow(clippy::too_many_lines)]
 fn create_graphics_pipelines(
     device: &Arc<Device>,
