@@ -55,6 +55,7 @@ impl Transform {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct RigidBody {
     pub velocity: Vec3,
 }
@@ -189,17 +190,28 @@ impl Aabb {
 }
 
 impl Collider {
-    pub fn penetration_vector(&self, other: &Collider) -> Vec3 {
-        match (self, other) {
-            (Collider::Aabb(s), Collider::Aabb(o)) => {
-                let dx1 = s.max.x - o.min.x;
-                let dx2 = s.min.x - o.max.x;
+    pub fn penetration_vector(
+        from: &Collider,
+        to: &Collider,
+        from_tr: &Transform,
+        to_tr: &Transform,
+    ) -> Vec3 {
+        match (from, to) {
+            (Collider::Aabb(a), Collider::Aabb(b)) => {
+                let a_max_world = a.max + from_tr.position;
+                let a_min_world = a.min + from_tr.position;
 
-                let dy1 = s.max.y - o.min.y;
-                let dy2 = s.min.y - o.max.y;
+                let b_max_world = b.max + to_tr.position;
+                let b_min_world = b.min + to_tr.position;
 
-                let dz1 = s.max.z - o.min.z;
-                let dz2 = s.min.z - o.max.z;
+                let dx1 = a_max_world.x - b_min_world.x;
+                let dx2 = a_min_world.x - b_max_world.x;
+
+                let dy1 = a_max_world.y - b_min_world.y;
+                let dy2 = a_min_world.y - b_max_world.y;
+
+                let dz1 = a_max_world.z - b_min_world.z;
+                let dz2 = a_min_world.z - b_max_world.z;
 
                 let dx = dx1.close_to_zero(dx2);
                 let dy = dy1.close_to_zero(dy2);
@@ -213,15 +225,21 @@ impl Collider {
             }
         }
     }
-    pub fn intersects(&self, other: &Collider) -> bool {
-        match (self, other) {
-            (Collider::Aabb(s), Collider::Aabb(o)) => {
-                !(s.max.x < o.min.x
-                    || s.min.x > o.max.x
-                    || s.max.y < o.min.y
-                    || s.min.y > o.max.y
-                    || s.max.z < o.min.z
-                    || s.min.z > o.max.z)
+    pub fn intersects(a: &Collider, b: &Collider, a_tr: &Transform, b_tr: &Transform) -> bool {
+        match (a, b) {
+            (Collider::Aabb(a), Collider::Aabb(b)) => {
+                let a_max_world = a.max + a_tr.position;
+                let a_min_world = a.min + a_tr.position;
+
+                let b_max_world = b.max + b_tr.position;
+                let b_min_world = b.min + b_tr.position;
+
+                !(a_max_world.x < b_min_world.x
+                    || a_min_world.x > b_max_world.x
+                    || a_max_world.y < b_min_world.y
+                    || a_min_world.y > b_max_world.y
+                    || a_max_world.z < b_min_world.z
+                    || a_min_world.z > b_max_world.z)
             }
         }
     }
@@ -329,8 +347,8 @@ impl PointLight {
         PointLight {
             color,
             brightness,
-            linear: linear.unwrap_or(0.8),
-            quadratic: quadratic.unwrap_or(1.8),
+            linear: linear.unwrap_or(3.00),
+            quadratic: quadratic.unwrap_or(0.00),
             dirty: true,
             u_buffers,
             descriptor_set,

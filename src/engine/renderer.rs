@@ -343,7 +343,6 @@ impl Renderer {
                     .expect("what the fuck, impossible");
 
                 let data = point_light.as_point_ubo(transform);
-                dbg!(data);
 
                 loop {
                     match point_light.u_buffers[image_index].write() {

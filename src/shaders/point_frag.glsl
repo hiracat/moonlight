@@ -41,5 +41,6 @@ void main() {
     diffuseColor *= attenuation * point.brightness;
 
     vec3 combinedColor = diffuseColor * subpassLoad(u_color).rgb;
-    f_color = toneMap(combinedColor, 1.0); // Adjust exposure value as needed
+    f_color = combinedColor;
+    // f_color = toneMap(combinedColor, 1.0); // Adjust exposure value as needed
 }
