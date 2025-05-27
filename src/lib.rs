@@ -247,9 +247,9 @@ impl ApplicationHandler for App {
             Vec3::new(0.1, 0.1, 0.1),
             Vec3::new(0.0, 0.0, 0.0),
         ));
-        let _ = self.world.component_add(x_axis, unit_collider.clone());
-        let _ = self.world.component_add(y_axis, unit_collider.clone());
-        let _ = self.world.component_add(z_axis, unit_collider.clone());
+        let _ = self.world.component_add(x_axis, unit_collider);
+        let _ = self.world.component_add(y_axis, unit_collider);
+        let _ = self.world.component_add(z_axis, unit_collider);
 
         // Attach the models for each axis cube
         let _ = self
@@ -359,7 +359,7 @@ fn apply_gravity(world: &mut World, delta_time: f32) {
                 let top_center = transform1.position + Vec3::new(0.0, collider1.max.y, 0.0);
                 let bottom_center = transform1.position + Vec3::new(0.0, collider1.min.y, 0.0);
                 ray = Ray::from_direction(top_center, Vec3::new(0.0, -1.0, 0.0));
-                ray_len = top_center.y - bottom_center.y
+                ray_len = top_center.y - bottom_center.y;
             } else {
                 ray = Ray::from_direction(transform1.position, Vec3::new(0.0, -1.0, 0.0));
             }
@@ -443,8 +443,9 @@ fn integrate_movement(world: &mut World, delta_time: f32) {
     let mut entities = world.query2_mut::<Transform, RigidBody>();
     for i in 0..entities.len() {
         let decel: f32 = 20.0; // NOTE: how many units of speed to remove per second
-        let velocity = entities[i].2.velocity;
-        let horizontal_velocity = Vec3::new(velocity.x, 0.0, velocity.z);
+        let horizontal_velocity =
+            Vec3::new(entities[i].2.velocity.x, 0.0, entities[i].2.velocity.z);
+        dbg!(entities[i].2.velocity);
 
         if horizontal_velocity.mag() > 0.0 {
             // compute how much to drop this frame:
@@ -460,6 +461,7 @@ fn integrate_movement(world: &mut World, delta_time: f32) {
         }
 
         let velocity = entities[i].2.velocity;
+        dbg!(&velocity);
         entities[i].1.position += velocity * delta_time;
         entities[i].1.dirty = true;
     }
@@ -550,7 +552,11 @@ fn player_update(world: &mut World, delta_time: f32) {
             Rotor3::from_rotation_between(forward, delta_v)
         };
 
-        let speed_remaining = (max_speed - rigidbody.velocity.mag()).clamp(0.0, max_speed);
+        let mut horizontal_velocity = rigidbody.velocity;
+        horizontal_velocity.y = 0.0;
+
+        let speed_remaining = (max_speed - horizontal_velocity.mag()).clamp(0.0, max_speed);
+        dbg!(speed_remaining);
         let acceleration = 20.0;
 
         delta_v *= speed_remaining * delta_time * acceleration;
