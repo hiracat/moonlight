@@ -1,7 +1,8 @@
+use core::f32;
 use ecs::{EntityId, World};
 use engine::{
     components::{
-        Aabb, AmbientLight, Collider, DirectionalLight, Dynamic, Model, PointLight, RigidBody,
+        Aabb, AmbientLight, Collider, DirectionalLight, Dynamic, Model, PointLight, Ray, RigidBody,
         Transform,
     },
     renderer::{self, Camera, Renderer, Vertex},
@@ -77,7 +78,6 @@ impl ApplicationHandler for App {
         // 1) Window & input setup
         // ───────────────────────────────────────────────────────
         if self.renderer.is_some() {
-            eprintln!("resumed called while renderer is already some");
             return;
         }
 
@@ -89,7 +89,7 @@ impl ApplicationHandler for App {
         // 2) Create “static” resources (camera, lights, input, etc.)
         // ───────────────────────────────────────────────────────
         // Camera at (0, 5, -6), fov=60°, near=1.0, far=100.0
-        let camera = Camera::new(Vec3::new(0.0, 5.0, -6.0), 60.0, 1.0, 100.0, &window);
+        let camera = Camera::new(Vec3::new(0.0, 5.0, -6.0), 60.0, 1.0, 200.0, &window);
         // Sun (directional) and ambient light
         let sun = DirectionalLight::new([2.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
         let ambient = AmbientLight::new([1.0, 1.0, 1.0], 0.05);
@@ -128,16 +128,16 @@ impl ApplicationHandler for App {
         // Give the fox a transform at origin, make it controllable, add physics collider/body
         let _ = self.world.component_add(
             fox,
-            Transform::from(Some(Vec3::new(4.0, 0.0, 0.0)), None, None),
+            Transform::from(Some(Vec3::new(4.0, 20.0, 1.0)), None, None),
         );
         let _ = self.world.component_add(fox, Controllable);
-        let _ = self.world.component_add(
-            fox,
-            Collider::Aabb(Aabb::new(
-                Vec3::new(0.331, 0.88, 0.331),
-                Vec3::new(0.0, 0.44, 0.0),
-            )),
-        );
+        let half_extents = Vec3::new(0.2, 0.55, 0.2);
+        let center_offset = Vec3::new(0.0, 0.55, 0.0);
+
+        let _ = self
+            .world
+            .component_add(fox, Collider::Aabb(Aabb::new(half_extents, center_offset)));
+
         let _ = self.world.component_add(fox, RigidBody::new());
         let _ = self.world.component_add(fox, Dynamic);
         // Finally, attach the visual model for the fox
@@ -152,6 +152,14 @@ impl ApplicationHandler for App {
         let _ = self
             .world
             .component_add(ground, load_model("data/models/groundplane.obj", renderer));
+
+        let _ = self.world.component_add(
+            ground,
+            Collider::Aabb(Aabb::new(
+                Vec3::new(20.0, 0.5, 20.0),
+                Vec3::new(0.0, -0.5, 0.0),
+            )),
+        );
 
         // ───────────────────────────────────────────────────────
         // 6) Set up point‐lights (red, green, blue)
@@ -236,7 +244,7 @@ impl ApplicationHandler for App {
 
         // Optionally add a collider to each axis cube (if you want them to be collidable)
         let unit_collider = Collider::Aabb(Aabb::new(
-            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(0.1, 0.1, 0.1),
             Vec3::new(0.0, 0.0, 0.0),
         ));
         let _ = self.world.component_add(x_axis, unit_collider.clone());
@@ -266,13 +274,15 @@ impl ApplicationHandler for App {
 
                 let delta_time = self.delta_time.as_secs_f32();
                 let world = &mut self.world;
-                camera_update(world, delta_time);
                 player_update(world, delta_time);
                 physics_update(world, delta_time);
+                camera_update(world, delta_time);
 
                 *self.world.resource_get_mut::<MouseMovement>().unwrap() = MouseMovement::default();
                 self.renderer.as_mut().unwrap().draw(&mut self.world);
                 self.delta_time = self.prev_frame_end.elapsed();
+                eprintln!("fps: {}", 1.0 / self.delta_time.as_secs_f32());
+
                 self.prev_frame_end = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -321,9 +331,69 @@ impl ApplicationHandler for App {
 }
 
 fn physics_update(world: &mut World, delta_time: f32) {
+    apply_gravity(world, delta_time);
+    integrate_movement(world, delta_time);
+    resolve_colisions(world);
+}
+fn apply_gravity(world: &mut World, delta_time: f32) {
     let dynamic_entities: HashSet<EntityId> =
         world.query_entities::<Dynamic>().into_iter().collect();
+    let entities = world.query2_mut::<Transform, Collider>();
+    let mut grounded_entities = Vec::with_capacity(entities.len());
+    for i in 0..entities.len() {
+        let (entity, transform1, collider1) = &entities[i];
+        if !dynamic_entities.contains(&entity) {
+            continue;
+        }
+        let mut hit_any = false;
 
+        for j in 0..entities.len() {
+            if i == j {
+                continue;
+            }
+            let (_, transform2, collider2) = &entities[j];
+
+            let ray;
+            let mut ray_len = 0.01;
+            if let Collider::Aabb(collider1) = collider1 {
+                let top_center = transform1.position + Vec3::new(0.0, collider1.max.y, 0.0);
+                let bottom_center = transform1.position + Vec3::new(0.0, collider1.min.y, 0.0);
+                ray = Ray::from_direction(top_center, Vec3::new(0.0, -1.0, 0.0));
+                ray_len = top_center.y - bottom_center.y
+            } else {
+                ray = Ray::from_direction(transform1.position, Vec3::new(0.0, -1.0, 0.0));
+            }
+            let result = Ray::ray_box(&ray, collider2, transform2.position);
+            hit_any = result.is_some_and(|x| x <= ray_len);
+            if hit_any {
+                break;
+            }
+        }
+        if hit_any {
+            grounded_entities.push((*entity, true));
+        } else {
+            grounded_entities.push((*entity, false));
+        }
+    }
+
+    for (entity, grounded) in grounded_entities {
+        match world.component_get_mut::<RigidBody>(entity) {
+            Ok(rigidbody) => {
+                if grounded {
+                    rigidbody.velocity.y = rigidbody.velocity.y.clamp(0.0, f32::MAX);
+                    rigidbody.grounded = true;
+                } else {
+                    rigidbody.velocity.y -= 9.8 * delta_time;
+                    rigidbody.grounded = false;
+                }
+            }
+            Err(_) => {}
+        };
+    }
+}
+fn resolve_colisions(world: &mut World) {
+    let dynamic_entities: HashSet<EntityId> =
+        world.query_entities::<Dynamic>().into_iter().collect();
     let mut entities = world.query3_mut::<Collider, Model, Transform>();
     for i in 0..entities.len() {
         for j in i + 1..entities.len() {
@@ -353,8 +423,6 @@ fn physics_update(world: &mut World, delta_time: f32) {
                     _ => unreachable!(),
                 }
             };
-            dbg!(min);
-
             if dynamic_entities.contains(&entities[i].0)
                 && dynamic_entities.contains(&entities[j].0)
             {
@@ -370,31 +438,30 @@ fn physics_update(world: &mut World, delta_time: f32) {
             }
         }
     }
-
-    let mut entities = world.query3_mut::<Model, Transform, RigidBody>();
+}
+fn integrate_movement(world: &mut World, delta_time: f32) {
+    let mut entities = world.query2_mut::<Transform, RigidBody>();
     for i in 0..entities.len() {
-        // dbg!(&entities[i].0);
-        // dbg!(&entities[i].2.position);
+        let decel: f32 = 20.0; // NOTE: how many units of speed to remove per second
+        let velocity = entities[i].2.velocity;
+        let horizontal_velocity = Vec3::new(velocity.x, 0.0, velocity.z);
 
-        let decel: f32 = 0.5; // how many units of speed to remove per second
-        let speed = entities[i].3.velocity.mag();
-        let velocity = entities[i].3.velocity;
-        if speed > 0.0 {
+        if horizontal_velocity.mag() > 0.0 {
             // compute how much to drop this frame:
-            let drop = decel * delta_time;
+            let frame_decel = decel * delta_time;
 
-            if speed <= drop {
-                // we’d overshoot → just zero it out
-                entities[i].3.velocity = Vec3::zero();
+            if horizontal_velocity.mag() <= frame_decel {
+                entities[i].2.velocity.x = 0.0;
+                entities[i].2.velocity.z = 0.0;
             } else {
-                // subtract `drop` along the current direction
-                let dir = entities[i].3.velocity / speed; // same as .normalized()
-                entities[i].3.velocity -= dir * drop;
+                let direction = horizontal_velocity.normalized();
+                entities[i].2.velocity -= direction * frame_decel;
             }
         }
-        entities[i].2.position += velocity * delta_time;
 
-        entities[i].2.dirty = true;
+        let velocity = entities[i].2.velocity;
+        entities[i].1.position += velocity * delta_time;
+        entities[i].1.dirty = true;
     }
 }
 
@@ -407,14 +474,6 @@ fn camera_update(world: &mut World, _delta_time: f32) {
 
     // let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
     let camera = world.resource_get_mut::<Camera>().unwrap();
-    // let target_offset = Vec3 {
-    //     x: 0.0,
-    //     y: 5.0,
-    //     z: -10.0,
-    // };
-    // let local_target_offset = target_offset.rotated_by(player_rotation);
-    //
-    // let target = player_position.xyz() + local_target_offset;
 
     let sensativity = 0.002;
     camera.pitch += mouse.y * sensativity;
@@ -427,9 +486,8 @@ fn camera_update(world: &mut World, _delta_time: f32) {
     }
 
     camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
-    // dbg!(camera.pitch, camera.yaw);
 
-    let target_distance = 20.0;
+    let target_distance = 10.0;
 
     let backward = Vec3 {
         x: 0.0,
@@ -447,12 +505,14 @@ fn camera_update(world: &mut World, _delta_time: f32) {
 fn player_update(world: &mut World, delta_time: f32) {
     let keyboard = world
         .resource_get::<Keyboard>()
-        .expect("keyboard should have been added during resumed");
+        .expect("keyboard should have been added during resumed")
+        .clone();
 
     let mut delta_v = Vec3::zero();
-    let mut speed = 0.01;
+    let mut jump = 0.0;
+    let mut max_speed = 3.0;
     if keyboard.contains(&KeyCode::ShiftLeft) {
-        speed *= 3.0;
+        max_speed *= 2.0;
     }
     if keyboard.contains(&KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
@@ -467,18 +527,21 @@ fn player_update(world: &mut World, delta_time: f32) {
         delta_v += Vec3::new(-1.0, 0.0, 0.0);
     }
 
+    let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
+    let mut binding = world.query3_mut::<Controllable, Transform, RigidBody>();
+    let (_, _, transform, rigidbody) = binding.first_mut().expect("player should exist!");
+    if keyboard.contains(&KeyCode::Space) && rigidbody.grounded {
+        jump = 4.0
+    }
     if !(delta_v == Vec3::zero()) {
-        let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
-        let mut binding = world.query3_mut::<Controllable, Transform, RigidBody>();
-        let (_, _, transform, rigidbody) = binding.first_mut().expect("player should exist!");
-
         delta_v = camera_rotation * delta_v;
-        let mut delta_v = Vec3 {
+        delta_v = Vec3 {
             x: delta_v.x,
             y: 0.0,
             z: delta_v.z,
         };
-        delta_v = delta_v.normalized();
+
+        delta_v.normalize();
 
         let forward = -Vec3::unit_z();
         let face_direction = if forward.dot(delta_v) < -1.0 + 0.0001 {
@@ -487,15 +550,17 @@ fn player_update(world: &mut World, delta_time: f32) {
             Rotor3::from_rotation_between(forward, delta_v)
         };
 
-        delta_v *= speed;
+        let speed_remaining = (max_speed - rigidbody.velocity.mag()).clamp(0.0, max_speed);
+        let acceleration = 20.0;
+
+        delta_v *= speed_remaining * delta_time * acceleration;
         rigidbody.velocity += delta_v;
-        dbg!(&rigidbody);
 
         let rotation_speed = 5.0;
         transform.rotation = transform
             .rotation
             .slerp(face_direction, rotation_speed * delta_time)
             .normalized();
-        dbg!(transform.position);
     }
+    rigidbody.velocity.y += jump;
 }

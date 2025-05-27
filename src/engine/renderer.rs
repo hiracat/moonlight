@@ -151,7 +151,7 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
-pub const FRAMES_IN_FLIGHT: usize = 2;
+pub const FRAMES_IN_FLIGHT: usize = 3;
 
 #[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
 #[repr(C)]
@@ -784,7 +784,7 @@ fn create_swapchain(
                 .into_iter()
                 .next()
                 .unwrap(),
-            present_mode: PresentMode::Fifo,
+            present_mode: PresentMode::Mailbox,
             ..Default::default()
         },
     )
