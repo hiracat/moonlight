@@ -24,7 +24,7 @@ use winit::{
     window::WindowId,
 };
 
-mod ecs;
+pub mod ecs;
 mod engine;
 mod shaders;
 
