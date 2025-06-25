@@ -301,7 +301,7 @@ impl Renderer {
                 .expect("should have a camera resource");
             let data = camera.get_ubo_data();
             let buffer = camera.u_buffer.as_mut().unwrap();
-            loop {
+            for _ in 0..5 {
                 match buffer[image_index].write() {
                     Ok(mut write) => {
                         *write = data;
@@ -344,7 +344,7 @@ impl Renderer {
 
                 let data = point_light.as_point_ubo(transform);
 
-                loop {
+                for _ in 0..5 {
                     match point_light.u_buffers[image_index].write() {
                         Ok(mut write) => {
                             *write = data;
@@ -385,7 +385,7 @@ impl Renderer {
                 let model = world
                     .component_get_mut::<Model>(entity)
                     .expect("what the fuck, impossible");
-                loop {
+                for _ in 0..5 {
                     match model.u_buffer[self.current_frame].write() {
                         Ok(mut write) => {
                             *write = data;
@@ -784,7 +784,7 @@ fn create_swapchain(
                 .into_iter()
                 .next()
                 .unwrap(),
-            present_mode: PresentMode::Mailbox,
+            present_mode: PresentMode::Fifo,
             ..Default::default()
         },
     )

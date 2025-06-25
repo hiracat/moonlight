@@ -1,3 +1,4 @@
+use core::fmt;
 use std::sync::Arc;
 
 use ultraviolet::{Mat4, Rotor3, Vec3};
@@ -80,53 +81,53 @@ impl Collider {
         to: &Collider,
         from_tr: &Transform,
         to_tr: &Transform,
-    ) -> Vec3 {
+    ) -> Option<Vec3> {
         match (from, to) {
             (Collider::Aabb(from), Collider::Aabb(to)) => {
-                let from_max_world = from.max + from_tr.position;
-                let from_min_world = from.min + from_tr.position;
+                let from_max = from.max + from_tr.position;
+                let from_min = from.min + from_tr.position;
+                let to_max = to.max + to_tr.position;
+                let to_min = to.min + to_tr.position;
 
-                let to_max_world = to.max + to_tr.position;
-                let to_min_world = to.min + to_tr.position;
+                let overlap_pos_x = from_max.x - to_min.x;
+                let overlap_neg_x = to_max.x - from_min.x;
+                let overlap_pos_y = from_max.y - to_min.y;
+                let overlap_neg_y = to_max.y - from_min.y;
+                let overlap_neg_z = from_max.z - to_min.z;
+                let overlap_pos_z = to_max.z - from_min.z;
 
-                let dx1 = from_max_world.x - to_min_world.x;
-                let dx2 = from_min_world.x - to_max_world.x;
-
-                let dy1 = from_max_world.y - to_min_world.y;
-                let dy2 = from_min_world.y - to_max_world.y;
-
-                let dz1 = from_max_world.z - to_min_world.z;
-                let dz2 = from_min_world.z - to_max_world.z;
-
-                let dx = dx1.close_to_zero(dx2);
-                let dy = dy1.close_to_zero(dy2);
-                let dz = dz1.close_to_zero(dz2);
-
-                Vec3 {
-                    x: dx,
-                    y: dy,
-                    z: dz,
+                if overlap_pos_x <= 0.0 || overlap_pos_y <= 0.0 || overlap_neg_z <= 0.0 {
+                    return None;
                 }
-            }
-            _ => unimplemented!(),
-        }
-    }
+                if overlap_neg_x <= 0.0 || overlap_neg_y <= 0.0 || overlap_pos_z <= 0.0 {
+                    return None;
+                }
 
-    pub fn intersects(a: &Self, b: &Self, a_tr: &Transform, b_tr: &Transform) -> bool {
-        match (a, b) {
-            (Collider::Aabb(a), Collider::Aabb(b)) => {
-                let a_max_world = a.max + a_tr.position;
-                let a_min_world = a.min + a_tr.position;
-
-                let b_max_world = b.max + b_tr.position;
-                let b_min_world = b.min + b_tr.position;
-
-                return !(a_max_world.x < b_min_world.x
-                    || a_min_world.x > b_max_world.x
-                    || a_max_world.y < b_min_world.y
-                    || a_min_world.y > b_max_world.y
-                    || a_max_world.z < b_min_world.z
-                    || a_min_world.z > b_max_world.z);
+                let x;
+                let y;
+                let z;
+                if overlap_pos_x >= overlap_neg_x {
+                    x = overlap_neg_x
+                } else {
+                    x = -overlap_pos_x
+                }
+                if overlap_pos_y >= overlap_neg_y {
+                    y = overlap_neg_y
+                } else {
+                    y = -overlap_pos_y
+                }
+                if overlap_pos_z >= overlap_neg_z {
+                    z = overlap_pos_z
+                } else {
+                    z = -overlap_neg_z
+                }
+                if x.abs() < y.abs() && x.abs() < z.abs() {
+                    Some(Vec3::new(x, 0.0, 0.0))
+                } else if y.abs() < z.abs() {
+                    Some(Vec3::new(0.0, y, 0.0))
+                } else {
+                    Some(Vec3::new(0.0, 0.0, z))
+                }
             }
             _ => unimplemented!(),
         }
@@ -141,6 +142,13 @@ pub struct Model {
     pub(in crate::engine) vertex_buffer: Subbuffer<[Vertex]>,
     pub(in crate::engine) index_buffer: Subbuffer<[u32]>,
 }
+
+impl fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Marker, no debug information available yet")
+    }
+}
+
 impl Model {
     pub fn create(renderer: &Renderer, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         let vertex_buffer = Buffer::from_iter(
