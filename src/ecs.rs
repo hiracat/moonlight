@@ -138,13 +138,40 @@ impl World {
     }
 
     /// may return an empty vec
-    pub fn query_entities<T: 'static>(&self) -> Vec<EntityId> {
+    pub fn query_entities<T: 'static>(&self) -> HashSet<EntityId> {
         let type_id = TypeId::of::<T>();
 
         if let Some(inner_map) = self.component_storage.get(&type_id) {
             inner_map.keys().copied().collect()
         } else {
-            Vec::new()
+            HashSet::new()
+        }
+    }
+    /// Panics:
+    /// panics of t and u are the same type
+    pub fn query2_entities<T: 'static, U: 'static>(&self) -> HashSet<EntityId> {
+        let type1_id = TypeId::of::<T>();
+        let type2_id = TypeId::of::<U>();
+        assert!(type1_id != type2_id);
+
+        let inner_1;
+        let inner_2;
+        inner_1 = self.component_storage.get(&type1_id);
+        inner_2 = self.component_storage.get(&type2_id);
+        match (inner_1, inner_2) {
+            (Some(s1), Some(s2)) => {
+                let (smaller, larger) = if s1.len() <= s2.len() {
+                    (s1, s2)
+                } else {
+                    (s2, s1)
+                };
+                smaller
+                    .keys()
+                    .filter(|entity_id| larger.contains_key(entity_id))
+                    .copied()
+                    .collect()
+            }
+            _ => HashSet::new(),
         }
     }
     pub fn query<T: 'static>(&self) -> Vec<(EntityId, &T)> {

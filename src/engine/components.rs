@@ -91,15 +91,17 @@ impl Collider {
 
                 let overlap_pos_x = from_max.x - to_min.x;
                 let overlap_neg_x = to_max.x - from_min.x;
+
                 let overlap_pos_y = from_max.y - to_min.y;
                 let overlap_neg_y = to_max.y - from_min.y;
-                let overlap_neg_z = from_max.z - to_min.z;
-                let overlap_pos_z = to_max.z - from_min.z;
 
-                if overlap_pos_x <= 0.0 || overlap_pos_y <= 0.0 || overlap_neg_z <= 0.0 {
+                let overlap_pos_z = from_max.z - to_min.z;
+                let overlap_neg_z = to_max.z - from_min.z;
+
+                if overlap_pos_x <= 0.0 || overlap_pos_y <= 0.0 || overlap_pos_z <= 0.0 {
                     return None;
                 }
-                if overlap_neg_x <= 0.0 || overlap_neg_y <= 0.0 || overlap_pos_z <= 0.0 {
+                if overlap_neg_x <= 0.0 || overlap_neg_y <= 0.0 || overlap_neg_z <= 0.0 {
                     return None;
                 }
 
@@ -117,9 +119,9 @@ impl Collider {
                     y = -overlap_pos_y
                 }
                 if overlap_pos_z >= overlap_neg_z {
-                    z = overlap_pos_z
+                    z = overlap_neg_z
                 } else {
-                    z = -overlap_neg_z
+                    z = -overlap_pos_z
                 }
                 if x.abs() < y.abs() && x.abs() < z.abs() {
                     Some(Vec3::new(x, 0.0, 0.0))

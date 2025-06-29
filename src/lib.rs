@@ -1,16 +1,15 @@
 use core::f32;
-use ecs::{EntityId, World};
+use ecs::World;
 use engine::{
     components::{
-        Aabb, AmbientLight, Collider, DirectionalLight, Dynamic, Model, PointLight, RigidBody,
-        Transform,
+        Aabb, AmbientLight, Collider, DirectionalLight, Model, PointLight, RigidBody, Transform,
     },
     renderer::{self, Camera, Renderer, Vertex},
 };
 use obj::load_obj;
 use std::{
     collections::HashSet,
-    f32::{consts::PI, EPSILON},
+    f32::consts::PI,
     fs::File,
     io::BufReader,
     time::{Duration, Instant},
@@ -139,7 +138,6 @@ impl ApplicationHandler for App {
             .component_add(fox, Collider::Aabb(Aabb::new(half_extents, center_offset)));
 
         let _ = self.world.component_add(fox, RigidBody::new());
-        let _ = self.world.component_add(fox, Dynamic);
         // Finally, attach the visual model for the fox
         let _ = self
             .world
@@ -307,6 +305,12 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    self.delta_time = Duration::from_secs(0);
+                    self.prev_frame_end = Instant::now();
+                }
+            }
             _ => {}
         }
     }
@@ -331,60 +335,63 @@ impl ApplicationHandler for App {
 }
 
 fn physics_update(world: &mut World, delta_time: f32) {
-    apply_gravity(world, delta_time);
-    integrate_movement(world, delta_time);
-    resolve_colisions(world);
-}
-fn apply_gravity(world: &mut World, delta_time: f32) {
-    let grounded_entities = get_entity_grounded(world);
-    let dynamic_entities: HashSet<EntityId> =
-        world.query_entities::<Dynamic>().into_iter().collect();
+    //NOTE: MOVEMENT INTEGRATION
+    let mut rigidbody = world.query2_mut::<Transform, RigidBody>();
+    for i in 0..rigidbody.len() {
+        //NOTE:COMPUTES THE HORIZONTAL SPEED REDUCTION
+        let horizontal_velocity =
+            Vec3::new(rigidbody[i].2.velocity.x, 0.0, rigidbody[i].2.velocity.z);
+        let horizontal_friction: f32 = 20.0; // how many units of speed to remove per second
+        if horizontal_velocity.mag() > 0.0 {
+            // compute how much to drop this frame:
+            let frame_decel = horizontal_friction * delta_time;
 
-    for (entity, grounded) in grounded_entities {
-        if !dynamic_entities.contains(&entity) {
-            continue;
-        }
-        match world.component_get_mut::<RigidBody>(entity) {
-            Ok(rigidbody) => {
-                if grounded {
-                    rigidbody.velocity.y = rigidbody.velocity.y.clamp(0.0, f32::MAX);
-                    rigidbody.grounded = true;
-                } else {
-                    rigidbody.velocity.y -= 9.8 * delta_time;
-                    rigidbody.grounded = false;
-                }
-                dbg!(rigidbody);
+            if horizontal_velocity.mag() <= frame_decel {
+                rigidbody[i].2.velocity.x = 0.0;
+                rigidbody[i].2.velocity.z = 0.0;
+            } else {
+                let direction = horizontal_velocity.normalized();
+                rigidbody[i].2.velocity -= direction * frame_decel;
             }
-            Err(_) => {}
-        };
+        }
+        // NOTE: APPLIES GRAVITY, GROUNDED FLAGS DONT MATTER BECAUSE WILL BE CORRECTED FOR IN
+        // RESOLUTION FOR POSITION AND THEN VELOCITY
+        rigidbody[i].2.velocity.y -= 9.8 * delta_time;
+
+        let velocity = rigidbody[i].2.velocity;
+        rigidbody[i].1.position += velocity * delta_time;
+        rigidbody[i].1.dirty = true;
+        dbg!(rigidbody[i].2.velocity);
     }
-}
-fn resolve_colisions(world: &mut World) {
-    let dynamic_entities: HashSet<EntityId> =
-        world.query_entities::<Dynamic>().into_iter().collect();
 
-    let mut entities = world.query3_mut::<Collider, Model, Transform>();
+    let rigidbody = world.query2_entities::<Transform, RigidBody>();
+    let mut collidable = world.query2_mut::<Transform, Collider>();
+    let mut collision_penetrations = Vec::new();
 
-    for i in 0..entities.len() {
-        for j in i + 1..entities.len() {
+    //NOTE: COLLISION RESOLUTION
+    for i in 0..collidable.len() {
+        for j in i + 1..collidable.len() {
             match Collider::penetration_vector(
-                entities[i].1,
-                entities[j].1,
-                entities[i].3,
-                entities[j].3,
+                collidable[i].2,
+                collidable[j].2,
+                collidable[i].1,
+                collidable[j].1,
             ) {
                 Some(pen_vec) => {
-                    if dynamic_entities.contains(&entities[i].0)
-                        && dynamic_entities.contains(&entities[j].0)
+                    if rigidbody.contains(&collidable[i].0) && rigidbody.contains(&collidable[j].0)
                     {
-                        entities[i].3.position += pen_vec * 0.5;
-                        entities[j].3.position -= pen_vec * 0.5;
+                        collidable[i].1.position += pen_vec * 0.5;
+                        collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
+                        collidable[j].1.position -= pen_vec * 0.5;
+                        collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
                     } else {
-                        if dynamic_entities.contains(&entities[i].0) {
-                            entities[i].3.position += pen_vec;
+                        if rigidbody.contains(&collidable[i].0) {
+                            collidable[i].1.position += pen_vec;
+                            collision_penetrations.push((collidable[i].0, pen_vec));
                         }
-                        if dynamic_entities.contains(&entities[j].0) {
-                            entities[j].3.position -= pen_vec;
+                        if rigidbody.contains(&collidable[j].0) {
+                            collidable[j].1.position -= pen_vec;
+                            collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                         }
                     }
                 }
@@ -392,76 +399,22 @@ fn resolve_colisions(world: &mut World) {
             }
         }
     }
-}
-fn integrate_movement(world: &mut World, delta_time: f32) {
-    let mut entities = world.query2_mut::<Transform, RigidBody>();
-
-    for i in 0..entities.len() {
-        dbg!(i, &entities[i].1.position, &entities[i].2);
-        let decel: f32 = 20.0; // NOTE: how many units of speed to remove per second
-        let horizontal_velocity =
-            Vec3::new(entities[i].2.velocity.x, 0.0, entities[i].2.velocity.z);
-
-        if horizontal_velocity.mag() > 0.0 {
-            // compute how much to drop this frame:
-            let frame_decel = decel * delta_time;
-
-            if horizontal_velocity.mag() <= frame_decel {
-                entities[i].2.velocity.x = 0.0;
-                entities[i].2.velocity.z = 0.0;
-            } else {
-                let direction = horizontal_velocity.normalized();
-                entities[i].2.velocity -= direction * frame_decel;
-            }
-        }
-
-        let velocity = entities[i].2.velocity;
-        entities[i].1.position += velocity * delta_time;
-        entities[i].1.dirty = true;
-        dbg!(entities[i].2.velocity);
+    //NOTE: VELOCITY UPDATE
+    for collision in collision_penetrations {
+        let rigidbody = world
+            .component_get_mut::<RigidBody>(collision.0)
+            .expect("thing with collision regesterd should have rigidbody");
+        rigidbody.velocity = set_axis_component(rigidbody.velocity, collision.1, 0.0)
     }
 }
 
-fn get_entity_grounded(world: &mut World) -> Vec<(EntityId, bool)> {
-    let entities = world.query2_mut::<Collider, Transform>();
-    let mut grounded_entities = Vec::with_capacity(entities.len());
-
-    for i in 0..entities.len() {
-        let (entity, collider1, transform1) = &entities[i];
-        let mut grounded;
-        for j in 0..entities.len() {
-            if i == j {
-                continue;
-            }
-
-            let (_, collider2, transform2) = &entities[j];
-
-            let epsilon = EPSILON;
-            grounded = Collider::penetration_vector(
-                &collider1,
-                collider2,
-                &Transform::from(
-                    Some(Vec3 {
-                        y: transform1.position.y - epsilon,
-                        ..transform1.position
-                    }),
-                    Some(transform1.rotation),
-                    Some(transform1.scale),
-                ),
-                transform2,
-            )
-            .is_some();
-
-            if grounded {
-                grounded_entities.push((*entity, true));
-                break;
-            }
-        }
-        grounded_entities.push((*entity, false));
-    }
-    grounded_entities
+// accepts a velocity, a minimum vector to resolve the collision, a coefficient of restitution, and returns the new
+// velocity
+fn set_axis_component(velocity: Vec3, collision_vector: Vec3, restitution: f32) -> Vec3 {
+    let collision = collision_vector.normalized();
+    let projection = collision * velocity.dot(collision);
+    return velocity - (1.0 + restitution) * projection;
 }
-
 fn camera_update(world: &mut World, _delta_time: f32) {
     let mouse = *world.resource_get::<MouseMovement>().unwrap();
 
@@ -527,8 +480,11 @@ fn player_update(world: &mut World, delta_time: f32) {
     let camera_rotation = world.resource_get::<Camera>().unwrap().rotation;
     let mut binding = world.query3_mut::<Controllable, Transform, RigidBody>();
     let (_, _, transform, rigidbody) = binding.first_mut().expect("player should exist!");
-    if keyboard.contains(&KeyCode::Space) && rigidbody.grounded {
-        jump = 20.0
+
+    // BUG: allows the player to jump at the apex of their jump, but the period of time which the
+    // bug is viable to exploit is almost zero so not going to fix
+    if keyboard.contains(&KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
+        jump = 5.0
     }
     if !(delta_v == Vec3::zero()) {
         delta_v = camera_rotation * delta_v;
