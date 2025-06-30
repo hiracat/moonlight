@@ -26,7 +26,7 @@ impl Transform {
             matrix_cache: Mat4::identity(),
             inv_trans_cache: Mat4::identity(),
             rotation: Rotor3::identity(),
-            scale: Vec3::zero(),
+            scale: Vec3::one(),
             dirty: true,
             position: Vec3::zero(),
         }
@@ -45,7 +45,8 @@ impl Transform {
         if self.dirty {
             let rotation_mat = self.rotation.into_matrix().into_homogeneous();
             let translation_mat = Mat4::from_translation(self.position);
-            self.matrix_cache = translation_mat * rotation_mat;
+            let scale_mat = Mat4::from_nonuniform_scale(self.scale);
+            self.matrix_cache = translation_mat * rotation_mat * scale_mat;
             self.inv_trans_cache = self.matrix_cache.inversed().transposed();
         }
 
@@ -84,10 +85,10 @@ impl Collider {
     ) -> Option<Vec3> {
         match (from, to) {
             (Collider::Aabb(from), Collider::Aabb(to)) => {
-                let from_max = from.max + from_tr.position;
-                let from_min = from.min + from_tr.position;
-                let to_max = to.max + to_tr.position;
-                let to_min = to.min + to_tr.position;
+                let from_max = (from.max * from_tr.scale) + from_tr.position;
+                let from_min = (from.min * from_tr.scale) + from_tr.position;
+                let to_max = (to.max * to_tr.scale) + to_tr.position;
+                let to_min = (to.min * to_tr.scale) + to_tr.position;
 
                 let overlap_pos_x = from_max.x - to_min.x;
                 let overlap_neg_x = to_max.x - from_min.x;
@@ -324,20 +325,6 @@ impl Aabb {
         Aabb {
             min: global_min,
             max: global_max,
-        }
-    }
-}
-
-trait CloseToZero {
-    fn close_to_zero(self, other: Self) -> Self;
-}
-
-impl CloseToZero for f32 {
-    fn close_to_zero(self, other: f32) -> f32 {
-        if self.abs() < other.abs() {
-            self
-        } else {
-            other
         }
     }
 }

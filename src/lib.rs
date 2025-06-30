@@ -122,134 +122,91 @@ impl ApplicationHandler for App {
         let z_axis = self.world.entity_create();
 
         // ───────────────────────────────────────────────────────
-        // 4) Add components to “fox”
+        // THE FOX - Center stage, elevated on a mystical platform
         // ───────────────────────────────────────────────────────
-        // Give the fox a transform at origin, make it controllable, add physics collider/body
         let _ = self.world.component_add(
             fox,
-            Transform::from(Some(Vec3::new(4.0, 20.0, 1.0)), None, None),
+            Transform::from(
+                Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
+                Some(Rotor3::from_rotation_xz(PI * 0.25)), // Slight rotation for dramatic pose
+                Some(Vec3::new(5.0, 5.0, 5.0)),
+            ),
         );
         let _ = self.world.component_add(fox, Controllable);
-        let half_extents = Vec3::new(0.2, 0.55, 0.2);
-        let center_offset = Vec3::new(0.0, 0.55, 0.0);
 
-        let _ = self
-            .world
-            .component_add(fox, Collider::Aabb(Aabb::new(half_extents, center_offset)));
-
+        // Fox collision - smaller and more precise
+        let fox_half_extents = Vec3::new(0.3, 0.6, 0.3);
+        let fox_center_offset = Vec3::new(0.0, 0.6, 0.0);
+        let _ = self.world.component_add(
+            fox,
+            Collider::Aabb(Aabb::new(fox_half_extents, fox_center_offset)),
+        );
         let _ = self.world.component_add(fox, RigidBody::new());
-        // Finally, attach the visual model for the fox
         let _ = self
             .world
             .component_add(fox, load_model("data/models/low poly fox.obj", renderer));
 
         // ───────────────────────────────────────────────────────
-        // 5) Add components to “ground”
+        // THE GROUND - Ancient mystical platform
         // ───────────────────────────────────────────────────────
         let _ = self.world.component_add(ground, Transform::new());
         let _ = self
             .world
             .component_add(ground, load_model("data/models/groundplane.obj", renderer));
 
+        // Ground collision - the full 40x40 area with some depth
         let _ = self.world.component_add(
             ground,
             Collider::Aabb(Aabb::new(
-                Vec3::new(20.0, 0.5, 20.0),
-                Vec3::new(0.0, -0.5, 0.0),
+                Vec3::new(20.0, 1.0, 20.0), // Half-extents: 40x2x40 total size
+                Vec3::new(0.0, -1.0, 0.0),  // Center offset: buried 1 unit down
             )),
         );
 
         // ───────────────────────────────────────────────────────
-        // 6) Set up point‐lights (red, green, blue)
+        // FLOATING MONUMENT CUBES - Ancient guardians in formation
         // ───────────────────────────────────────────────────────
-        // --- Red light ---
-        let _ = self.world.component_add(
-            red_light,
-            PointLight::create(
-                renderer,
-                Vec3 {
-                    x: 1.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                10.0,
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            red_light,
-            Transform::from(Some(Vec3::new(5.0, 5.0, 0.0)), None, None),
-        );
 
-        // --- Green light ---
-        let _ = self.world.component_add(
-            green_light,
-            PointLight::create(
-                renderer,
-                Vec3 {
-                    x: 0.0,
-                    y: 1.0,
-                    z: 0.0,
-                },
-                10.0,
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            green_light,
-            Transform::from(Some(Vec3::new(-5.0, 5.0, 0.0)), None, None),
-        );
-
-        // --- Blue light ---
-        let _ = self.world.component_add(
-            blue_light,
-            PointLight::create(
-                renderer,
-                Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 1.0,
-                },
-                10.0,
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            blue_light,
-            Transform::from(Some(Vec3::new(0.0, 5.0, 5.0)), None, None),
-        );
-
-        // ───────────────────────────────────────────────────────
-        // 7) Set up coordinate‐axis cubes with transforms
-        // ───────────────────────────────────────────────────────
-        // Position each “unit cube” along its respective axis:
-        //   x_axis at (1, 0, 0), y_axis at (0, 1, 0), z_axis at (0, 0, 1)
+        // X-AXIS CUBE: "The Crimson Guardian" - Front right, rotating
         let _ = self.world.component_add(
             x_axis,
-            Transform::from(Some(Vec3::new(1.0, 0.0, 0.0)), None, None),
+            Transform::from(
+                Some(Vec3::new(8.0, 6.0, 8.0)), // High and forward-right
+                Some(Rotor3::from_rotation_yz(PI * 0.125) * Rotor3::from_rotation_xz(PI * 0.25)), // Complex rotation
+                Some(Vec3::new(2.0, 5.0, 5.0)),
+            ),
         );
+
+        // Y-AXIS CUBE: "The Emerald Sentinel" - Left side, towering
         let _ = self.world.component_add(
             y_axis,
-            Transform::from(Some(Vec3::new(0.0, 1.0, 0.0)), None, None),
+            Transform::from(
+                Some(Vec3::new(-12.0, 10.0, -3.0)), // Tallest, to the left and slightly back
+                Some(Rotor3::from_rotation_xy(PI * 0.1) * Rotor3::from_rotation_xz(PI * 0.5)), // Tilted dramatically
+                None,
+            ),
         );
+
+        // Z-AXIS CUBE: "The Azure Watcher" - Behind and to the right
         let _ = self.world.component_add(
             z_axis,
-            Transform::from(Some(Vec3::new(0.0, 0.0, 1.0)), None, None),
+            Transform::from(
+                Some(Vec3::new(5.0, 4.0, -10.0)), // Behind the fox, watching over
+                Some(Rotor3::from_rotation_xz(PI * 0.2) * Rotor3::from_rotation_xy(PI * 0.15)), // Tilted forward slightly
+                None,
+            ),
         );
 
-        // Optionally add a collider to each axis cube (if you want them to be collidable)
-        let unit_collider = Collider::Aabb(Aabb::new(
-            Vec3::new(0.1, 0.1, 0.1),
-            Vec3::new(0.0, 0.0, 0.0),
+        // Colliders for the floating monuments - smaller, more precise
+        let monument_collider = Collider::Aabb(Aabb::new(
+            Vec3::new(0.5, 0.5, 0.5), // 1x1x1 cubes
+            Vec3::new(0.0, 0.0, 0.0), // Centered
         ));
-        let _ = self.world.component_add(x_axis, unit_collider);
-        let _ = self.world.component_add(y_axis, unit_collider);
-        let _ = self.world.component_add(z_axis, unit_collider);
+        let _ = self.world.component_add(x_axis, monument_collider);
+        let _ = self.world.component_add(y_axis, monument_collider);
+        let _ = self.world.component_add(z_axis, monument_collider);
 
-        // Attach the models for each axis cube
+        // Attach models to monuments
         let _ = self
             .world
             .component_add(x_axis, load_model("data/models/square.obj", renderer));
@@ -259,6 +216,58 @@ impl ApplicationHandler for App {
         let _ = self
             .world
             .component_add(z_axis, load_model("data/models/square.obj", renderer));
+
+        // ───────────────────────────────────────────────────────
+        // DRAMATIC LIGHTING - Three-point mystical lighting setup
+        // ───────────────────────────────────────────────────────
+
+        // RED LIGHT: "Crimson Flame" - Key light, high intensity, following the red monument
+        let _ = self.world.component_add(
+            red_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
+                25.0,                     // High intensity for drama
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            red_light,
+            Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
+        );
+
+        // GREEN LIGHT: "Emerald Glow" - Fill light, medium intensity, illuminating the left side
+        let _ = self.world.component_add(
+            green_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(0.2, 1.0, 0.3), // Vibrant green
+                15.0,                     // Medium intensity
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            green_light,
+            Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
+        );
+
+        // BLUE LIGHT: "Azure Whisper" - Rim light, subtle, creating mystical atmosphere
+        let _ = self.world.component_add(
+            blue_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(0.3, 0.4, 1.0), // Cool blue
+                12.0,                     // Lower intensity for subtle rim lighting
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            blue_light,
+            Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
+        );
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
@@ -437,7 +446,7 @@ fn camera_update(world: &mut World, _delta_time: f32) {
 
     camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
 
-    let target_distance = 10.0;
+    let target_distance = 20.0;
 
     let backward = Vec3 {
         x: 0.0,
