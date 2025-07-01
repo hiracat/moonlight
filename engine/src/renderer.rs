@@ -17,11 +17,12 @@ use vulkano::{
     },
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
-        Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags,
+        Device, DeviceCreateInfo, DeviceExtensions, DeviceOwnedVulkanObject, Features, Queue,
+        QueueCreateInfo, QueueFlags,
     },
     format::Format,
     image::{view::ImageView, Image, ImageCreateInfo, ImageLayout, ImageUsage, SampleCount},
-    instance::{Instance, InstanceCreateInfo},
+    instance::{debug::ValidationFeatureEnable, Instance, InstanceCreateInfo},
     memory::allocator::{
         AllocationCreateInfo, MemoryAllocator, MemoryTypeFilter, StandardMemoryAllocator,
     },
@@ -151,7 +152,7 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
-pub const FRAMES_IN_FLIGHT: usize = 3;
+pub const FRAMES_IN_FLIGHT: usize = 1;
 
 #[derive(vulkano::buffer::BufferContents, vertex_input::Vertex)]
 #[repr(C)]
@@ -190,27 +191,28 @@ pub struct Renderer {
     pub memory_allocator: Arc<dyn MemoryAllocator>,
     pub start_time: Instant,
     pub pipelines: Vec<Arc<GraphicsPipeline>>,
-    pub(in crate::engine) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub(crate) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub(crate) command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+
+    pub(crate) queue: Arc<Queue>,
 
     surface: Arc<Surface>,
     aspect_ratio: f32,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    pub(crate) device: Arc<Device>,
     dummy_verts: Subbuffer<[DummyVertex]>,
     current_frame: usize,
     frame_counter: u128,
 
-    pub(in crate::engine) swapchain: Arc<Swapchain>,
+    pub(crate) swapchain: Arc<Swapchain>,
     render_pass: Arc<RenderPass>,
 
     viewport: Viewport,
 
     framebuffers: Vec<Arc<Framebuffer>>,
 
-    pub(in crate::engine) color_buffers: Vec<Arc<ImageView>>,
-    pub(in crate::engine) normal_buffers: Vec<Arc<ImageView>>,
-    pub(in crate::engine) position_buffers: Vec<Arc<ImageView>>,
+    pub(crate) color_buffers: Vec<Arc<ImageView>>,
+    pub(crate) normal_buffers: Vec<Arc<ImageView>>,
+    pub(crate) position_buffers: Vec<Arc<ImageView>>,
 
     frames_resources_free: Vec<Option<Box<dyn GpuFuture>>>,
 }
@@ -621,6 +623,10 @@ impl Renderer {
         .unwrap();
 
         let (swapchain, swapchain_images) = create_swapchain(&device, window, &surface);
+        for i in 0..swapchain_images.len() {
+            let _ = swapchain_images[i]
+                .set_debug_utils_object_name(Some(&format!("swapchain image{}", i)));
+        }
 
         let render_pass = create_renderpass(&device, swapchain.image_format());
         let deferred_pass = Arc::new(Subpass::from(render_pass.clone(), 0).unwrap());
@@ -760,10 +766,12 @@ fn create_swapchain(
         .physical_device()
         .surface_capabilities(surface, SurfaceInfo::default())
         .unwrap();
+
     let (image_format, _) = device
         .physical_device()
         .surface_formats(surface, SurfaceInfo::default())
         .unwrap()[0]; // take the first available format
+
     Swapchain::new(
         device.clone(),
         surface.clone(),
@@ -932,7 +940,8 @@ pub fn create_framebuffers(
     let mut normal_buffers = vec![];
     let mut position_buffers = vec![];
     let extent = swapchain_images[0].extent();
-    for swapchain_image in swapchain_images {
+    dbg!(swapchain_images);
+    for i in 0..swapchain_images.len() {
         let depth_image = Image::new(
             allocator.clone(),
             ImageCreateInfo {
@@ -944,6 +953,7 @@ pub fn create_framebuffers(
             AllocationCreateInfo::default(),
         )
         .unwrap();
+        let _ = depth_image.set_debug_utils_object_name(Some(&format!("depth image{}", i)));
         let color_image = Image::new(
             allocator.clone(),
             ImageCreateInfo {
@@ -955,6 +965,8 @@ pub fn create_framebuffers(
             AllocationCreateInfo::default(),
         )
         .unwrap();
+        let _ = color_image.set_debug_utils_object_name(Some(&format!("color image{}", i)));
+
         let normal_image = Image::new(
             allocator.clone(),
             ImageCreateInfo {
@@ -966,6 +978,7 @@ pub fn create_framebuffers(
             AllocationCreateInfo::default(),
         )
         .unwrap();
+        let _ = normal_image.set_debug_utils_object_name(Some(&format!("normal image{}", i)));
 
         let position_image = Image::new(
             allocator.clone(),
@@ -978,8 +991,9 @@ pub fn create_framebuffers(
             AllocationCreateInfo::default(),
         )
         .unwrap();
+        let _ = position_image.set_debug_utils_object_name(Some(&format!("position image{}", i)));
 
-        let final_color_view = ImageView::new_default(swapchain_image.clone()).unwrap(); // 0: Final color
+        let final_color_view = ImageView::new_default(swapchain_images[i].clone()).unwrap(); // 0: Final color
         let color_view = ImageView::new_default(color_image.clone()).unwrap(); // 1: G-Buffer color
         let normal_view = ImageView::new_default(normal_image.clone()).unwrap(); // 2: G-Buffer normal
         let position_view = ImageView::new_default(position_image.clone()).unwrap(); // 2: G-Buffer normal
@@ -1034,20 +1048,20 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                 // color attachment (gbuffer)
                 AttachmentDescription {
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::Store,
+                    store_op: AttachmentStoreOp::DontCare,
                     format: Format::A2B10G10R10_UNORM_PACK32,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
                 // normal attachment (gbuffer)
                 AttachmentDescription {
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::Store,
+                    store_op: AttachmentStoreOp::DontCare,
                     format: Format::R16G16B16A16_SFLOAT,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -1056,18 +1070,18 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     format: Format::D32_SFLOAT,
                     samples: SampleCount::Sample1,
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::Store,
-                    initial_layout: ImageLayout::DepthAttachmentOptimal,
+                    store_op: AttachmentStoreOp::DontCare,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::DepthAttachmentOptimal,
                     ..Default::default()
                 },
                 // position attachment (gbuffer)
                 AttachmentDescription {
                     load_op: AttachmentLoadOp::Clear,
-                    store_op: AttachmentStoreOp::Store,
+                    store_op: AttachmentStoreOp::DontCare,
                     format: Format::R32G32B32A32_SFLOAT,
                     samples: SampleCount::Sample1,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ShaderReadOnlyOptimal,
                     ..Default::default()
                 },
@@ -1132,31 +1146,41 @@ fn create_renderpass(device: &Arc<Device>, swapchain_image_format: Format) -> Ar
                     ..Default::default()
                 },
             ],
-            dependencies: vec![
-                // Transition from geometry pass (subpass 0) to lighting pass (subpass 1)
-                SubpassDependency {
-                    src_subpass: Some(0),
-                    dst_subpass: Some(1),
-                    src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT, // Wait for writes to finish
-                    dst_stages: PipelineStages::FRAGMENT_SHADER, // Transition before fragment shader reads src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
-                    dst_access: AccessFlags::INPUT_ATTACHMENT_READ, // Lighting pass reads
-                    dependency_flags: DependencyFlags::BY_REGION,
-                    ..Default::default()
-                },
-            ],
+            dependencies: vec![SubpassDependency {
+                src_subpass: Some(0),
+                dst_subpass: Some(1),
+
+                // Wait for geometry/base color/normal&posotion writes to finish
+                src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                // before running the fragment shader &
+                // to finish writing
+                dst_stages: PipelineStages::FRAGMENT_SHADER
+                    | PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+
+                // wait for color write data
+                src_access: AccessFlags::COLOR_ATTACHMENT_WRITE, // Geometry pass writes
+                // before reading input attachemnts and color attachments
+                dst_access: AccessFlags::INPUT_ATTACHMENT_READ
+                    | AccessFlags::COLOR_ATTACHMENT_WRITE,
+
+                dependency_flags: DependencyFlags::BY_REGION,
+                ..Default::default()
+            }],
+
             ..Default::default()
         },
     )
     .unwrap()
 }
-use crate::shaders as s;
+use crate::{
+    components::{DirectionalLight, DirectionalLightUBO},
+    shaders as s,
+};
 
 use crate::{
+    components::{AmbientLight, AmbientLightUBO, Transform},
+    components::{Model, ModelUBO, PointLight},
     ecs::World,
-    engine::components::{
-        AmbientLight, AmbientLightUBO, DirectionalLight, DirectionalLightUBO, Transform,
-    },
-    engine::components::{Model, ModelUBO, PointLight},
 };
 #[allow(clippy::too_many_lines)]
 fn create_graphics_pipelines(
@@ -1619,7 +1643,9 @@ pub fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
 fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
     let library =
         VulkanLibrary::new().expect("failed to load library, please install vulkan drivers");
-    let required_extensions = Surface::required_extensions(event_loop);
+    let mut required_extensions = Surface::required_extensions(event_loop);
+    required_extensions.ext_validation_features = true;
+    required_extensions.ext_debug_utils = true;
 
     let validation_layer = "VK_LAYER_KHRONOS_validation";
 
@@ -1628,6 +1654,10 @@ fn create_instance(event_loop: &ActiveEventLoop) -> Arc<Instance> {
         InstanceCreateInfo {
             enabled_extensions: required_extensions,
             enabled_layers: vec![validation_layer.to_string()],
+            enabled_validation_features: vec![
+                ValidationFeatureEnable::BestPractices,
+                ValidationFeatureEnable::SynchronizationValidation,
+            ],
             ..Default::default()
         },
     )

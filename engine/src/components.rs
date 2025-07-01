@@ -1,12 +1,18 @@
+#![allow(dead_code)]
+#![allow(unreachable_patterns)]
 use core::fmt;
 use std::sync::Arc;
 
+use image::DynamicImage;
 use ultraviolet::{Mat4, Rotor3, Vec3};
 use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
+    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
     descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
+    image::{Image, ImageCreateInfo, ImageUsage},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::Pipeline,
+    sync::{self, GpuFuture},
 };
 
 use crate::renderer::{Renderer, Vertex, FRAMES_IN_FLIGHT};
@@ -41,7 +47,7 @@ impl Transform {
             position: position.unwrap_or(Vec3::zero()),
         }
     }
-    pub(in crate::engine) fn as_model_ubo(&mut self) -> ModelUBO {
+    pub(crate) fn as_model_ubo(&mut self) -> ModelUBO {
         if self.dirty {
             let rotation_mat = self.rotation.into_matrix().into_homogeneous();
             let translation_mat = Mat4::from_translation(self.position);
@@ -137,13 +143,12 @@ impl Collider {
     }
 }
 
-pub struct Dynamic;
-
+/// marker/cache component
 pub struct Model {
-    pub(in crate::engine) u_buffer: Vec<Subbuffer<ModelUBO>>,
-    pub(in crate::engine) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
-    pub(in crate::engine) vertex_buffer: Subbuffer<[Vertex]>,
-    pub(in crate::engine) index_buffer: Subbuffer<[u32]>,
+    pub(crate) u_buffer: Vec<Subbuffer<ModelUBO>>,
+    pub(crate) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
+    pub(crate) vertex_buffer: Subbuffer<[Vertex]>,
+    pub(crate) index_buffer: Subbuffer<[u32]>,
 }
 
 impl fmt::Debug for Model {
@@ -201,7 +206,7 @@ impl Model {
             );
         }
 
-        //TODO: this is bullshit, it needs to be completely changed by im lost
+        //HACK: this is bullshit, it needs to be completely changed by im lost
         let model_layout = renderer.pipelines[0].layout().set_layouts().get(1).unwrap();
 
         let mut model_sets = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -224,6 +229,81 @@ impl Model {
     }
 }
 
+/// marker/cache component
+pub struct Texture {
+    pub(crate) image: Arc<Image>,
+}
+impl fmt::Debug for Texture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Marker, no debug information available yet")
+    }
+}
+impl Texture {
+    pub fn create(renderer: &Renderer, image: DynamicImage) -> Self {
+        let image = image.as_rgba8().expect("image is invalid");
+
+        let dst_image = Image::new(
+            renderer.memory_allocator.clone(),
+            ImageCreateInfo {
+                format: vulkano::format::Format::R8G8B8A8_SRGB,
+                extent: [image.width(), image.height(), 1],
+                initial_layout: vulkano::image::ImageLayout::Undefined,
+                usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let staging_buffer = Buffer::new_slice::<u8>(
+            renderer.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            image.len() as u64,
+        )
+        .unwrap();
+
+        let mut staging_buffer_write = staging_buffer.write().unwrap();
+        staging_buffer_write.copy_from_slice(image.as_raw());
+        drop(staging_buffer_write);
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &renderer.command_buffer_allocator,
+            renderer.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .copy_buffer_to_image(
+                vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
+                    staging_buffer,
+                    dst_image.clone(),
+                ),
+            )
+            .unwrap();
+
+        let command_buffer = builder.build().unwrap();
+
+        let future = sync::now(renderer.device.clone())
+            .then_execute(renderer.queue.clone(), command_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+        future.wait(None).unwrap();
+        Texture { image: dst_image }
+    }
+}
+
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
 #[repr(C)]
 #[derive(Debug)]
@@ -232,7 +312,7 @@ pub struct ModelUBO {
     normal: Mat4,
 }
 impl ModelUBO {
-    pub(in crate::engine) fn new(position: Vec3, rotation: Rotor3) -> ModelUBO {
+    pub(crate) fn new(position: Vec3, rotation: Rotor3) -> ModelUBO {
         let rotation_mat = rotation.into_matrix().into_homogeneous();
         let translation_mat = Mat4::from_translation(position);
         let model_mat = translation_mat * rotation_mat;
@@ -334,16 +414,16 @@ pub struct AmbientLight {
     pub color: [f32; 3],
     pub intensity: f32,
 
-    pub(in crate::engine) u_buffer: Option<Vec<Subbuffer<AmbientLightUBO>>>,
-    pub(in crate::engine) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+    pub(crate) u_buffer: Option<Vec<Subbuffer<AmbientLightUBO>>>,
+    pub(crate) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
 }
 
 #[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
 #[repr(C)]
 #[derive(Debug)]
 pub struct AmbientLightUBO {
-    pub(in crate::engine) color: [f32; 3],
-    pub(in crate::engine) intensity: f32,
+    pub(crate) color: [f32; 3],
+    pub(crate) intensity: f32,
 }
 impl AmbientLight {
     pub fn new(color: [f32; 3], intensity: f32) -> Self {
@@ -363,8 +443,8 @@ pub struct PointLight {
     pub quadratic: f32,
     pub dirty: bool,
 
-    pub(in crate::engine) u_buffers: Vec<Subbuffer<PointLightUBO>>,
-    pub(in crate::engine) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
+    pub(crate) u_buffers: Vec<Subbuffer<PointLightUBO>>,
+    pub(crate) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
 }
 impl PointLight {
     pub fn create(
@@ -425,7 +505,7 @@ impl PointLight {
         }
     }
 
-    pub(in crate::engine) fn as_point_ubo(&self, transform: Transform) -> PointLightUBO {
+    pub(crate) fn as_point_ubo(&self, transform: Transform) -> PointLightUBO {
         PointLightUBO {
             position: transform.position,
             color: self.color,
@@ -439,28 +519,28 @@ impl PointLight {
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
 #[repr(C)]
-pub(in crate::engine) struct PointLightUBO {
-    pub(in crate::engine) position: Vec3,
+pub(crate) struct PointLightUBO {
+    pub(crate) position: Vec3,
     _padding: f32,
-    pub(in crate::engine) color: Vec3,
-    pub(in crate::engine) brightness: f32,
-    pub(in crate::engine) linear: f32,
-    pub(in crate::engine) quadratic: f32,
+    pub(crate) color: Vec3,
+    pub(crate) brightness: f32,
+    pub(crate) linear: f32,
+    pub(crate) quadratic: f32,
 }
 
 pub struct DirectionalLight {
     pub position: [f32; 4],
     pub color: [f32; 3],
 
-    pub(in crate::engine) u_buffer: Option<Vec<Subbuffer<DirectionalLightUBO>>>,
-    pub(in crate::engine) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+    pub(crate) u_buffer: Option<Vec<Subbuffer<DirectionalLightUBO>>>,
+    pub(crate) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
 }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
 #[repr(C)]
 pub struct DirectionalLightUBO {
-    pub(in crate::engine) position: [f32; 4],
-    pub(in crate::engine) color: [f32; 3],
+    pub(crate) position: [f32; 4],
+    pub(crate) color: [f32; 3],
 }
 
 impl DirectionalLight {

@@ -1,8 +1,11 @@
 use core::f32;
-use ecs::World;
-use engine::{
+
+use image::ImageReader;
+use moonlight::ecs::World;
+use moonlight::{
     components::{
-        Aabb, AmbientLight, Collider, DirectionalLight, Model, PointLight, RigidBody, Transform,
+        Aabb, AmbientLight, Collider, DirectionalLight, Model, PointLight, RigidBody, Texture,
+        Transform,
     },
     renderer::{self, Camera, Renderer, Vertex},
 };
@@ -23,11 +26,8 @@ use winit::{
     window::WindowId,
 };
 
-pub mod ecs;
-mod engine;
-mod shaders;
-
 type Keyboard = HashSet<KeyCode>;
+
 #[derive(Debug)]
 struct Controllable;
 #[derive(Debug, Default, Clone, Copy)]
@@ -61,6 +61,7 @@ fn load_model(path: &str, renderer: &Renderer) -> Model {
         .iter()
         .map(|v| Vertex {
             position: v.position,
+
             normal: v.normal,
             color: [1.0, 1.0, 1.0], // map other fields as needed
         })
@@ -68,6 +69,16 @@ fn load_model(path: &str, renderer: &Renderer) -> Model {
     let indices: Vec<u32> = model.indices.clone();
 
     Model::create(renderer, vertices, indices)
+}
+
+fn load_image(path: &str, format: image::ImageFormat, renderer: &Renderer) -> Texture {
+    let image = ImageReader::open(path)
+        .expect(&format!("invalid image path {}", path))
+        .decode()
+        .expect(&format!("invaid image {}", path));
+
+    dbg!(path);
+    Texture::create(renderer, image)
 }
 
 impl ApplicationHandler for App {

@@ -1,4 +1,4 @@
-use moonlight::App;
+use corruption::App;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() {
