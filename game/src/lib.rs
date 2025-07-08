@@ -1,11 +1,10 @@
 use core::f32;
 
-use image::ImageReader;
+use half::f16;
 use moonlight::ecs::World;
 use moonlight::{
     components::{
-        Aabb, AmbientLight, Collider, DirectionalLight, Model, PointLight, RigidBody, Texture,
-        Transform,
+        Aabb, AmbientLight, Collider, DirectionalLight, Model, PointLight, RigidBody, Transform,
     },
     renderer::{self, Camera, Renderer, Vertex},
 };
@@ -53,33 +52,28 @@ impl Default for App {
     }
 }
 
-fn load_model(path: &str, renderer: &Renderer) -> Model {
+fn load_model(path: &str, renderer: &mut Renderer) -> Model {
     let input = BufReader::new(File::open(path).unwrap());
     let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
     let vertices: Vec<Vertex> = model
         .vertices
         .iter()
-        .map(|v| Vertex {
-            position: v.position,
-
-            normal: v.normal,
-            color: [1.0, 1.0, 1.0], // map other fields as needed
-        })
+        .map(|v| Vertex::new(v.position.into(), v.normal.into(), Vec3::one()))
         .collect();
     let indices: Vec<u32> = model.indices.clone();
 
     Model::create(renderer, vertices, indices)
 }
 
-fn load_image(path: &str, format: image::ImageFormat, renderer: &Renderer) -> Texture {
-    let image = ImageReader::open(path)
-        .expect(&format!("invalid image path {}", path))
-        .decode()
-        .expect(&format!("invaid image {}", path));
-
-    dbg!(path);
-    Texture::create(renderer, image)
-}
+// fn load_image(path: &str, format: image::ImageFormat, renderer: &Renderer) -> Texture {
+//     let image = ImageReader::open(path)
+//         .expect(&format!("invalid image path {}", path))
+//         .decode()
+//         .expect(&format!("invaid image {}", path));
+//
+//     dbg!(path);
+//     Texture::create(renderer, image)
+// }
 
 impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
@@ -118,7 +112,7 @@ impl ApplicationHandler for App {
 
         // Initialize renderer after resources exist in the world
         self.renderer = Some(Renderer::init(event_loop, &mut self.world, &window));
-        let renderer = self.renderer.as_ref().unwrap();
+        let renderer = self.renderer.as_mut().unwrap();
 
         // ───────────────────────────────────────────────────────
         // 3) Spawn entities

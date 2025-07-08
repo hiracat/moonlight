@@ -1,21 +1,14 @@
 #![allow(dead_code)]
 #![allow(unreachable_patterns)]
 use core::fmt;
+use gpu_allocator::vulkan::*;
 use std::sync::Arc;
 
-use image::DynamicImage;
-use ultraviolet::{Mat4, Rotor3, Vec3};
-use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
-    command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
-    descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
-    image::{Image, ImageCreateInfo, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
-    pipeline::Pipeline,
-    sync::{self, GpuFuture},
-};
+use ash::vk;
 
-use crate::renderer::{Renderer, Vertex, FRAMES_IN_FLIGHT};
+use ultraviolet::{Mat4, Rotor3, Vec3};
+
+use crate::renderer::{alloc_buffer, Renderer, Vertex, FRAMES_IN_FLIGHT};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
@@ -145,10 +138,19 @@ impl Collider {
 
 /// marker/cache component
 pub struct Model {
-    pub(crate) u_buffer: Vec<Subbuffer<ModelUBO>>,
-    pub(crate) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
-    pub(crate) vertex_buffer: Subbuffer<[Vertex]>,
-    pub(crate) index_buffer: Subbuffer<[u32]>,
+    pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
+    // write to this to upload values, only need to update desriptors to point at this once
+    pub(crate) allocations: Option<Vec<Allocation>>,
+
+    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
+
+    pub(crate) vertex_buffer: vk::Buffer,
+    pub(crate) vertex_buffer_len: usize,
+    pub(crate) vertex_buffer_memory: Allocation,
+
+    pub(crate) index_buffer: vk::Buffer,
+    pub(crate) index_buffer_len: usize,
+    pub(crate) index_buffer_memory: Allocation,
 }
 
 impl fmt::Debug for Model {
@@ -158,151 +160,172 @@ impl fmt::Debug for Model {
 }
 
 impl Model {
-    pub fn create(renderer: &Renderer, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
-        let vertex_buffer = Buffer::from_iter(
-            renderer.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices,
-        )
-        .unwrap();
-        let index_buffer = Buffer::from_iter(
-            renderer.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            indices,
-        )
-        .unwrap();
+    pub fn create(renderer: &mut Renderer, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
+        let (vertex_buffer, mut vertex_alloc) = alloc_buffer(
+            &mut renderer.memory_allocator,
+            1,
+            vertices.len() as u64,
+            &renderer.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::cast_slice(vertices.as_ref()),
+        );
 
-        let mut model_buffers: Vec<Subbuffer<ModelUBO>> = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for _ in 0..FRAMES_IN_FLIGHT {
-            model_buffers.push(
-                Buffer::new_sized(
-                    renderer.memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            );
-        }
+        let (index_buffer, mut index_alloc) = alloc_buffer(
+            &mut renderer.memory_allocator,
+            1,
+            indices.len() as u64,
+            &renderer.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::cast_slice(indices.as_ref()),
+        );
 
-        //HACK: this is bullshit, it needs to be completely changed by im lost
-        let model_layout = renderer.pipelines[0].layout().set_layouts().get(1).unwrap();
+        let (u_buffers, u_allocations) = alloc_buffer(
+            &mut renderer.memory_allocator,
+            FRAMES_IN_FLIGHT,
+            size_of::<ModelUBO>() as u64,
+            &renderer.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::bytes_of(&Transform::new().as_model_ubo()),
+        );
 
-        let mut model_sets = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        // let model_layout = renderer.descriptor_layouts.model;
+
+        let mut model_sets = vec![];
+
+        // these need to be updated here since u can create models without calling
+        // update_descriptor_sets, i can probably remove the model section entirely from that
         for i in 0..FRAMES_IN_FLIGHT {
-            let model_set = PersistentDescriptorSet::new(
-                &renderer.descriptor_set_allocator,
-                model_layout.clone(),
-                [WriteDescriptorSet::buffer(0, model_buffers[i].clone())],
-                [],
-            )
-            .unwrap();
+            let model_set = unsafe {
+                renderer
+                    .device
+                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
+                        descriptor_pool: renderer.descriptor_pool,
+                        p_set_layouts: [renderer.descriptor_layouts.model].as_ptr(),
+                        descriptor_set_count: 1,
+                        ..Default::default()
+                    })
+                    .unwrap()
+            }[0];
+            unsafe {
+                renderer.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet {
+                        dst_set: model_set,
+                        p_buffer_info: [vk::DescriptorBufferInfo {
+                            buffer: u_buffers[i],
+                            offset: 0,
+                            range: size_of::<ModelUBO>() as u64,
+                        }]
+                        .as_ptr(),
+                        descriptor_count: 1,
+                        dst_binding: 0,
+                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                        dst_array_element: 0,
+                        ..Default::default()
+                    }],
+                    &[],
+                );
+            };
+
             model_sets.push(model_set);
         }
+
         Model {
-            u_buffer: model_buffers,
-            descriptor_set: model_sets,
-            vertex_buffer,
-            index_buffer,
+            u_buffer: Some(u_buffers),
+            allocations: Some(u_allocations),
+            descriptor_set: Some(model_sets),
+            index_buffer_len: indices.len(),
+            vertex_buffer_len: vertices.len(),
+            vertex_buffer: vertex_buffer[0],
+            index_buffer: index_buffer[0],
+            index_buffer_memory: index_alloc.pop().expect("should have 1 element"),
+            vertex_buffer_memory: vertex_alloc.pop().expect("should have 1 element"),
         }
     }
 }
 
 /// marker/cache component
 pub struct Texture {
-    pub(crate) image: Arc<Image>,
+    pub(crate) image: Arc<image::DynamicImage>,
 }
 impl fmt::Debug for Texture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Marker, no debug information available yet")
     }
 }
-impl Texture {
-    pub fn create(renderer: &Renderer, image: DynamicImage) -> Self {
-        let image = image.as_rgba8().expect("image is invalid");
-
-        let dst_image = Image::new(
-            renderer.memory_allocator.clone(),
-            ImageCreateInfo {
-                format: vulkano::format::Format::R8G8B8A8_SRGB,
-                extent: [image.width(), image.height(), 1],
-                initial_layout: vulkano::image::ImageLayout::Undefined,
-                usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let staging_buffer = Buffer::new_slice::<u8>(
-            renderer.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_SRC,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            image.len() as u64,
-        )
-        .unwrap();
-
-        let mut staging_buffer_write = staging_buffer.write().unwrap();
-        staging_buffer_write.copy_from_slice(image.as_raw());
-        drop(staging_buffer_write);
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &renderer.command_buffer_allocator,
-            renderer.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        builder
-            .copy_buffer_to_image(
-                vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
-                    staging_buffer,
-                    dst_image.clone(),
-                ),
-            )
-            .unwrap();
-
-        let command_buffer = builder.build().unwrap();
-
-        let future = sync::now(renderer.device.clone())
-            .then_execute(renderer.queue.clone(), command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-        future.wait(None).unwrap();
-        Texture { image: dst_image }
-    }
-}
+// impl Texture {
+//     pub fn create(renderer: &Renderer, image: DynamicImage) -> Self {
+//         let image = image.as_rgba8().expect("image is invalid");
+//
+//         let dst_image = Image::new(
+//             renderer.memory_allocator.clone(),
+//             ImageCreateInfo {
+//                 format: vulkano::format::Format::R8G8B8A8_SRGB,
+//                 extent: [image.width(), image.height(), 1],
+//                 initial_layout: vulkano::image::ImageLayout::Undefined,
+//                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+//                 ..Default::default()
+//             },
+//             AllocationCreateInfo {
+//                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+//                 ..Default::default()
+//             },
+//         )
+//         .unwrap();
+//
+//         let staging_buffer = Buffer::new_slice::<u8>(
+//             renderer.memory_allocator.clone(),
+//             BufferCreateInfo {
+//                 usage: BufferUsage::TRANSFER_SRC,
+//                 ..Default::default()
+//             },
+//             AllocationCreateInfo {
+//                 memory_type_filter: MemoryTypeFilter::PREFER_HOST
+//                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+//                 ..Default::default()
+//             },
+//             image.len() as u64,
+//         )
+//         .unwrap();
+//
+//         let mut staging_buffer_write = staging_buffer.write().unwrap();
+//         staging_buffer_write.copy_from_slice(image.as_raw());
+//         drop(staging_buffer_write);
+//         let mut builder = AutoCommandBufferBuilder::primary(
+//             &renderer.command_pool,
+//             renderer.queue.queue_family_index(),
+//             CommandBufferUsage::OneTimeSubmit,
+//         )
+//         .unwrap();
+//
+//         builder
+//             .copy_buffer_to_image(
+//                 vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
+//                     staging_buffer,
+//                     dst_image.clone(),
+//                 ),
+//             )
+//             .unwrap();
+//
+//         let command_buffer = builder.build().unwrap();
+//
+//         let future = sync::now(renderer.device.clone())
+//             .then_execute(renderer.queue.clone(), command_buffer)
+//             .unwrap()
+//             .then_signal_fence_and_flush()
+//             .unwrap();
+//         future.wait(None).unwrap();
+//         Texture { image: dst_image }
+//     }
+// }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
 #[repr(C)]
@@ -414,8 +437,10 @@ pub struct AmbientLight {
     pub color: [f32; 3],
     pub intensity: f32,
 
-    pub(crate) u_buffer: Option<Vec<Subbuffer<AmbientLightUBO>>>,
-    pub(crate) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+    //ambientlightubo
+    pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
+    pub(crate) allocations: Option<Vec<Allocation>>,
+    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 }
 
 #[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
@@ -432,6 +457,7 @@ impl AmbientLight {
             intensity,
             u_buffer: None,
             descriptor_set: None,
+            allocations: None,
         }
     }
 }
@@ -443,56 +469,148 @@ pub struct PointLight {
     pub quadratic: f32,
     pub dirty: bool,
 
-    pub(crate) u_buffers: Vec<Subbuffer<PointLightUBO>>,
-    pub(crate) descriptor_set: Vec<Arc<PersistentDescriptorSet>>,
+    // point light ubo
+    pub(crate) u_buffers: Option<Vec<vk::Buffer>>,
+    // write to this to upload values, only need to update desriptors to point at this once
+    pub(crate) allocations: Option<Vec<Allocation>>,
+    pub(crate) descriptor_set: Vec<vk::DescriptorSet>,
 }
 impl PointLight {
     pub fn create(
-        renderer: &Renderer,
+        renderer: &mut Renderer,
         color: Vec3,
         brightness: f32,
         linear: Option<f32>,
         quadratic: Option<f32>,
     ) -> Self {
-        let mut u_buffers: Vec<Subbuffer<PointLightUBO>> = vec![];
-        for _ in 0..renderer.swapchain.image_count() {
-            u_buffers.push(
-                Buffer::new_sized(
-                    renderer.memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::UNIFORM_BUFFER | BufferUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            );
-        }
         //TODO: this is even more bullshit, ill get to it eventually
-        let point_layout = renderer.pipelines[3]
-            .layout()
-            .set_layouts()
-            .first()
-            .unwrap();
 
-        let mut descriptor_set = vec![];
-        for i in 0..renderer.swapchain.image_count() as usize {
-            let dir_set = PersistentDescriptorSet::new(
-                &renderer.descriptor_set_allocator,
-                point_layout.clone(),
-                [
-                    WriteDescriptorSet::image_view(0, renderer.color_buffers[i].clone()),
-                    WriteDescriptorSet::image_view(1, renderer.normal_buffers[i].clone()),
-                    WriteDescriptorSet::image_view(2, renderer.position_buffers[i].clone()),
-                    WriteDescriptorSet::buffer(3, u_buffers[i].clone()),
-                ],
-                [],
-            )
-            .unwrap();
-            descriptor_set.push(dir_set);
+        let (u_buffers, u_allocations) = alloc_buffer(
+            &mut renderer.memory_allocator,
+            FRAMES_IN_FLIGHT,
+            size_of::<PointLightUBO>() as u64,
+            &renderer.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::bytes_of(&PointLightUBO::new()),
+        );
+
+        let mut pt_sets = vec![];
+
+        for i in 0..FRAMES_IN_FLIGHT {
+            let pt_set = unsafe {
+                renderer
+                    .device
+                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
+                        descriptor_pool: renderer.descriptor_pool,
+                        p_set_layouts: [renderer.descriptor_layouts.point_light].as_ptr(),
+                        descriptor_set_count: 1,
+                        ..Default::default()
+                    })
+                    .unwrap()
+            }[0];
+            unsafe {
+                renderer.device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet {
+                            dst_set: pt_set,
+                            p_image_info: &vk::DescriptorImageInfo {
+                                sampler: vk::Sampler::null(),
+                                image_view: renderer.normal_buffers[i],
+                                image_layout: vk::ImageLayout::UNDEFINED,
+                            },
+                            descriptor_count: 1,
+                            dst_binding: 1,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            dst_array_element: 0,
+                            ..Default::default()
+                        },
+                        vk::WriteDescriptorSet {
+                            dst_set: pt_set,
+                            p_image_info: &vk::DescriptorImageInfo {
+                                sampler: vk::Sampler::null(),
+                                image_view: renderer.position_buffers[i],
+                                image_layout: vk::ImageLayout::UNDEFINED,
+                            },
+                            descriptor_count: 1,
+                            dst_binding: 2,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            dst_array_element: 0,
+                            ..Default::default()
+                        },
+                        vk::WriteDescriptorSet {
+                            dst_set: pt_set,
+                            p_image_info: &vk::DescriptorImageInfo {
+                                sampler: vk::Sampler::null(),
+                                image_view: renderer.color_buffers[i],
+                                image_layout: vk::ImageLayout::UNDEFINED,
+                            },
+                            descriptor_count: 0,
+                            dst_binding: 0,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            dst_array_element: 0,
+                            ..Default::default()
+                        },
+                        vk::WriteDescriptorSet {
+                            dst_set: pt_set,
+                            p_buffer_info: [vk::DescriptorBufferInfo {
+                                buffer: u_buffers[i],
+                                offset: 0,
+                                range: size_of::<PointLightUBO>() as u64,
+                            }]
+                            .as_ptr(),
+                            descriptor_count: 1,
+                            dst_binding: 3,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            dst_array_element: 0,
+                            ..Default::default()
+                        },
+                    ],
+                    &[],
+                );
+            };
+            pt_sets.push(pt_set);
+        }
+
+        let mut point_sets = vec![];
+
+        // these need to be updated here since u can create models without calling
+        // update_descriptor_sets, i can probably remove the model section entirely from that
+        for i in 0..FRAMES_IN_FLIGHT {
+            let point_set = unsafe {
+                renderer
+                    .device
+                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
+                        descriptor_pool: renderer.descriptor_pool,
+                        p_set_layouts: [renderer.descriptor_layouts.point_light].as_ptr(),
+                        descriptor_set_count: 1,
+                        ..Default::default()
+                    })
+                    .unwrap()
+            }[0];
+            unsafe {
+                renderer.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet {
+                        dst_set: point_set,
+                        p_buffer_info: [vk::DescriptorBufferInfo {
+                            buffer: u_buffers[i],
+                            offset: 0,
+                            range: size_of::<ModelUBO>() as u64,
+                        }]
+                        .as_ptr(),
+                        descriptor_count: 1,
+                        dst_binding: 0,
+                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                        dst_array_element: 0,
+                        ..Default::default()
+                    }],
+                    &[],
+                );
+            };
+
+            point_sets.push(point_set);
         }
         PointLight {
             color,
@@ -500,8 +618,9 @@ impl PointLight {
             linear: linear.unwrap_or(3.00),
             quadratic: quadratic.unwrap_or(0.00),
             dirty: true,
-            u_buffers,
-            descriptor_set,
+            u_buffers: Some(u_buffers),
+            allocations: Some(u_allocations),
+            descriptor_set: pt_sets,
         }
     }
 
@@ -527,13 +646,25 @@ pub(crate) struct PointLightUBO {
     pub(crate) linear: f32,
     pub(crate) quadratic: f32,
 }
+impl PointLightUBO {
+    pub(crate) fn new() -> Self {
+        PointLightUBO {
+            position: Vec3::zero(),
+            _padding: 0.0,
+            color: Vec3::zero(),
+            brightness: 0.0,
+            linear: 0.0,
+            quadratic: 0.0,
+        }
+    }
+}
 
 pub struct DirectionalLight {
     pub position: [f32; 4],
     pub color: [f32; 3],
 
-    pub(crate) u_buffer: Option<Vec<Subbuffer<DirectionalLightUBO>>>,
-    pub(crate) descriptor_set: Option<Vec<Arc<PersistentDescriptorSet>>>,
+    pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
+    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
