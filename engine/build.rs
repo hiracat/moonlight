@@ -16,6 +16,7 @@ fn main() {
     let compiler = shaderc::Compiler::new().expect("Failed to create shader compiler");
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.set_generate_debug_info();
+    // options.add_macro_definition("VK_KHR_shader_non_semantic_info", Some("1"));
 
     for entry in WalkDir::new(shader_dir) {
         let entry = entry.unwrap();
@@ -33,18 +34,13 @@ fn main() {
             .expect(&format! {"invalid file {}", path.to_string_lossy()});
 
         let shader_kind = shader_kind_from_filename(path);
-        let input_file_name = path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap_or("mangled file name");
 
         let result = match compiler.compile_into_spirv(
             &source,
             shader_kind,
-            input_file_name,
+            &path.to_string_lossy(),
             "main",
-            None,
+            Some(&options),
         ) {
             Ok(result) => result,
             Err(err) => {

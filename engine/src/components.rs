@@ -4,11 +4,14 @@ use core::fmt;
 use gpu_allocator::vulkan::*;
 use std::sync::Arc;
 
-use ash::vk;
+use ash::vk::{self, DescriptorSet};
 
 use ultraviolet::{Mat4, Rotor3, Vec3};
 
-use crate::renderer::{alloc_buffer, Renderer, Vertex, FRAMES_IN_FLIGHT};
+use crate::{
+    layouts::{self, BINDINGS},
+    renderer::{alloc_buffer, HasUBO, Renderer, Vertex, FRAMES_IN_FLIGHT},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
@@ -40,20 +43,6 @@ impl Transform {
             position: position.unwrap_or(Vec3::zero()),
         }
     }
-    pub(crate) fn as_model_ubo(&mut self) -> ModelUBO {
-        if self.dirty {
-            let rotation_mat = self.rotation.into_matrix().into_homogeneous();
-            let translation_mat = Mat4::from_translation(self.position);
-            let scale_mat = Mat4::from_nonuniform_scale(self.scale);
-            self.matrix_cache = translation_mat * rotation_mat * scale_mat;
-            self.inv_trans_cache = self.matrix_cache.inversed().transposed();
-        }
-
-        ModelUBO {
-            model: self.matrix_cache,
-            normal: self.inv_trans_cache,
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -73,6 +62,27 @@ impl RigidBody {
 #[derive(Clone, Copy, Debug)]
 pub enum Collider {
     Aabb(Aabb),
+}
+
+trait DescriptorPerObject {
+    fn set_descriptor_sets(&mut self, sets: Vec<DescriptorSet>);
+    fn allocate_descriptor_sets(
+        &mut self,
+        device: &ash::Device,
+        descriptor_pool: vk::DescriptorPool,
+        layout: vk::DescriptorSetLayout,
+        count: u32,
+    ) {
+        let set_layouts = vec![layout; count as usize];
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            p_set_layouts: set_layouts.as_ptr(),
+            descriptor_set_count: set_layouts.len() as u32,
+            ..Default::default()
+        };
+        let sets = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
+        self.set_descriptor_sets(sets);
+    }
 }
 
 impl Collider {
@@ -137,6 +147,7 @@ impl Collider {
 }
 
 /// marker/cache component
+#[derive(Debug)]
 pub struct Model {
     pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
     // write to this to upload values, only need to update desriptors to point at this once
@@ -145,110 +156,103 @@ pub struct Model {
     pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 
     pub(crate) vertex_buffer: vk::Buffer,
-    pub(crate) vertex_buffer_len: usize,
+    pub(crate) vertex_count: usize,
     pub(crate) vertex_buffer_memory: Allocation,
 
     pub(crate) index_buffer: vk::Buffer,
-    pub(crate) index_buffer_len: usize,
+    pub(crate) index_count: usize,
     pub(crate) index_buffer_memory: Allocation,
 }
 
-impl fmt::Debug for Model {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Marker, no debug information available yet")
+impl HasUBO for Model {
+    type Context = Transform;
+    type UBOData = ModelUBO;
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocation: Vec<Allocation>) {
+        self.u_buffer = Some(buffer);
+        self.allocations = Some(allocation);
+    }
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
+        if context.dirty {
+            let rotation_mat = context.rotation.into_matrix().into_homogeneous();
+            let translation_mat = Mat4::from_translation(context.position);
+            let scale_mat = Mat4::from_nonuniform_scale(context.scale);
+            context.matrix_cache = translation_mat * rotation_mat * scale_mat;
+            context.inv_trans_cache = context.matrix_cache.inversed().transposed();
+        }
+
+        ModelUBO {
+            model: context.matrix_cache,
+            normal: context.inv_trans_cache,
+        }
+    }
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
+        self.u_buffer.as_ref()
+    }
+}
+
+impl DescriptorPerObject for Model {
+    fn set_descriptor_sets(&mut self, sets: Vec<DescriptorSet>) {
+        self.descriptor_set = Some(sets);
     }
 }
 
 impl Model {
     pub fn create(renderer: &mut Renderer, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         let (vertex_buffer, mut vertex_alloc) = alloc_buffer(
-            &mut renderer.memory_allocator,
+            renderer.allocator.clone(),
             1,
-            vertices.len() as u64,
+            vertices.len() as u64 * size_of::<Vertex>() as u64,
             &renderer.device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
             true,
             bytemuck::cast_slice(vertices.as_ref()),
+            "vertex buffer",
         );
 
         let (index_buffer, mut index_alloc) = alloc_buffer(
-            &mut renderer.memory_allocator,
+            renderer.allocator.clone(),
             1,
-            indices.len() as u64,
+            indices.len() as u64 * 4,
             &renderer.device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::INDEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
             true,
             bytemuck::cast_slice(indices.as_ref()),
+            "index buffer",
         );
 
-        let (u_buffers, u_allocations) = alloc_buffer(
-            &mut renderer.memory_allocator,
-            FRAMES_IN_FLIGHT,
-            size_of::<ModelUBO>() as u64,
-            &renderer.device,
-            vk::SharingMode::EXCLUSIVE,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-            true,
-            bytemuck::bytes_of(&Transform::new().as_model_ubo()),
-        );
-
-        // let model_layout = renderer.descriptor_layouts.model;
-
-        let mut model_sets = vec![];
-
-        // these need to be updated here since u can create models without calling
-        // update_descriptor_sets, i can probably remove the model section entirely from that
-        for i in 0..FRAMES_IN_FLIGHT {
-            let model_set = unsafe {
-                renderer
-                    .device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool: renderer.descriptor_pool,
-                        p_set_layouts: [renderer.descriptor_layouts.model].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                renderer.device.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet {
-                        dst_set: model_set,
-                        p_buffer_info: [vk::DescriptorBufferInfo {
-                            buffer: u_buffers[i],
-                            offset: 0,
-                            range: size_of::<ModelUBO>() as u64,
-                        }]
-                        .as_ptr(),
-                        descriptor_count: 1,
-                        dst_binding: 0,
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        dst_array_element: 0,
-                        ..Default::default()
-                    }],
-                    &[],
-                );
-            };
-
-            model_sets.push(model_set);
-        }
-
-        Model {
-            u_buffer: Some(u_buffers),
-            allocations: Some(u_allocations),
-            descriptor_set: Some(model_sets),
-            index_buffer_len: indices.len(),
-            vertex_buffer_len: vertices.len(),
+        let mut model = Model {
+            u_buffer: None,
+            allocations: None,
+            descriptor_set: None,
+            index_count: indices.len(),
+            vertex_count: vertices.len(),
             vertex_buffer: vertex_buffer[0],
             index_buffer: index_buffer[0],
             index_buffer_memory: index_alloc.pop().expect("should have 1 element"),
             vertex_buffer_memory: vertex_alloc.pop().expect("should have 1 element"),
-        }
+        };
+        model.populate_u_buffers(
+            &renderer.device,
+            renderer.allocator.clone(),
+            &mut Transform::new(),
+            FRAMES_IN_FLIGHT,
+        );
+        model.allocate_descriptor_sets(
+            &renderer.device,
+            renderer.model_pool_0,
+            renderer.descriptor_layouts.geometry_per_model_layout_0,
+            FRAMES_IN_FLIGHT as u32,
+        );
+        let descriptor_set = model.descriptor_set.as_ref().unwrap();
+
+        // Step 2: now borrow model to call method
+        model.write_descriptor_sets(&renderer.device, descriptor_set, BINDINGS.model);
+
+        model
     }
 }
 
@@ -440,7 +444,6 @@ pub struct AmbientLight {
     //ambientlightubo
     pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
     pub(crate) allocations: Option<Vec<Allocation>>,
-    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 }
 
 #[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
@@ -451,14 +454,44 @@ pub struct AmbientLightUBO {
     pub(crate) intensity: f32,
 }
 impl AmbientLight {
-    pub fn new(color: [f32; 3], intensity: f32) -> Self {
-        Self {
+    pub fn create(renderer: &mut Renderer, color: [f32; 3], intensity: f32) -> Self {
+        let mut light = Self {
             color,
             intensity,
             u_buffer: None,
-            descriptor_set: None,
             allocations: None,
+        };
+        light.populate_u_buffers(
+            &renderer.device,
+            renderer.allocator.clone(),
+            &mut (),
+            FRAMES_IN_FLIGHT,
+        );
+        light.write_descriptor_sets(
+            &renderer.device,
+            &mut renderer.lighting_per_frame_sets_1,
+            layouts::BINDINGS.ambient,
+        );
+        light
+    }
+}
+
+impl HasUBO for AmbientLight {
+    type Context = ();
+    type UBOData = AmbientLightUBO;
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocation: Vec<Allocation>) {
+        self.u_buffer = Some(buffer);
+        self.allocations = Some(allocation);
+    }
+    #[allow(unused)]
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
+        Self::UBOData {
+            color: self.color,
+            intensity: self.intensity,
         }
+    }
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
+        self.u_buffer.as_ref()
     }
 }
 
@@ -473,8 +506,37 @@ pub struct PointLight {
     pub(crate) u_buffers: Option<Vec<vk::Buffer>>,
     // write to this to upload values, only need to update desriptors to point at this once
     pub(crate) allocations: Option<Vec<Allocation>>,
-    pub(crate) descriptor_set: Vec<vk::DescriptorSet>,
+    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 }
+
+impl HasUBO for PointLight {
+    type UBOData = PointLightUBO;
+    type Context = Transform;
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
+        PointLightUBO {
+            position: context.position,
+            color: self.color,
+            brightness: self.brightness,
+            linear: self.linear,
+            quadratic: self.quadratic,
+            _padding: 0.0,
+        }
+    }
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocation: Vec<Allocation>) {
+        self.allocations = Some(allocation);
+        self.u_buffers = Some(buffer);
+    }
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
+        self.u_buffers.as_ref()
+    }
+}
+
+impl DescriptorPerObject for PointLight {
+    fn set_descriptor_sets(&mut self, sets: Vec<DescriptorSet>) {
+        self.descriptor_set = Some(sets);
+    }
+}
+
 impl PointLight {
     pub fn create(
         renderer: &mut Renderer,
@@ -482,157 +544,37 @@ impl PointLight {
         brightness: f32,
         linear: Option<f32>,
         quadratic: Option<f32>,
+        position: &mut Transform,
     ) -> Self {
         //TODO: this is even more bullshit, ill get to it eventually
-
-        let (u_buffers, u_allocations) = alloc_buffer(
-            &mut renderer.memory_allocator,
-            FRAMES_IN_FLIGHT,
-            size_of::<PointLightUBO>() as u64,
-            &renderer.device,
-            vk::SharingMode::EXCLUSIVE,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-            true,
-            bytemuck::bytes_of(&PointLightUBO::new()),
-        );
-
-        let mut pt_sets = vec![];
-
-        for i in 0..FRAMES_IN_FLIGHT {
-            let pt_set = unsafe {
-                renderer
-                    .device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool: renderer.descriptor_pool,
-                        p_set_layouts: [renderer.descriptor_layouts.point_light].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                renderer.device.update_descriptor_sets(
-                    &[
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: renderer.normal_buffers[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 1,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: renderer.position_buffers[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 2,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: renderer.color_buffers[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 0,
-                            dst_binding: 0,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_buffer_info: [vk::DescriptorBufferInfo {
-                                buffer: u_buffers[i],
-                                offset: 0,
-                                range: size_of::<PointLightUBO>() as u64,
-                            }]
-                            .as_ptr(),
-                            descriptor_count: 1,
-                            dst_binding: 3,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                    ],
-                    &[],
-                );
-            };
-            pt_sets.push(pt_set);
-        }
-
-        let mut point_sets = vec![];
-
-        // these need to be updated here since u can create models without calling
-        // update_descriptor_sets, i can probably remove the model section entirely from that
-        for i in 0..FRAMES_IN_FLIGHT {
-            let point_set = unsafe {
-                renderer
-                    .device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool: renderer.descriptor_pool,
-                        p_set_layouts: [renderer.descriptor_layouts.point_light].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                renderer.device.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet {
-                        dst_set: point_set,
-                        p_buffer_info: [vk::DescriptorBufferInfo {
-                            buffer: u_buffers[i],
-                            offset: 0,
-                            range: size_of::<ModelUBO>() as u64,
-                        }]
-                        .as_ptr(),
-                        descriptor_count: 1,
-                        dst_binding: 0,
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        dst_array_element: 0,
-                        ..Default::default()
-                    }],
-                    &[],
-                );
-            };
-
-            point_sets.push(point_set);
-        }
-        PointLight {
+        let mut light = PointLight {
             color,
             brightness,
             linear: linear.unwrap_or(3.00),
             quadratic: quadratic.unwrap_or(0.00),
             dirty: true,
-            u_buffers: Some(u_buffers),
-            allocations: Some(u_allocations),
-            descriptor_set: pt_sets,
-        }
-    }
-
-    pub(crate) fn as_point_ubo(&self, transform: Transform) -> PointLightUBO {
-        PointLightUBO {
-            position: transform.position,
-            color: self.color,
-            brightness: self.brightness,
-            linear: self.linear,
-            quadratic: self.quadratic,
-            _padding: 0.0,
-        }
+            u_buffers: None,
+            allocations: None,
+            descriptor_set: None,
+        };
+        light.populate_u_buffers(
+            &renderer.device,
+            renderer.allocator.clone(),
+            position,
+            FRAMES_IN_FLIGHT,
+        );
+        light.allocate_descriptor_sets(
+            &renderer.device,
+            renderer.lighting_per_light_pool_2,
+            renderer.descriptor_layouts.lighting_per_light_layout_2,
+            FRAMES_IN_FLIGHT as u32,
+        );
+        light.write_descriptor_sets(
+            &renderer.device,
+            light.descriptor_set.as_ref().unwrap(),
+            BINDINGS.point,
+        );
+        light
     }
 }
 
@@ -663,8 +605,8 @@ pub struct DirectionalLight {
     pub position: [f32; 4],
     pub color: [f32; 3],
 
-    pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
-    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
+    pub(crate) u_buffers: Option<Vec<vk::Buffer>>,
+    pub(crate) allocations: Option<Vec<Allocation>>,
 }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone, Debug)]
@@ -675,13 +617,44 @@ pub struct DirectionalLightUBO {
 }
 
 impl DirectionalLight {
-    pub fn new(position: [f32; 4], color: [f32; 3]) -> Self {
-        Self {
+    pub fn create(renderer: &mut Renderer, position: [f32; 4], color: [f32; 3]) -> Self {
+        let mut light = Self {
             position,
             color,
-            descriptor_set: None,
-            u_buffer: None,
+            u_buffers: None,
+            allocations: None,
+        };
+        light.populate_u_buffers(
+            &renderer.device,
+            renderer.allocator.clone(),
+            &mut (),
+            FRAMES_IN_FLIGHT,
+        );
+        light.write_descriptor_sets(
+            &renderer.device,
+            &mut renderer.lighting_per_frame_sets_1,
+            layouts::BINDINGS.directional,
+        );
+        light
+    }
+}
+
+impl HasUBO for DirectionalLight {
+    type UBOData = DirectionalLightUBO;
+    type Context = ();
+    #[allow(unused)]
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
+        Self::UBOData {
+            color: self.color,
+            position: self.position,
         }
+    }
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocation: Vec<Allocation>) {
+        self.u_buffers = Some(buffer);
+        self.allocations = Some(allocation);
+    }
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
+        self.u_buffers.as_ref()
     }
 }
 #[test]

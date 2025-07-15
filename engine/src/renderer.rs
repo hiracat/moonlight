@@ -1,5 +1,5 @@
 #![allow(clippy::cast_possible_truncation)]
-#![allow(dead_code)]
+use crate::layouts::{self, BINDINGS};
 use ash::vk::{self, Extent3D};
 use bytemuck::{bytes_of, Pod, Zeroable};
 use gpu_allocator::vulkan::*;
@@ -12,12 +12,13 @@ use std::{
     os::raw::c_void,
     ptr::{self},
     slice,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Instant,
 };
 use winit::dpi::PhysicalSize;
 
 const VALIDATION_ENABLE: bool = true;
+type SharedAllocator = Arc<Mutex<Allocator>>;
 
 use ultraviolet::{projection, Rotor3, Vec3};
 //INFO: idk how to fix this, one wants raw window handles and the other says no
@@ -47,18 +48,16 @@ pub struct Camera {
     pub(crate) u_buffer: Option<Vec<vk::Buffer>>,
     // write to this to upload values, only need to update desriptors to point at this once
     pub(crate) allocations: Option<Vec<Allocation>>,
-
-    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
 }
 
 impl Camera {
-    pub fn new(position: Vec3, fov: f32, near: f32, far: f32, window: &Arc<Window>) -> Self {
-        let size: [f32; 2] = window.inner_size().into();
+    pub fn create(position: Vec3, fov: f32, near: f32, far: f32, renderer: &mut Renderer) -> Self {
+        let size: [f32; 2] = renderer.window.inner_size().into();
         let aspect_ratio = size[0] / size[1];
         let fov_rads = fov * (std::f32::consts::PI / 180.0);
         let rotation = Rotor3::identity();
 
-        Self {
+        let mut camera = Self {
             pitch: 0.0,
             yaw: 0.0,
             position,
@@ -69,11 +68,29 @@ impl Camera {
             aspect_ratio,
 
             u_buffer: None,
-            descriptor_set: None,
             allocations: None,
-        }
+        };
+        camera.populate_u_buffers(
+            &renderer.device,
+            renderer.allocator.clone(),
+            &mut (),
+            FRAMES_IN_FLIGHT,
+        );
+        camera.write_descriptor_sets(
+            &renderer.device,
+            &renderer.geometry_per_frame_1,
+            BINDINGS.camera,
+        );
+        camera
     }
-    fn get_ubo_data(&self) -> CameraUBO {
+}
+
+impl HasUBO for Camera {
+    type UBOData = CameraUBO;
+    type Context = ();
+
+    #[allow(unused)]
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
         let forward = (-Vec3::unit_z()).rotated_by(self.rotation);
         let look_at = self.position + forward;
         CameraUBO {
@@ -85,17 +102,70 @@ impl Camera {
             proj: projection::perspective_vk(self.fov_rads, self.aspect_ratio, self.near, self.far),
         }
     }
-    fn populate_u_buffer(&mut self, device: &ash::Device, memory_allocator: &mut Allocator) {
-        let mut camera_buffers = vec![];
-        let mut camera_allocations = vec![];
-        for _ in 0..FRAMES_IN_FLIGHT {
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
+        self.u_buffer.as_ref()
+    }
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocations: Vec<Allocation>) {
+        self.u_buffer = Some(buffer);
+        self.allocations = Some(allocations);
+    }
+}
+
+pub(crate) trait HasUBO {
+    type UBOData: bytemuck::Pod + bytemuck::Zeroable;
+    type Context;
+
+    fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData;
+    fn set_ubo_buffers(&mut self, buffer: Vec<vk::Buffer>, allocation: Vec<Allocation>);
+    fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>>;
+
+    fn write_descriptor_sets(
+        &self,
+        device: &ash::Device,
+        descriptor_sets: &[vk::DescriptorSet],
+        dst_binding: u32,
+    ) {
+        let mut buffer_infos = vec![];
+        for i in 0..descriptor_sets.len() {
+            buffer_infos.push(vk::DescriptorBufferInfo {
+                buffer: self.get_ubo_buffers().as_ref().unwrap()[i],
+                offset: 0,
+                range: size_of::<Self::UBOData>() as u64,
+            })
+        }
+        let mut writes = vec![];
+        for i in 0..descriptor_sets.len() {
+            writes.push(vk::WriteDescriptorSet {
+                dst_set: descriptor_sets[i],
+                p_buffer_info: &buffer_infos[i],
+                descriptor_count: 1,
+                dst_binding,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                dst_array_element: 0,
+                ..Default::default()
+            })
+        }
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+    }
+
+    fn populate_u_buffers(
+        &mut self,
+        device: &ash::Device,
+        memory_allocator: SharedAllocator,
+        context: &mut Self::Context,
+        count: usize,
+    ) {
+        let mut uniform_buffer = vec![];
+        let mut memory = vec![];
+        for _ in 0..count {
             let buffer = unsafe {
                 device.create_buffer(
                     &vk::BufferCreateInfo {
-                        size: size_of::<CameraUBO>() as u64,
+                        size: size_of::<Self::UBOData>() as u64,
                         sharing_mode: vk::SharingMode::EXCLUSIVE,
-                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER
-                            | vk::BufferUsageFlags::TRANSFER_DST,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                         ..Default::default()
                     },
                     None,
@@ -105,37 +175,37 @@ impl Camera {
             let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
             let mut alloc = memory_allocator
+                .lock()
+                .unwrap()
                 .allocate(&AllocationCreateDesc {
-                    name: "ambient buffer",
+                    name: "uniform buffer",
                     requirements,
                     location: gpu_allocator::MemoryLocation::CpuToGpu,
                     linear: true,
                     allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                 })
                 .unwrap();
-            //HACK: needs wrapper, allocations is just to keep alloc from dropping
-
             alloc
                 .mapped_slice_mut()
                 .unwrap()
-                .write_all(bytes_of(&self.get_ubo_data()));
+                .write_all(bytes_of(&self.get_ubo_data(context)))
+                .unwrap();
             unsafe {
                 device
                     .bind_buffer_memory(buffer, alloc.memory(), alloc.offset())
                     .unwrap()
             }
 
-            camera_allocations.push(alloc);
-            camera_buffers.push(buffer);
+            memory.push(alloc);
+            uniform_buffer.push(buffer);
         }
-        dbg!(&camera_buffers);
-        self.u_buffer = Some(camera_buffers);
-        self.allocations = Some(camera_allocations);
+        dbg!(&uniform_buffer);
+        self.set_ubo_buffers(uniform_buffer, memory);
     }
 }
 
 pub fn alloc_buffer(
-    memory_allocator: &mut Allocator,
+    memory_allocator: SharedAllocator,
     buffer_count: usize,
     size: u64,
     device: &ash::Device,
@@ -144,6 +214,7 @@ pub fn alloc_buffer(
     location: gpu_allocator::MemoryLocation,
     linear: bool,
     data: &[u8],
+    name: &str,
 ) -> (Vec<vk::Buffer>, Vec<Allocation>) {
     let mut buffers = vec![];
     let mut allocations = vec![];
@@ -163,17 +234,18 @@ pub fn alloc_buffer(
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
         let mut alloc = memory_allocator
+            .lock()
+            .unwrap()
             .allocate(&AllocationCreateDesc {
-                name: "ambient buffer",
+                name,
                 requirements,
                 location,
                 linear,
                 allocation_scheme: AllocationScheme::GpuAllocatorManaged,
             })
             .unwrap();
-        //HACK: needs wrapper, allocations is just to keep alloc from dropping
 
-        alloc.mapped_slice_mut().unwrap().write_all(data);
+        alloc.mapped_slice_mut().unwrap().write_all(data).unwrap();
         unsafe {
             device
                 .bind_buffer_memory(buffer, alloc.memory(), alloc.offset())
@@ -189,7 +261,7 @@ pub fn alloc_buffer(
 
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
 #[repr(C)]
-struct CameraUBO {
+pub(crate) struct CameraUBO {
     view: ultraviolet::Mat4,
     proj: ultraviolet::Mat4,
 }
@@ -221,89 +293,152 @@ impl Vertex {
 
 pub const FRAMES_IN_FLIGHT: usize = 3;
 
-#[repr(C)]
-pub struct DummyVertex {
-    pub position: [f32; 2],
-} // not necessary, defined in shader
-impl DummyVertex {
-    pub const fn screen_quad() -> [DummyVertex; 6] {
-        [
-            DummyVertex {
-                position: [-1.0, -1.0],
-            },
-            DummyVertex {
-                position: [-1.0, 1.0],
-            },
-            DummyVertex {
-                position: [1.0, 1.0],
-            },
-            DummyVertex {
-                position: [-1.0, -1.0],
-            },
-            DummyVertex {
-                position: [1.0, 1.0],
-            },
-            DummyVertex {
-                position: [1.0, -1.0],
-            },
-        ]
-    }
-}
-
 pub struct Renderer {
-    pub window: Arc<Window>,
-    pub recreate_swapchain: bool,
-    pub memory_allocator: Allocator,
-    pub start_time: Instant,
-    pub pipelines: Vec<vk::Pipeline>,
-    pub(crate) descriptor_pool: vk::DescriptorPool,
-    pub(crate) command_pool: vk::CommandPool,
+    // needs to be kept alive, dont forget is very important
+    // anything that starts with ash:: and not vk:: impliment drop
+    _entry: ash::Entry,
+    instance: ash::Instance,
+    pub(crate) device: ash::Device,
+    pub(crate) physical_device: vk::PhysicalDevice,
+    debug_messenger: vk::DebugUtilsMessengerEXT,
 
+    pub(crate) swapchain_loader: ash::khr::swapchain::Device,
+    pub(crate) surface_loader: ash::khr::surface::Instance,
+    pub(crate) debug_utils_loader: ash::ext::debug_utils::Instance,
+
+    pub window: Arc<Window>,
+    surface: vk::SurfaceKHR,
+
+    pub framebuffer_resized: bool,
+    pub start_time: Instant,
+    swapchain_image_index: usize,
+    frame_counter: u64,
+    current_frame: usize,
+
+    render_pass: vk::RenderPass,
     pub(crate) queue: vk::Queue,
     pub(crate) queue_family_index: QueueFamilyIndex,
 
-    surface: vk::SurfaceKHR,
-    aspect_ratio: f32,
-    instance: ash::Instance,
-    pub(crate) descriptor_layouts: DescriptorLayouts,
+    // there needs to be a better way to do this,
+    // this is a struct that defines the layouts
+    // for each shader, but i would like shader
+    // reflection or something better, maybe a
+    // proper save system/serilization or
+    // something
+    pub(crate) descriptor_layouts: layouts::DescriptorLayouts,
 
-    pub(crate) physical_device: vk::PhysicalDevice,
-    pub(crate) device: ash::Device,
-    pub(crate) surface_loader: ash::khr::surface::Instance,
-    pub(crate) swapchain_loader: ash::khr::swapchain::Device,
-    pub(crate) debug_utils_loader: ash::ext::debug_utils::Instance,
-    pub(crate) swapchain_image_format: vk::SurfaceFormatKHR,
-    pub(crate) pipeline_layouts: Vec<vk::PipelineLayout>,
+    pub(crate) model_pool_0: vk::DescriptorPool,
+    pub(crate) geometry_per_frame_1: Vec<vk::DescriptorSet>,
 
-    debug_messenger: vk::DebugUtilsMessengerEXT,
-    frame_buffer_allocations: Vec<Allocation>,
-    uniform_buffer_allocations: Vec<Allocation>,
+    pub(crate) lighting_per_frame_sets_1: Vec<vk::DescriptorSet>,
 
-    // wait before writing to swapchain image
-    image_available_semaphore: Vec<vk::Semaphore>,
-    // wait before presenting
-    render_finished_semaphore: Vec<vk::Semaphore>,
-    // wait for the frame that was FRAMES_IN_FLIGHT frames ago, but has the same current_frame
-    // since modulo
-    in_flight_fence: Vec<vk::Fence>,
-    // in case it is still in use
-    swapchain_image_still_in_use: Vec<Option<vk::Fence>>,
+    pub(crate) lighting_per_light_pool_2: vk::DescriptorPool,
 
-    current_frame: usize,
-    frame_counter: u64,
+    graphics_pipelines: Vec<GraphicsPipeline>,
+    pub(crate) swapchain: SwapchainResources,
+    per_frame: Vec<PerFrame>,
+    pub(crate) allocator: SharedAllocator,
+}
 
+struct GraphicsPipeline {
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+}
+
+pub(crate) struct SwapchainResources {
     pub(crate) swapchain: vk::SwapchainKHR,
-    render_pass: vk::RenderPass,
-
-    viewport: vk::Viewport,
+    pub(crate) swapchain_image_format: vk::SurfaceFormatKHR,
+    // one per swapchain image
+    pub(crate) per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
 
     framebuffers: Vec<vk::Framebuffer>,
+    frame_buffer_allocations: Vec<Allocation>,
 
     pub(crate) color_buffers: Color,
     pub(crate) normal_buffers: Normal,
     pub(crate) position_buffers: Position,
 
-    swapchain_image_index: usize,
+    surface_loader: ash::khr::surface::Instance,
+    swapchain_loader: ash::khr::swapchain::Device,
+    device: ash::Device,
+    physical_device: vk::PhysicalDevice,
+    render_pass: vk::RenderPass,
+    surface: vk::SurfaceKHR,
+    per_swapchain_image_set_layout: vk::DescriptorSetLayout,
+    queue_family_indices: Vec<QueueFamilyIndex>,
+    allocator: SharedAllocator,
+}
+
+struct PerFrame {
+    pub(crate) command_pool: vk::CommandPool,
+
+    command_buffer: vk::CommandBuffer,
+    // wait before writing to swapchain image
+    image_available: vk::Semaphore,
+    // wait before presenting
+    render_finished: vk::Semaphore,
+    // wait for the frame that was FRAMES_IN_FLIGHT frames ago, but has the same current_frame
+    // since modulo
+    in_flight: vk::Fence,
+}
+
+impl PerFrame {
+    fn create(device: &ash::Device, queue_family_index: QueueFamilyIndex) -> Self {
+        let command_pool_create_info = vk::CommandPoolCreateInfo {
+            queue_family_index,
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            ..Default::default()
+        };
+        let command_pool = unsafe {
+            device
+                .create_command_pool(&command_pool_create_info, None)
+                .unwrap()
+        };
+        let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
+            command_pool,
+            command_buffer_count: 1,
+            level: vk::CommandBufferLevel::PRIMARY,
+            ..Default::default()
+        };
+        let command_buffer = unsafe {
+            device
+                .allocate_command_buffers(&command_buffer_alloc_info)
+                .unwrap()
+                .first()
+                .copied()
+                .unwrap()
+        };
+        let semaphore_create_info = vk::SemaphoreCreateInfo {
+            ..Default::default()
+        };
+        let image_available = unsafe {
+            device
+                .create_semaphore(&semaphore_create_info, None)
+                .expect("failed to create semaphore")
+        };
+        let render_finished = unsafe {
+            device
+                .create_semaphore(&semaphore_create_info, None)
+                .expect("failed to create semaphore")
+        };
+        let in_flight = unsafe {
+            device.create_fence(
+                &vk::FenceCreateInfo {
+                    flags: vk::FenceCreateFlags::SIGNALED,
+                    ..Default::default()
+                },
+                None,
+            )
+        }
+        .unwrap();
+        Self {
+            command_pool,
+            command_buffer,
+            image_available,
+            render_finished,
+            in_flight,
+        }
+    }
 }
 
 impl Drop for Renderer {
@@ -328,113 +463,54 @@ impl Renderer {
             return;
         }
 
+        let frame = &self.per_frame[self.current_frame];
         unsafe {
             self.device
-                .wait_for_fences(&[self.in_flight_fence[self.current_frame]], true, 0);
-            self.device
-                .reset_fences(&[self.in_flight_fence[self.current_frame]]);
+                .wait_for_fences(&[frame.in_flight], true, u64::MAX)
+                .unwrap();
         };
 
         self.frame_counter += 1;
         dbg!(self.frame_counter);
 
-        if self.recreate_swapchain {
-            // Use the new dimensions of the window.
-            dbg!(self.recreate_swapchain);
-            let new_images;
-            (self.swapchain, new_images) = create_swapchain(
-                &self.surface_loader,
-                &self.swapchain_loader,
-                self.physical_device,
-                Some(self.swapchain),
-                &self.window,
-                self.surface,
-                &self.swapchain_image_format,
-                &[self.queue_family_index],
-            );
-
-            for ele in self.frame_buffer_allocations.drain(..) {
-                self.memory_allocator.free(ele).unwrap()
-            }
-
-            // Because framebuffers contains a reference to the old swapchain, we need to
-            // recreate framebuffers as well.
-            (
-                self.framebuffers,
-                self.color_buffers,
-                self.normal_buffers,
-                self.position_buffers,
-                self.frame_buffer_allocations,
-            ) = create_framebuffers(
-                &self.device,
-                &new_images,
-                self.render_pass,
-                &mut self.memory_allocator,
-                window_size,
-                self.swapchain_image_format.format,
-            );
-
-            self.viewport = vk::Viewport {
-                width: self.window.inner_size().width as f32,
-                height: self.window.inner_size().height as f32,
-                ..Default::default()
-            };
-            self.aspect_ratio = self.viewport.width / self.viewport.height;
-
-            let camera = world
-                .resource_get_mut::<Camera>()
-                .expect("camera should definately exist or something is very wrong");
-            camera.aspect_ratio = self.aspect_ratio;
-            camera.populate_u_buffer(&self.device, &mut self.memory_allocator);
-
-            write_descriptor_sets(
-                world,
-                &self.device,
-                self.descriptor_pool,
-                &self.descriptor_layouts,
-                &self.color_buffers,
-                &self.normal_buffers,
-                &self.position_buffers,
-                new_images.len(),
-            );
-
-            self.recreate_swapchain = false;
-        }
-
-        // NOTE: RENDERING START
         let is_suboptimal;
         (self.swapchain_image_index, is_suboptimal) = unsafe {
             match self.swapchain_loader.acquire_next_image(
-                self.swapchain,
-                2 * 1_000_000_000,
-                self.image_available_semaphore[self.current_frame],
+                self.swapchain.swapchain,
+                u64::MAX,
+                frame.image_available,
                 vk::Fence::null(),
             ) {
                 Ok((index, suboptimal)) => (index as usize, suboptimal),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.recreate_swapchain = true;
+                    self.framebuffer_resized = true;
                     return;
                 }
                 Err(e) => panic!("failed to acquire next image: {e}"),
             }
         };
 
-        if let Some(previous_fence) = self.swapchain_image_still_in_use[self.swapchain_image_index]
-        {
-            if previous_fence != vk::Fence::null() {
-                unsafe {
-                    self.device
-                        .wait_for_fences(&[previous_fence], true, u64::MAX)
-                        .unwrap();
-                }
-            }
+        if self.framebuffer_resized {
+            // Use the new dimensions of the window.
+            self.swapchain.recreate(window_size);
+            world.resource_get_mut::<Camera>().unwrap().aspect_ratio =
+                window_size.width as f32 / window_size.height as f32
         }
-        self.swapchain_image_still_in_use[self.swapchain_image_index] =
-            Some(self.in_flight_fence[self.current_frame]);
-
         if is_suboptimal {
-            self.recreate_swapchain = true;
+            self.framebuffer_resized = true;
         }
+
+        // NOTE: RENDERING START
+
+        // if let Some(still_in_use) = self.swapchain_image_still_in_use[self.swapchain_image_index] {
+        //     unsafe {
+        //         self.device
+        //             .wait_for_fences(&[still_in_use], true, 3_000_000_000)
+        //             .unwrap();
+        //     }
+        // }
+        // self.swapchain_image_still_in_use[self.swapchain_image_index] =
+        //     Some(self.in_flight_fence[self.current_frame]);
 
         dbg!(self.current_frame);
 
@@ -443,13 +519,13 @@ impl Renderer {
                 .resource_get_mut::<Camera>()
                 .expect("should have a camera resource");
 
-            let data = camera.get_ubo_data();
+            let data = camera.get_ubo_data(&mut ());
             let data = bytes_of(&data);
             let mem = camera.allocations.as_mut().unwrap();
             for _ in 0..5 {
                 match mem[self.current_frame].mapped_slice_mut() {
                     Some(mut write) => {
-                        write.write(data);
+                        write.write(data).unwrap();
                         break;
                     }
                     None => {
@@ -462,13 +538,13 @@ impl Renderer {
         {
             let entities = world.query_entities::<PointLight>();
             for entity in entities {
-                let transform;
+                let mut transform;
                 if !world.has_component::<Transform>(entity) {
                     eprintln!(
                         "WARNING: light {:?} does not have transform component, giving identity matrix", entity
                     );
                     transform = Transform::new();
-                    world.component_add(entity, transform);
+                    world.component_add(entity, transform).unwrap();
                 } else {
                     transform = *world
                         .component_get::<Transform>(entity)
@@ -478,7 +554,7 @@ impl Renderer {
                     .component_get_mut::<PointLight>(entity)
                     .expect("ecs corrupted, panic");
 
-                let t = point_light.as_point_ubo(transform);
+                let t = point_light.get_ubo_data(&mut transform);
                 let data = bytes_of(&t);
                 let mem = point_light.allocations.as_mut().unwrap();
 
@@ -498,6 +574,7 @@ impl Renderer {
 
         {
             let entities = world.query_entities::<Model>();
+
             for entity in entities {
                 let mut transform;
                 if !world.has_component::<Transform>(entity) {
@@ -515,13 +592,13 @@ impl Renderer {
                     .component_get_mut::<Model>(entity)
                     .expect("ecs corrputed, panic");
 
-                let t = &transform.as_model_ubo();
+                let t = &model.get_ubo_data(&mut transform);
                 let data = bytes_of(t);
                 let mem = model.allocations.as_mut().unwrap();
                 for _ in 0..5 {
                     match mem[self.current_frame].mapped_slice_mut() {
                         Some(mut write) => {
-                            write.write(data);
+                            write.write(data).unwrap();
                             break;
                         }
                         None => {
@@ -532,17 +609,35 @@ impl Renderer {
             }
         }
 
-        let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
-            command_pool: self.command_pool,
-            command_buffer_count: 1,
-            level: vk::CommandBufferLevel::PRIMARY,
-            ..Default::default()
-        };
-        let command_buffer = unsafe {
+        unsafe { self.device.reset_fences(&[frame.in_flight]).unwrap() };
+
+        unsafe {
             self.device
-                .allocate_command_buffers(&command_buffer_alloc_info)
-                .unwrap()[0]
+                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+        }
+
+        unsafe {
+            self.device
+                .begin_command_buffer(
+                    frame.command_buffer,
+                    &vk::CommandBufferBeginInfo {
+                        p_inheritance_info: &vk::CommandBufferInheritanceInfo {
+                            pipeline_statistics: vk::QueryPipelineStatisticFlags::empty(),
+                            subpass: 0, // ingored
+                            render_pass: self.render_pass,
+                            framebuffer: self.swapchain.framebuffers[self.swapchain_image_index],
+                            query_flags: vk::QueryControlFlags::empty(),
+                            occlusion_query_enable: vk::FALSE,
+                            ..Default::default()
+                        },
+                        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
         };
+
         let clear_values = vec![
             vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -561,7 +656,7 @@ impl Renderer {
             },
             vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: f32::MAX,
+                    depth: 1.0,
                     stencil: 0,
                 },
             },
@@ -571,12 +666,13 @@ impl Renderer {
                 },
             },
         ];
+
         unsafe {
             self.device.cmd_begin_render_pass2(
-                command_buffer,
+                frame.command_buffer,
                 &vk::RenderPassBeginInfo {
                     render_pass: self.render_pass,
-                    framebuffer: self.framebuffers[self.swapchain_image_index],
+                    framebuffer: self.swapchain.framebuffers[self.swapchain_image_index],
                     p_clear_values: clear_values.as_ptr(),
                     clear_value_count: clear_values.len() as u32,
                     render_area: vk::Rect2D {
@@ -593,31 +689,42 @@ impl Renderer {
                     ..Default::default()
                 },
             );
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: window_size.width as f32,
+                height: window_size.height as f32,
+                max_depth: 1.0,
+                min_depth: 0.0,
+            };
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: window_size.width,
+                    height: window_size.height,
+                },
+            };
             self.device
-                .cmd_set_viewport(command_buffer, 0, &[self.viewport]);
+                .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
+            self.device
+                .cmd_set_scissor(frame.command_buffer, 0, &[scissor]);
             self.device.cmd_bind_pipeline(
-                command_buffer,
+                frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipelines[0],
+                self.graphics_pipelines[0].pipeline,
             );
         };
 
-        let camera_descripor_set = world
-            .resource_get::<Camera>()
-            .unwrap()
-            .descriptor_set
-            .as_ref()
-            .unwrap()
-            .clone();
+        let camera_descripor_set = &self.geometry_per_frame_1;
 
         let entities = world.query_mut::<Model>();
 
         for (_entity, model) in entities {
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
-                    command_buffer,
+                    frame.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline_layouts[0],
+                    self.graphics_pipelines[0].pipeline_layout,
                     0,
                     &[
                         camera_descripor_set[self.current_frame],
@@ -625,17 +732,23 @@ impl Renderer {
                     ],
                     &[],
                 );
-                self.device
-                    .cmd_bind_vertex_buffers(command_buffer, 0, &[model.vertex_buffer], &[]);
+
+                self.device.cmd_bind_vertex_buffers(
+                    frame.command_buffer,
+                    0,
+                    &[model.vertex_buffer],
+                    &[0],
+                );
+
                 self.device.cmd_bind_index_buffer(
-                    command_buffer,
+                    frame.command_buffer,
                     model.index_buffer,
                     0,
-                    vk::IndexType::UINT16,
+                    vk::IndexType::UINT32,
                 );
                 self.device.cmd_draw_indexed(
-                    command_buffer,
-                    model.index_buffer_len as u32,
+                    frame.command_buffer,
+                    model.index_count as u32,
                     1,
                     0,
                     0,
@@ -646,117 +759,110 @@ impl Renderer {
 
         unsafe {
             self.device
-                .cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+                .cmd_next_subpass(frame.command_buffer, vk::SubpassContents::INLINE);
             self.device.cmd_bind_pipeline(
-                command_buffer,
+                frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipelines[1],
+                self.graphics_pipelines[1].pipeline,
             );
-            let descriptor_set = world
-                .resource_get::<DirectionalLight>()
-                .unwrap()
-                .descriptor_set
-                .as_ref()
-                .unwrap()[self.current_frame];
+            let attachment_descriptor_set =
+                self.swapchain.per_swapchain_image_descriptor_sets[self.swapchain_image_index];
+            let light_per_frame_descriptor_set = self.lighting_per_frame_sets_1[self.current_frame];
             self.device.cmd_bind_descriptor_sets(
-                command_buffer,
+                frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layouts[1],
+                self.graphics_pipelines[1].pipeline_layout,
                 0,
-                &[descriptor_set],
+                &[attachment_descriptor_set, light_per_frame_descriptor_set],
                 &[],
             );
-            self.device.cmd_draw(command_buffer, 6, 1, 0, 0);
-        };
+            self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
 
-        unsafe {
             self.device.cmd_bind_pipeline(
-                command_buffer,
+                frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipelines[2],
+                self.graphics_pipelines[2].pipeline,
             );
-            let descriptor_set = world
-                .resource_get::<AmbientLight>()
-                .unwrap()
-                .descriptor_set
-                .as_ref()
-                .unwrap()[self.current_frame];
-            self.device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layouts[2],
-                0,
-                &[descriptor_set],
-                &[],
-            );
-            self.device.cmd_draw(command_buffer, 6, 1, 0, 0);
+            self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
         }
 
         unsafe {
             self.device.cmd_bind_pipeline(
-                command_buffer,
+                frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipelines[3],
+                self.graphics_pipelines[3].pipeline,
             );
             let entities = world.query_mut::<PointLight>();
             for (_entity, light) in entities {
                 self.device.cmd_bind_descriptor_sets(
-                    command_buffer,
+                    frame.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline_layouts[3],
+                    self.graphics_pipelines[3].pipeline_layout,
                     0,
-                    &[light.descriptor_set[self.current_frame]],
+                    &[light.descriptor_set.as_ref().unwrap()[self.current_frame]],
                     &[],
                 );
-                self.device.cmd_draw(command_buffer, 6, 1, 0, 0);
+                self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
             }
         }
         unsafe {
-            self.device.cmd_end_render_pass(command_buffer);
+            self.device.cmd_end_render_pass(frame.command_buffer);
+            self.device
+                .end_command_buffer(frame.command_buffer)
+                .unwrap();
         }
 
         let queue_submit_info = vk::SubmitInfo {
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.image_available_semaphore[self.current_frame],
+            p_wait_semaphores: &frame.image_available,
             p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             command_buffer_count: 1,
-            p_command_buffers: [command_buffer].as_ptr(),
-            p_signal_semaphores: &self.render_finished_semaphore[self.current_frame],
+            p_command_buffers: [frame.command_buffer].as_ptr(),
+            p_signal_semaphores: &frame.render_finished,
             signal_semaphore_count: 1,
             ..Default::default()
         };
 
         unsafe {
-            self.device.queue_submit(
-                self.queue,
-                &[queue_submit_info],
-                self.in_flight_fence[self.current_frame],
-            );
+            self.device
+                .queue_submit(self.queue, &[queue_submit_info], frame.in_flight)
+                .unwrap();
         }
 
         let mut present_results: [vk::Result; 1] = [Default::default(); 1];
         let present_info = vk::PresentInfoKHR {
-            p_wait_semaphores: &self.render_finished_semaphore[self.current_frame],
+            p_wait_semaphores: &frame.render_finished,
             wait_semaphore_count: 1,
-            p_swapchains: &self.swapchain,
+            p_swapchains: &self.swapchain.swapchain,
             swapchain_count: 1,
             p_image_indices: &(self.swapchain_image_index as u32),
             p_results: present_results.as_mut_ptr(),
             ..Default::default()
         };
 
-        unsafe {
+        let result = unsafe {
             self.swapchain_loader
-                .queue_present(self.queue, &present_info);
+                .queue_present(self.queue, &present_info)
+        };
+        let is_resized = match result {
+            Ok(_) => self.framebuffer_resized,
+            Err(vk_result) => match vk_result {
+                vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
+                _ => panic!("Failed to execute queue present."),
+            },
+        };
+        if is_resized {
+            self.framebuffer_resized = false;
+            self.swapchain.recreate(window_size);
         }
 
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn init(event_loop: &ActiveEventLoop, world: &mut World, window: &Arc<Window>) -> Self {
+    pub fn init(event_loop: &ActiveEventLoop, window: &Arc<Window>) -> Self {
         let start_time = Instant::now();
-        let entry = create_entry();
+        let entry = unsafe { ash::Entry::load().unwrap() };
         eprintln!("created entry");
         let instance = create_instance(&entry, event_loop);
         eprintln!("created instance");
@@ -765,13 +871,16 @@ impl Renderer {
                 &entry,
                 &instance,
                 // idk what to do about this, i need the raw handle
+                #[allow(deprecated)]
                 event_loop.raw_display_handle().unwrap(),
+                #[allow(deprecated)]
                 window.raw_window_handle().unwrap(),
                 None,
             )
             .unwrap();
             surface
         };
+
         eprintln!("created surface");
         //need to make this optional to put stuff inside
         if VALIDATION_ENABLE {}
@@ -779,7 +888,10 @@ impl Renderer {
         let debug_messenger = setup_debug_utils(&debug_utils_loader);
         eprintln!("set up debug utility");
 
-        let required_extensions = vec![ash::vk::KHR_SWAPCHAIN_NAME];
+        let required_extensions = vec![
+            ash::vk::KHR_SWAPCHAIN_NAME,
+            // ash::vk::KHR_SHADER_NON_SEMANTIC_INFO_NAME,
+        ];
         let (physical_device, queue_family_index) =
             create_physical_device(&instance, surface, &required_extensions);
         let (device, queue) = create_device(
@@ -790,9 +902,9 @@ impl Renderer {
         );
 
         let window_size = window.inner_size();
-        let aspect_ratio = window_size.width as f32 / window_size.height as f32;
+        let descriptor_set_layouts = layouts::DescriptorLayouts::init(&device);
 
-        let mut memory_allocator = Allocator::new(&AllocatorCreateDesc {
+        let memory_allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device,
@@ -803,207 +915,58 @@ impl Renderer {
         .unwrap();
 
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
-        let swapchain_image_format = unsafe {
-            surface_loader
-                .get_physical_device_surface_formats(physical_device, surface)
-                .unwrap()[0]
-        };
 
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
-        let (swapchain, swapchain_images) = create_swapchain(
+
+        let swapchain_image_formats = unsafe {
+            surface_loader
+                .get_physical_device_surface_formats(physical_device, surface)
+                .unwrap()
+        };
+        let image_format =
+            SwapchainResources::choose_swapchain_format(&swapchain_image_formats).unwrap();
+
+        let render_pass = create_renderpass(&device, image_format.format);
+        let shared_allocator = Arc::new(Mutex::new(memory_allocator));
+        let swapchain = SwapchainResources::create(
             &surface_loader,
             &swapchain_loader,
+            &device,
             physical_device,
+            render_pass,
             None,
-            window,
+            image_format,
+            window_size,
+            shared_allocator.clone(),
             surface,
-            &swapchain_image_format,
+            descriptor_set_layouts.lighting_per_swapchain_image_attachment_0,
             &[queue_family_index],
         );
 
-        let render_pass = create_renderpass(&device, swapchain_image_format.format);
-
-        let (
-            framebuffers,
-            color_buffers,
-            normal_buffers,
-            position_buffers,
-            frame_buffer_allocations,
-        ) = create_framebuffers(
-            &device,
-            &swapchain_images,
-            render_pass,
-            &mut memory_allocator,
-            window_size,
-            swapchain_image_format.format,
-        );
-        // used to keep uniform buffer memory alive
-        //
-        let mut uniform_buffer_allocations = vec![];
-        let mut directional_buffers = vec![];
-        if let Some(directional) = world.resource_get_mut::<DirectionalLight>() {
-            for _ in 0..swapchain_images.len() {
-                let buffer = unsafe {
-                    device.create_buffer(
-                        &vk::BufferCreateInfo {
-                            size: size_of::<DirectionalLightUBO>() as u64,
-                            sharing_mode: vk::SharingMode::EXCLUSIVE,
-                            usage: vk::BufferUsageFlags::UNIFORM_BUFFER
-                                | vk::BufferUsageFlags::TRANSFER_DST,
-                            ..Default::default()
-                        },
-                        None,
-                    )
-                }
-                .unwrap();
-                let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-                let mut alloc = memory_allocator
-                    .allocate(&AllocationCreateDesc {
-                        name: "directional buffer",
-                        requirements,
-                        location: gpu_allocator::MemoryLocation::CpuToGpu,
-                        linear: true,
-                        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-                    })
-                    .unwrap();
-
-                alloc
-                    .mapped_slice_mut()
-                    .unwrap()
-                    .write_all(bytes_of(&DirectionalLightUBO {
-                        color: directional.color,
-                        position: directional.position,
-                    }));
-                unsafe {
-                    device
-                        .bind_buffer_memory(buffer, alloc.memory(), alloc.offset())
-                        .unwrap()
-                }
-                //HACK: needs wrapper, allocations is just to keep alloc from dropping
-                uniform_buffer_allocations.push(alloc);
-
-                directional_buffers.push(buffer);
-            }
-            dbg!(&directional_buffers);
-            directional.u_buffer = Some(directional_buffers);
-        } else {
-            eprintln!("no  directional resource, skipping");
-        }
-
-        let mut ambient_allocations = vec![];
-        let mut ambient_buffers = vec![];
-        if let Some(ambient) = world.resource_get_mut::<AmbientLight>() {
-            for _ in 0..swapchain_images.len() {
-                let buffer = unsafe {
-                    device.create_buffer(
-                        &vk::BufferCreateInfo {
-                            size: size_of::<AmbientLightUBO>() as u64,
-                            sharing_mode: vk::SharingMode::EXCLUSIVE,
-                            usage: vk::BufferUsageFlags::UNIFORM_BUFFER
-                                | vk::BufferUsageFlags::TRANSFER_DST,
-                            ..Default::default()
-                        },
-                        None,
-                    )
-                }
-                .unwrap();
-                let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-
-                let mut alloc = memory_allocator
-                    .allocate(&AllocationCreateDesc {
-                        name: "ambient buffer",
-                        requirements,
-                        location: gpu_allocator::MemoryLocation::CpuToGpu,
-                        linear: true,
-                        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-                    })
-                    .unwrap();
-                //HACK: needs wrapper, allocations is just to keep alloc from dropping
-
-                alloc
-                    .mapped_slice_mut()
-                    .unwrap()
-                    .write_all(bytes_of(&AmbientLightUBO {
-                        color: ambient.color,
-                        intensity: ambient.intensity,
-                    }));
-                unsafe {
-                    device
-                        .bind_buffer_memory(buffer, alloc.memory(), alloc.offset())
-                        .unwrap()
-                }
-
-                dbg!(&ambient_buffers);
-                ambient_allocations.push(alloc);
-                ambient_buffers.push(buffer);
-            }
-            ambient.u_buffer = Some(ambient_buffers);
-            ambient.allocations = Some(ambient_allocations);
-        } else {
-            eprintln!("no  directional resource, skipping");
-        }
-
-        let camera = world
-            .resource_get_mut::<Camera>()
-            .expect("should create camera resource");
-        camera.populate_u_buffer(&device, &mut memory_allocator);
-
-        let descriptor_layouts = DescriptorLayouts::init(&device);
-        let (pipelines, pipeline_layouts) = create_graphics_pipelines(
+        let pipelines = create_graphics_pipelines(
             &device,
             render_pass,
             GEOMETRY_SUBPASS,
             LIGHTING_SUBPASS,
-            &descriptor_layouts,
+            &descriptor_set_layouts,
         );
 
-        // Dynamic viewports allow us to recreate just the viewport when the window is resized.
-        // Otherwise we would have to recreate the whole pipeline.
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: window_size.width as f32,
-            height: window_size.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let mut frames_resources_free = vec![];
+        eprintln!("creating sync objects");
+
+        let mut per_frame = vec![];
         for _ in 0..FRAMES_IN_FLIGHT {
-            let fence = unsafe {
-                device.create_fence(
-                    &vk::FenceCreateInfo {
-                        flags: vk::FenceCreateFlags::SIGNALED,
-                        ..Default::default()
-                    },
-                    None,
-                )
-            }
-            .unwrap();
-            frames_resources_free.push(fence);
+            per_frame.push(PerFrame::create(&device, queue_family_index));
         }
 
-        // 15 is my estimate for how many sets per frame, based on 4 pipelines, and varying numbers
-        // per pipeline, 2 is the safety margin
-        //
-        let required_sets: u32 = (15.0 * FRAMES_IN_FLIGHT as f32 * 1.5) as u32;
-
-        let pool_sizes = vec![
-            vk::DescriptorPoolSize {
-                descriptor_count: 4 * required_sets,
-                ty: vk::DescriptorType::INPUT_ATTACHMENT,
-            },
-            vk::DescriptorPoolSize {
-                descriptor_count: 3 * required_sets,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-            },
-        ];
-
+        let pool_sizes = vec![vk::DescriptorPoolSize {
+            descriptor_count: 5,
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+        }];
         let descriptor_pool = unsafe {
             device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo {
-                        max_sets: required_sets,
+                        max_sets: FRAMES_IN_FLIGHT as u32,
                         p_pool_sizes: pool_sizes.as_ptr(),
                         pool_size_count: pool_sizes.len() as u32,
                         ..Default::default()
@@ -1013,630 +976,162 @@ impl Renderer {
                 .unwrap()
         };
 
-        write_descriptor_sets(
-            world,
-            &device,
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            p_set_layouts: [descriptor_set_layouts.geometry_per_frame_layout_1; FRAMES_IN_FLIGHT]
+                .as_ptr(),
             descriptor_pool,
-            &descriptor_layouts,
-            &color_buffers,
-            &normal_buffers,
-            &position_buffers,
-            swapchain_images.len(),
-        );
-
-        let command_pool_create_info = vk::CommandPoolCreateInfo {
-            queue_family_index,
+            descriptor_set_count: FRAMES_IN_FLIGHT as u32,
             ..Default::default()
         };
-        let command_pool = unsafe {
+        let sets = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
+
+        let pool_sizes = vec![vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 3,
+        }];
+        let per_object_create_info = vk::DescriptorPoolCreateInfo {
+            max_sets: 100,
+            p_pool_sizes: pool_sizes.as_ptr(),
+            pool_size_count: pool_sizes.len() as u32,
+            ..Default::default()
+        };
+        let lighting_per_light = unsafe {
             device
-                .create_command_pool(&command_pool_create_info, None)
+                .create_descriptor_pool(&per_object_create_info, None)
+                .unwrap()
+        };
+        let geometry_per_model = unsafe {
+            device
+                .create_descriptor_pool(&per_object_create_info, None)
                 .unwrap()
         };
 
-        let semaphore_create_info = vk::SemaphoreCreateInfo {
+        let lighting_per_frame_pool_sizes = vec![vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 6,
+        }];
+        let lighting_per_frame_create_info = vk::DescriptorPoolCreateInfo {
+            max_sets: FRAMES_IN_FLIGHT as u32,
+            p_pool_sizes: lighting_per_frame_pool_sizes.as_ptr(),
+            pool_size_count: lighting_per_frame_pool_sizes.len() as u32,
             ..Default::default()
         };
-        let mut image_available_semaphore = vec![];
-        for _ in 0..FRAMES_IN_FLIGHT {
-            unsafe {
-                image_available_semaphore.push(
-                    device
-                        .create_semaphore(&semaphore_create_info, None)
-                        .expect("failed to create semaphore"),
-                );
-            }
-        }
-        let mut render_finished_semaphore = vec![];
-        for _ in 0..FRAMES_IN_FLIGHT {
-            unsafe {
-                render_finished_semaphore.push(
-                    device
-                        .create_semaphore(&semaphore_create_info, None)
-                        .expect("failed to create semaphore"),
-                );
-            }
-        }
+        let lighting_per_frame_pool = unsafe {
+            device
+                .create_descriptor_pool(&lighting_per_frame_create_info, None)
+                .unwrap()
+        };
 
-        let mut swapchain_image_still_in_use = vec![];
-        for _ in 0..FRAMES_IN_FLIGHT {
-            swapchain_image_still_in_use.push(None);
-        }
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            p_set_layouts: [descriptor_set_layouts.lighting_per_frame_layout_1; FRAMES_IN_FLIGHT]
+                .as_ptr(),
+            descriptor_pool: lighting_per_frame_pool,
+            descriptor_set_count: FRAMES_IN_FLIGHT as u32,
+            ..Default::default()
+        };
+        let lighting_per_frame = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
 
         Renderer {
-            swapchain_image_still_in_use,
-            render_finished_semaphore,
-            image_available_semaphore,
+            model_pool_0: geometry_per_model,
+            lighting_per_light_pool_2: lighting_per_light,
+            lighting_per_frame_sets_1: lighting_per_frame,
+            _entry: entry,
             debug_messenger,
             debug_utils_loader,
             instance,
-            descriptor_layouts,
-            recreate_swapchain: false,
+            descriptor_layouts: descriptor_set_layouts,
+            framebuffer_resized: false,
             current_frame: 0,
             frame_counter: 0,
             swapchain,
-            framebuffers,
-            pipeline_layouts,
-            in_flight_fence: frames_resources_free,
-            frame_buffer_allocations,
-            swapchain_image_format,
             render_pass,
-            uniform_buffer_allocations,
-            memory_allocator,
-            viewport,
+            allocator: shared_allocator,
+            geometry_per_frame_1: sets,
             surface,
             surface_loader,
-            swapchain_loader,
-            command_pool,
+            swapchain_loader: swapchain_loader.clone(),
             device,
             queue,
             start_time,
             window: window.clone(),
-            aspect_ratio,
-            descriptor_pool,
             queue_family_index,
             physical_device,
+            graphics_pipelines: pipelines,
+            per_frame,
 
-            color_buffers,
-            normal_buffers,
-            position_buffers,
-            pipelines,
             swapchain_image_index: 0,
         }
     }
 }
 
-fn create_swapchain(
-    surface_loader: &ash::khr::surface::Instance,
-    swapchain_loader: &ash::khr::swapchain::Device,
-    physical_device: vk::PhysicalDevice,
-    previous_swapchain: Option<vk::SwapchainKHR>,
-    window: &Arc<Window>,
-    surface: vk::SurfaceKHR,
-    image_format: &vk::SurfaceFormatKHR,
-    queue_family_indices: &[QueueFamilyIndex],
-) -> (vk::SwapchainKHR, Vec<vk::Image>) {
-    let window_size: [u32; 2] = window.inner_size().into();
-    let window_size = vk::Extent2D {
-        width: window_size[0],
-        height: window_size[1],
-    };
-
-    let capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
-    }
-    .unwrap();
-
-    let image_count = if capabilities.min_image_count == capabilities.max_image_count {
-        capabilities.max_image_array_layers
-    } else {
-        capabilities.min_image_count + 1
-    };
-
-    let swapchain_create_info = vk::SwapchainCreateInfoKHR {
-        image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-        surface,
-        min_image_count: image_count,
-        image_sharing_mode: vk::SharingMode::EXCLUSIVE,
-        image_color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-        image_format: image_format.format,
-        image_extent: window_size,
-        present_mode: vk::PresentModeKHR::FIFO,
-        pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
-        old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
-        composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
-        clipped: vk::TRUE,
-        image_array_layers: 1,
-        p_queue_family_indices: queue_family_indices.as_ptr(),
-        queue_family_index_count: queue_family_indices.len() as u32,
-
-        ..Default::default()
-    };
-
-    let swapchain = unsafe {
-        swapchain_loader
-            .create_swapchain(&swapchain_create_info, None)
-            .unwrap()
-    };
-    let swapchain_images = unsafe {
-        swapchain_loader
-            .get_swapchain_images(swapchain)
-            .expect("Failed to get Swapchain Images.")
-    };
-    (swapchain, swapchain_images)
-}
-
-#[derive(Debug)]
-pub(crate) struct DescriptorLayouts {
-    pub(crate) model: vk::DescriptorSetLayout,
-    pub(crate) camera: vk::DescriptorSetLayout,
-    pub(crate) directional_light: vk::DescriptorSetLayout,
-    pub(crate) ambient_light: vk::DescriptorSetLayout,
-    pub(crate) point_light: vk::DescriptorSetLayout,
-}
-
-impl DescriptorLayouts {
-    fn init(device: &ash::Device) -> Self {
-        let model_camera_bindings = vec![vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::VERTEX,
-            ..Default::default()
-        }];
-
-        let camera_layout = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: model_camera_bindings.as_ptr(),
-            binding_count: model_camera_bindings.len() as u32,
-            ..Default::default()
-        };
-        let model_layout = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: model_camera_bindings.as_ptr(),
-            binding_count: model_camera_bindings.len() as u32,
-            ..Default::default()
-        };
-
-        let ambient_bindings = vec![
-            //color attachment
-            vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            // normals
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            //ambient light data
-            vk::DescriptorSetLayoutBinding {
-                binding: 2,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-        ];
-
-        let ambient_layout = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: ambient_bindings.as_ptr(),
-            binding_count: ambient_bindings.len() as u32,
-            ..Default::default()
-        };
-        let point_layout = vec![
-            //color attachment
-            vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            // normals
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            // position
-            vk::DescriptorSetLayoutBinding {
-                binding: 2,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            //point light data
-            vk::DescriptorSetLayoutBinding {
-                binding: 3,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-        ];
-
-        let point_layout = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: point_layout.as_ptr(),
-            binding_count: point_layout.len() as u32,
-            ..Default::default()
-        };
-        let directional_bindings = vec![
-            //color attachment
-            vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            // normals
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-            //directional light data
-            vk::DescriptorSetLayoutBinding {
-                binding: 2,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            },
-        ];
-
-        let directional_layout = vk::DescriptorSetLayoutCreateInfo {
-            p_bindings: directional_bindings.as_ptr(),
-            binding_count: directional_bindings.len() as u32,
-            ..Default::default()
-        };
-
-        let point = unsafe {
-            device
-                .create_descriptor_set_layout(&point_layout, None)
-                .unwrap()
-        };
-        let directional = unsafe {
-            device
-                .create_descriptor_set_layout(&directional_layout, None)
-                .unwrap()
-        };
-        let ambient = unsafe {
-            device
-                .create_descriptor_set_layout(&ambient_layout, None)
-                .unwrap()
-        };
-        let model = unsafe {
-            device
-                .create_descriptor_set_layout(&model_layout, None)
-                .unwrap()
-        };
-        let camera = unsafe {
-            device
-                .create_descriptor_set_layout(&camera_layout, None)
-                .unwrap()
-        };
-
-        DescriptorLayouts {
-            model,
-            camera,
-            point_light: point,
-            directional_light: directional,
-            ambient_light: ambient,
-        }
-    }
-}
+/// ## Args
+/// - **descriptor_pool**: Pool for descriptor set allocation
+/// - **attachment_layout**: Descriptor set layout defining binding structure
+/// - **attachments**: Interleaved attachment views (e.g., `[color0, normal0, pos0, color1, ...]`)
+/// - **binding_index**: Binding indices for each attachment type (length must evenly divide
+/// attachments.len())
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn write_descriptor_sets(
-    world: &mut World,
-
+pub(crate) fn create_attachment_descriptor_sets(
     device: &ash::Device,
     descriptor_pool: vk::DescriptorPool,
-    descriptor_layouts: &DescriptorLayouts,
+    attachment_layout: vk::DescriptorSetLayout,
+    attachments: &[vk::ImageView],
+    binding_indices: &[u32],
+) -> Vec<vk::DescriptorSet> {
+    debug_assert_eq!(
+        attachments.len() % binding_indices.len(),
+        0,
+        "attachments.len() ({}) must be evenly divisable by binding_index.len() ({})",
+        attachments.len(),
+        binding_indices.len()
+    );
+    debug_assert!(
+        attachments.len() >= binding_indices.len(),
+        "Must have at least {} attachments for one complete frame",
+        binding_indices.len()
+    );
 
-    color_buffer: &[vk::ImageView],
-    normal_buffer: &[vk::ImageView],
-    position_buffer: &[vk::ImageView],
+    let frame_count = attachments.len() / binding_indices.len();
 
-    swapchain_image_count: usize,
-) {
-    let models = world.query_mut::<Model>();
-    for (_entity, model) in models {
-        let mut model_sets = vec![];
-        for i in 0..FRAMES_IN_FLIGHT {
-            let model_set = unsafe {
-                device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool,
-                        p_set_layouts: [descriptor_layouts.model].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet {
-                        dst_set: model_set,
-                        p_buffer_info: [vk::DescriptorBufferInfo {
-                            buffer: model.u_buffer.as_ref().unwrap()[i],
-                            offset: 0,
-                            range: size_of::<ModelUBO>() as u64,
-                        }]
-                        .as_ptr(),
-                        descriptor_count: 1,
-                        dst_binding: 0,
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        dst_array_element: 0,
-                        ..Default::default()
-                    }],
-                    &[],
-                );
-            };
+    let set_layouts = vec![attachment_layout; frame_count];
 
-            model_sets.push(model_set);
-        }
-        model.descriptor_set = Some(model_sets);
-    }
-    eprintln!("where is the error?????");
+    let descriptor_sets = unsafe {
+        device
+            .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
+                descriptor_pool,
+                p_set_layouts: set_layouts.as_ptr(),
+                descriptor_set_count: set_layouts.len() as u32,
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let mut descriptor_writes = vec![];
+    for i in 0..attachments.len() {
+        let frame_index = i / binding_indices.len(); // Which frame/set this attachment belongs to
+        let binding_index = i % binding_indices.len(); // Which binding within that frame
 
-    if let Some(camera) = world.resource_get_mut::<Camera>() {
-        let mut camera_sets = vec![];
-        for i in 0..FRAMES_IN_FLIGHT {
-            let camera_set = unsafe {
-                device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool,
-                        p_set_layouts: [descriptor_layouts.camera].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet {
-                        dst_set: camera_set,
-                        p_buffer_info: [vk::DescriptorBufferInfo {
-                            buffer: camera.u_buffer.as_ref().unwrap()[i],
-                            offset: 0,
-                            range: size_of::<CameraUBO>() as u64,
-                        }]
-                        .as_ptr(),
-                        descriptor_count: 1,
-                        dst_binding: 0,
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        dst_array_element: 0,
-                        ..Default::default()
-                    }],
-                    &[],
-                );
-            };
-            camera_sets.push(camera_set);
-        }
-        camera.descriptor_set = Some(camera_sets);
+        descriptor_writes.push(vk::WriteDescriptorSet {
+            dst_set: descriptor_sets[frame_index],
+            p_image_info: &vk::DescriptorImageInfo {
+                sampler: vk::Sampler::null(),
+                image_view: attachments[i],
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            },
+            descriptor_count: 1,
+            dst_binding: binding_indices[binding_index],
+            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+            dst_array_element: 0,
+            ..Default::default()
+        })
     }
 
-    let point_lights = world.query_mut::<PointLight>();
-    for (_entity, point) in point_lights {
-        let mut pt_sets = vec![];
-        for i in 0..FRAMES_IN_FLIGHT {
-            let pt_set = unsafe {
-                device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool,
-                        p_set_layouts: [descriptor_layouts.point_light].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: normal_buffer[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 1,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: position_buffer[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 2,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: color_buffer[i],
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            },
-                            descriptor_count: 0,
-                            dst_binding: 0,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: pt_set,
-                            p_buffer_info: [vk::DescriptorBufferInfo {
-                                buffer: point.u_buffers.as_ref().unwrap()[i],
-                                offset: 0,
-                                range: size_of::<PointLightUBO>() as u64,
-                            }]
-                            .as_ptr(),
-                            descriptor_count: 1,
-                            dst_binding: 3,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                    ],
-                    &[],
-                );
-            };
-            pt_sets.push(pt_set);
-        }
-        point.descriptor_set = pt_sets;
-    }
-    if let Some(ambient) = world.resource_get_mut::<AmbientLight>() {
-        let mut ambient_sets = Vec::new();
-        for i in 0..FRAMES_IN_FLIGHT {
-            let ambient_set = unsafe {
-                device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool,
-                        p_set_layouts: [descriptor_layouts.ambient_light].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[
-                        vk::WriteDescriptorSet {
-                            dst_set: ambient_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                                image_view: color_buffer[i],
-                                ..Default::default()
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 0,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: ambient_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                                image_view: normal_buffer[i],
-                                ..Default::default()
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 1,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: ambient_set,
-                            p_buffer_info: [vk::DescriptorBufferInfo {
-                                buffer: ambient.u_buffer.as_ref().unwrap()[i],
-                                offset: 0,
-                                range: size_of::<AmbientLightUBO>() as u64,
-                            }]
-                            .as_ptr(),
-                            descriptor_count: 1,
-                            dst_binding: 2,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                    ],
-                    &[],
-                );
-            };
+    let writes = &descriptor_writes;
+    dbg!(writes);
 
-            ambient_sets.push(ambient_set);
-        }
-        ambient.descriptor_set = Some(ambient_sets);
-    }
+    unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
 
-    let directional_light = world.resource_get_mut::<DirectionalLight>();
-    if let Some(dir_light) = directional_light {
-        let mut dir_sets = Vec::new();
-        for i in 0..FRAMES_IN_FLIGHT {
-            let directional_set = unsafe {
-                device
-                    .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                        descriptor_pool,
-                        p_set_layouts: [descriptor_layouts.ambient_light].as_ptr(),
-                        descriptor_set_count: 1,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            }[0];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[
-                        vk::WriteDescriptorSet {
-                            dst_set: directional_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                                image_view: color_buffer[i],
-                                ..Default::default()
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 0,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: directional_set,
-                            p_image_info: &vk::DescriptorImageInfo {
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                                image_view: normal_buffer[i],
-                                ..Default::default()
-                            },
-                            descriptor_count: 1,
-                            dst_binding: 1,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                        vk::WriteDescriptorSet {
-                            dst_set: directional_set,
-                            p_buffer_info: [vk::DescriptorBufferInfo {
-                                buffer: dir_light.u_buffer.as_ref().unwrap()[i],
-                                offset: 0,
-                                range: size_of::<DirectionalLightUBO>() as u64,
-                            }]
-                            .as_ptr(),
-                            descriptor_count: 1,
-                            dst_binding: 2,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                            dst_array_element: 0,
-                            ..Default::default()
-                        },
-                    ],
-                    &[],
-                );
-            }
-            dir_sets.push(directional_set);
-        }
-        dir_light.descriptor_set = Some(dir_sets);
-    }
+    descriptor_sets
 }
 
 type Color = Vec<vk::ImageView>;
@@ -1646,8 +1141,8 @@ pub fn create_framebuffers(
     device: &ash::Device,
     swapchain_images: &[vk::Image],
     render_pass: vk::RenderPass,
-    allocator: &mut Allocator,
-    swapchain_image_extent: PhysicalSize<u32>,
+    allocator: SharedAllocator,
+    swapchain_image_extent: vk::Extent2D,
     swapchain_image_format: vk::Format,
     // HACK: the vec of allocations is to keep the allocatiosn from dropping and freeing underlying
     // memory, this should be replaced with some kind of wrapper or just one allocation per
@@ -1699,6 +1194,8 @@ pub fn create_framebuffers(
 
         let depth_requirements = unsafe { device.get_image_memory_requirements(depth_image) };
         let depth_allocation = allocator
+            .lock()
+            .unwrap()
             .allocate(&AllocationCreateDesc {
                 requirements: depth_requirements,
                 name: "depth image in create_framebuffers",
@@ -1708,11 +1205,13 @@ pub fn create_framebuffers(
             })
             .unwrap();
         unsafe {
-            device.bind_image_memory(
-                depth_image,
-                depth_allocation.memory(),
-                depth_allocation.offset(),
-            )
+            device
+                .bind_image_memory(
+                    depth_image,
+                    depth_allocation.memory(),
+                    depth_allocation.offset(),
+                )
+                .unwrap()
         };
 
         let color_create_info = vk::ImageCreateInfo {
@@ -1738,6 +1237,8 @@ pub fn create_framebuffers(
 
         let color_requirements = unsafe { device.get_image_memory_requirements(color_image) };
         let color_allocation = allocator
+            .lock()
+            .unwrap()
             .allocate(&AllocationCreateDesc {
                 requirements: color_requirements,
                 name: "color image allocation in create_framebuffers",
@@ -1747,11 +1248,13 @@ pub fn create_framebuffers(
             })
             .unwrap();
         unsafe {
-            device.bind_image_memory(
-                color_image,
-                color_allocation.memory(),
-                color_allocation.offset(),
-            )
+            device
+                .bind_image_memory(
+                    color_image,
+                    color_allocation.memory(),
+                    color_allocation.offset(),
+                )
+                .unwrap()
         };
 
         let normal_create_info = vk::ImageCreateInfo {
@@ -1773,6 +1276,8 @@ pub fn create_framebuffers(
 
         let normal_requirements = unsafe { device.get_image_memory_requirements(normal_image) };
         let normal_allocation = allocator
+            .lock()
+            .unwrap()
             .allocate(&AllocationCreateDesc {
                 requirements: normal_requirements,
                 name: "normal image allocation in create_framebuffers",
@@ -1782,11 +1287,13 @@ pub fn create_framebuffers(
             })
             .unwrap();
         unsafe {
-            device.bind_image_memory(
-                normal_image,
-                normal_allocation.memory(),
-                normal_allocation.offset(),
-            )
+            device
+                .bind_image_memory(
+                    normal_image,
+                    normal_allocation.memory(),
+                    normal_allocation.offset(),
+                )
+                .unwrap()
         };
 
         // HACK: needs to be removed, you can reconstruct the worldspace coordinates from the depth
@@ -1810,6 +1317,8 @@ pub fn create_framebuffers(
 
         let position_requirements = unsafe { device.get_image_memory_requirements(position_image) };
         let position_allocation = allocator
+            .lock()
+            .unwrap()
             .allocate(&AllocationCreateDesc {
                 requirements: position_requirements,
                 name: "normal image allocation in create_framebuffers",
@@ -1819,11 +1328,13 @@ pub fn create_framebuffers(
             })
             .unwrap();
         unsafe {
-            device.bind_image_memory(
-                position_image,
-                position_allocation.memory(),
-                position_allocation.offset(),
-            )
+            device
+                .bind_image_memory(
+                    position_image,
+                    position_allocation.memory(),
+                    position_allocation.offset(),
+                )
+                .unwrap()
         };
 
         //HACK: keeping stuff around
@@ -1967,7 +1478,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // color attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            store_op: vk::AttachmentStoreOp::STORE,
             format: vk::Format::A2B10G10R10_UNORM_PACK32,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -1977,7 +1488,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // normal attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            store_op: vk::AttachmentStoreOp::STORE,
             format: vk::Format::R16G16B16A16_SFLOAT,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -1997,7 +1508,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // position attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            store_op: vk::AttachmentStoreOp::STORE,
             format: vk::Format::R32G32B32A32_SFLOAT,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -2088,10 +1599,12 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER
             | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
 
-        src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
+            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+
         dst_access_mask: vk::AccessFlags::INPUT_ATTACHMENT_READ
             | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        ..Default::default()
+        dependency_flags: vk::DependencyFlags::BY_REGION,
     }];
 
     let renderpass_create_info = vk::RenderPassCreateInfo {
@@ -2110,11 +1623,10 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
             .unwrap()
     }
 }
-use crate::components::{DirectionalLight, DirectionalLightUBO, PointLightUBO};
 
 use crate::{
-    components::{AmbientLight, AmbientLightUBO, Transform},
-    components::{Model, ModelUBO, PointLight},
+    components::Transform,
+    components::{Model, PointLight},
     ecs::World,
 };
 
@@ -2136,7 +1648,7 @@ fn create_shader_module(device: &ash::Device, path: &str) -> vk::ShaderModule {
     };
     unsafe { device.create_shader_module(&module, None).unwrap() }
 }
-static ENTRY_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+static SHADER_ENTRY_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
 #[allow(clippy::too_many_lines)]
 fn create_graphics_pipelines(
@@ -2144,8 +1656,8 @@ fn create_graphics_pipelines(
     render_pass: vk::RenderPass,
     deferred_subpass: SubpassIndex,
     lighting_subpass: SubpassIndex,
-    descriptor_layouts: &DescriptorLayouts,
-) -> (Vec<vk::Pipeline>, Vec<vk::PipelineLayout>) {
+    descriptor_layouts: &layouts::DescriptorLayouts,
+) -> Vec<GraphicsPipeline> {
     let deferred_vert = create_shader_module(device, "shaders/deferred_vert.spv");
     let deferred_frag = create_shader_module(device, "shaders/deferred_frag.spv");
     let directional_vert = create_shader_module(device, "shaders/directional_vert.spv");
@@ -2161,18 +1673,21 @@ fn create_graphics_pipelines(
         input_rate: vk::VertexInputRate::VERTEX,
     }];
     let vertex_attributes = vec![
+        // position
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
             format: vk::Format::R32G32B32_SFLOAT,
             offset: 0,
         },
+        // normal
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
             format: vk::Format::R32G32B32_SFLOAT,
             offset: 12,
         },
+        // color
         vk::VertexInputAttributeDescription {
             location: 2,
             binding: 0,
@@ -2180,6 +1695,7 @@ fn create_graphics_pipelines(
             offset: 24,
         },
     ];
+
     let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
         p_vertex_binding_descriptions: vertex_bindings.as_ptr(),
         p_vertex_attribute_descriptions: vertex_attributes.as_ptr(),
@@ -2188,18 +1704,20 @@ fn create_graphics_pipelines(
         ..Default::default()
     };
 
+    // required even if empty
     let dummy_vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+    let dummy_vertex_input_state = [dummy_vertex_input_state].as_ptr();
 
     let deferred_stages = [
         vk::PipelineShaderStageCreateInfo {
             module: deferred_vert,
             stage: vk::ShaderStageFlags::VERTEX,
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             ..Default::default()
         },
         vk::PipelineShaderStageCreateInfo {
             module: deferred_frag,
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             stage: vk::ShaderStageFlags::FRAGMENT,
             ..Default::default()
         },
@@ -2208,12 +1726,12 @@ fn create_graphics_pipelines(
     let directional_stages = [
         vk::PipelineShaderStageCreateInfo {
             module: directional_vert,
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             stage: vk::ShaderStageFlags::VERTEX,
             ..Default::default()
         },
         vk::PipelineShaderStageCreateInfo {
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             module: directional_frag,
             stage: vk::ShaderStageFlags::FRAGMENT,
             ..Default::default()
@@ -2221,13 +1739,13 @@ fn create_graphics_pipelines(
     ];
     let ambient_stages = [
         vk::PipelineShaderStageCreateInfo {
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             module: ambient_vert,
             stage: vk::ShaderStageFlags::VERTEX,
             ..Default::default()
         },
         vk::PipelineShaderStageCreateInfo {
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             module: ambient_frag,
             stage: vk::ShaderStageFlags::FRAGMENT,
             ..Default::default()
@@ -2235,13 +1753,13 @@ fn create_graphics_pipelines(
     ];
     let point_stages = [
         vk::PipelineShaderStageCreateInfo {
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             module: point_vert,
             stage: vk::ShaderStageFlags::VERTEX,
             ..Default::default()
         },
         vk::PipelineShaderStageCreateInfo {
-            p_name: ENTRY_NAME.as_ptr(),
+            p_name: SHADER_ENTRY_NAME.as_ptr(),
             module: point_frag,
             stage: vk::ShaderStageFlags::FRAGMENT,
             ..Default::default()
@@ -2259,31 +1777,14 @@ fn create_graphics_pipelines(
     // resource locations, which allows them to share pipeline layouts.
 
     let deferred_layout = {
-        // let bindings = vec![vk::DescriptorSetLayoutBinding {
-        //     binding: 0,
-        //     descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        //     descriptor_count: 1,
-        //     stage_flags: vk::ShaderStageFlags::VERTEX,
-        //     ..Default::default()
-        // }];
-        //
-        // let camera_layout = vk::DescriptorSetLayoutCreateInfo {
-        //     p_bindings: bindings.as_ptr(),
-        //     binding_count: bindings.len(),
-        //     ..Default::default()
-        // };
-        // let model_layout = vk::DescriptorSetLayoutCreateInfo {
-        //     p_bindings: bindings.as_ptr(),
-        //     binding_count: bindings.len(),
-        //     ..Default::default()
-        // };
-
-        // let deferred_set_layouts = vec![camera_layout, model_layout];
-
         let deferred_layout_create_info = vk::PipelineLayoutCreateInfo {
             push_constant_range_count: 0,
             p_push_constant_ranges: ptr::null(),
-            p_set_layouts: [descriptor_layouts.camera, descriptor_layouts.model].as_ptr(),
+            p_set_layouts: [
+                descriptor_layouts.geometry_per_model_layout_0,
+                descriptor_layouts.geometry_per_frame_layout_1,
+            ]
+            .as_ptr(),
             set_layout_count: 2,
             ..Default::default()
         };
@@ -2296,176 +1797,35 @@ fn create_graphics_pipelines(
         deferred_layout
     };
 
-    let directional_layout = {
-        // let bindings = vec![
-        //     //color attachment
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 0,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     // normals
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 1,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     //directional light data
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 2,
-        //         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        // ];
-        //
-        // let layout = vk::DescriptorSetLayoutCreateInfo {
-        //     p_bindings: bindings.as_ptr(),
-        //     binding_count: bindings.len(),
-        //     ..Default::default()
-        // };
-        //
-        // let directional_set_layouts = vec![layout];
+    let set_layouts = [
+        descriptor_layouts.lighting_per_swapchain_image_attachment_0,
+        descriptor_layouts.lighting_per_frame_layout_1,
+        descriptor_layouts.lighting_per_light_layout_2,
+    ];
 
+    let lighting_layout = {
         let directional_layout_create_info = vk::PipelineLayoutCreateInfo {
             push_constant_range_count: 0,
             p_push_constant_ranges: ptr::null(),
-            p_set_layouts: [descriptor_layouts.directional_light].as_ptr(),
-            set_layout_count: [descriptor_layouts.directional_light].len() as u32,
+            p_set_layouts: set_layouts.as_ptr(),
+            set_layout_count: set_layouts.len() as u32,
             ..Default::default()
         };
 
-        let directional_layout = unsafe {
+        let lighting_layout = unsafe {
             device
                 .create_pipeline_layout(&directional_layout_create_info, None)
                 .unwrap()
         };
-        directional_layout
+        lighting_layout
     };
 
-    let ambient_layout = {
-        // let bindings = vec![
-        //     //color attachment
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 0,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     // normals
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 1,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     //ambient light data
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 2,
-        //         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        // ];
-        //
-        // let layout = vk::DescriptorSetLayoutCreateInfo {
-        //     p_bindings: bindings.as_ptr(),
-        //     binding_count: bindings.len(),
-        //     ..Default::default()
-        // };
-        //
-        // let ambient_set_layouts = vec![layout];
-
-        let ambient_layout_create_info = vk::PipelineLayoutCreateInfo {
-            push_constant_range_count: 0,
-            p_push_constant_ranges: ptr::null(),
-            p_set_layouts: [descriptor_layouts.ambient_light].as_ptr(),
-            set_layout_count: 1,
-            ..Default::default()
-        };
-
-        let ambient_layout = unsafe {
-            device
-                .create_pipeline_layout(&ambient_layout_create_info, None)
-                .unwrap()
-        };
-        ambient_layout
-    };
-
-    let point_layout = {
-        // let bindings = vec![
-        //     //color attachment
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 0,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     // normals
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 1,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     // position
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 2,
-        //         descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        //     //point light data
-        //     vk::DescriptorSetLayoutBinding {
-        //         binding: 3,
-        //         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        //         descriptor_count: 1,
-        //         stage_flags: vk::ShaderStageFlags::FRAGMENT,
-        //         ..Default::default()
-        //     },
-        // ];
-        //
-        // let layout = vk::DescriptorSetLayoutCreateInfo {
-        //     p_bindings: bindings.as_ptr(),
-        //     binding_count: bindings.len(),
-        //     ..Default::default()
-        // };
-        //
-        // let point_set_layouts = vec![layout];
-
-        let point_layout_create_info = vk::PipelineLayoutCreateInfo {
-            push_constant_range_count: 0,
-            p_push_constant_ranges: ptr::null(),
-            p_set_layouts: [descriptor_layouts.point_light].as_ptr(),
-            set_layout_count: 1,
-            ..Default::default()
-        };
-
-        let point_layout = unsafe {
-            device
-                .create_pipeline_layout(&point_layout_create_info, None)
-                .unwrap()
-        };
-        point_layout
-    };
-
-    let multisample_state = &vk::PipelineMultisampleStateCreateInfo {
+    let multisample_state = vk::PipelineMultisampleStateCreateInfo {
         rasterization_samples: vk::SampleCountFlags::TYPE_1,
         ..Default::default()
     };
     let rasterization_state = &vk::PipelineRasterizationStateCreateInfo {
-        cull_mode: vk::CullModeFlags::BACK,
+        cull_mode: vk::CullModeFlags::NONE,
         front_face: vk::FrontFace::COUNTER_CLOCKWISE,
         line_width: 1.0,
         ..Default::default()
@@ -2494,7 +1854,7 @@ fn create_graphics_pipelines(
         p_rasterization_state: rasterization_state,
         // How multiple fragment shader samples are converted to a single pixel value.
         // The default value does not perform any multisampling.
-        p_multisample_state: multisample_state,
+        p_multisample_state: &multisample_state,
         // How pixel values are combined with the values already present in the
         // framebuffer. The default value overwrites the old value with the new one,
         // without any blending.
@@ -2502,10 +1862,10 @@ fn create_graphics_pipelines(
             p_attachments: [vk::PipelineColorBlendAttachmentState {
                 blend_enable: vk::FALSE,
                 ..Default::default()
-            }; FRAMES_IN_FLIGHT]
+            }; 3]
                 .as_ptr(),
 
-            attachment_count: FRAMES_IN_FLIGHT as u32,
+            attachment_count: 3,
             ..Default::default()
         },
         p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
@@ -2548,6 +1908,7 @@ fn create_graphics_pipelines(
         alpha_blend_op: vk::BlendOp::MAX,
         src_alpha_blend_factor: vk::BlendFactor::ONE,
         dst_alpha_blend_factor: vk::BlendFactor::ONE,
+        blend_enable: vk::TRUE,
         ..Default::default()
     };
     let lighting_blend_attachments = vec![blend_attachment; 1];
@@ -2555,23 +1916,23 @@ fn create_graphics_pipelines(
     let directional_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: directional_stages.as_ptr(),
         stage_count: directional_stages.len() as u32,
-        layout: directional_layout,
-        p_vertex_input_state: &dummy_vertex_input_state,
+        layout: lighting_layout,
+        p_vertex_input_state: dummy_vertex_input_state,
         p_input_assembly_state: input_assembly_state,
         p_viewport_state: &vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1),
         p_rasterization_state: rasterization_state,
-        p_multisample_state: multisample_state,
+        p_multisample_state: &multisample_state,
         p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
             p_attachments: lighting_blend_attachments.as_ptr(),
             attachment_count: lighting_blend_attachments.len() as u32,
             ..Default::default()
         },
         p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::TRUE,
+            depth_test_enable: vk::FALSE,
             depth_write_enable: vk::FALSE, // dont update depth values
-            depth_compare_op: vk::CompareOp::EQUAL,
+            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
             stencil_test_enable: vk::FALSE,
             depth_bounds_test_enable: vk::FALSE,
             ..Default::default()
@@ -2590,9 +1951,9 @@ fn create_graphics_pipelines(
     let ambient_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: ambient_stages.as_ptr(),
         stage_count: ambient_stages.len() as u32,
-        p_vertex_input_state: &dummy_vertex_input_state,
+        p_vertex_input_state: dummy_vertex_input_state,
         p_rasterization_state: rasterization_state,
-        layout: ambient_layout,
+        layout: lighting_layout,
         p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
             p_attachments: lighting_blend_attachments.as_ptr(),
             attachment_count: lighting_blend_attachments.len() as u32,
@@ -2604,7 +1965,7 @@ fn create_graphics_pipelines(
             ..Default::default()
         },
         p_input_assembly_state: input_assembly_state,
-        p_multisample_state: multisample_state,
+        p_multisample_state: &multisample_state,
         p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
             depth_test_enable: vk::TRUE,
             depth_write_enable: vk::FALSE, // dont update depth values
@@ -2625,11 +1986,11 @@ fn create_graphics_pipelines(
     let point_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: point_stages.as_ptr(),
         stage_count: point_stages.len() as u32,
-        p_vertex_input_state: &dummy_vertex_input_state,
+        p_vertex_input_state: dummy_vertex_input_state,
         p_input_assembly_state: input_assembly_state,
         p_rasterization_state: rasterization_state,
-        layout: point_layout,
-        p_multisample_state: multisample_state,
+        layout: lighting_layout,
+        p_multisample_state: &multisample_state,
         p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
             p_attachments: lighting_blend_attachments.as_ptr(),
             attachment_count: lighting_blend_attachments.len() as u32,
@@ -2671,15 +2032,24 @@ fn create_graphics_pipelines(
             )
             .unwrap()
     };
-    (
-        pipelines,
-        vec![
-            deferred_layout,
-            directional_layout,
-            ambient_layout,
-            point_layout,
-        ],
-    )
+    vec![
+        GraphicsPipeline {
+            pipeline: pipelines[0],
+            pipeline_layout: deferred_layout,
+        },
+        GraphicsPipeline {
+            pipeline: pipelines[1],
+            pipeline_layout: lighting_layout,
+        },
+        GraphicsPipeline {
+            pipeline: pipelines[2],
+            pipeline_layout: lighting_layout,
+        },
+        GraphicsPipeline {
+            pipeline: pipelines[3],
+            pipeline_layout: lighting_layout,
+        },
+    ]
 }
 
 pub fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
@@ -2688,9 +2058,6 @@ pub fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
             .create_window(Window::default_attributes().with_title("moonlight"))
             .expect("failed to create window"),
     )
-}
-fn create_entry() -> ash::Entry {
-    unsafe { ash::Entry::load().unwrap() }
 }
 fn setup_debug_utils(
     debug_utils_loader: &ash::ext::debug_utils::Instance,
@@ -2714,6 +2081,7 @@ fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Ins
         ..Default::default()
     };
 
+    #[allow(deprecated)]
     let required_instance_extensions =
         ash_window::enumerate_required_extensions(event_loop.raw_display_handle().unwrap())
             .unwrap();
@@ -2725,6 +2093,20 @@ fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Ins
     instance_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
 
     let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+    let validation_features = [
+        vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+        vk::ValidationFeatureEnableEXT::GPU_ASSISTED,
+        vk::ValidationFeatureEnableEXT::GPU_ASSISTED_RESERVE_BINDING_SLOT,
+        vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+        // vk::ValidationFeatureEnableEXT::DEBUG_PRINTF,
+    ];
+    let validation_features_info = vk::ValidationFeaturesEXT {
+        enabled_validation_feature_count: validation_features.len() as u32,
+        p_enabled_validation_features: validation_features.as_ptr(),
+        disabled_validation_feature_count: 0,
+        p_disabled_validation_features: std::ptr::null(),
+        ..Default::default()
+    };
 
     let validation_layers = if VALIDATION_ENABLE {
         vec![validation_layer.as_ptr()]
@@ -2733,6 +2115,7 @@ fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Ins
     };
 
     let create_info = vk::InstanceCreateInfo {
+        p_next: &validation_features_info as *const _ as *const std::ffi::c_void,
         p_application_info: &app_info,
 
         enabled_layer_count: validation_layers.len() as u32,
@@ -2749,7 +2132,7 @@ fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Ins
 type QueueFamilyIndex = u32;
 fn create_physical_device(
     instance: &ash::Instance,
-    // BUG: should use this to test surface support but dont feel like it
+    // TODO: should use this to test surface support but dont feel like it
     _surface: vk::SurfaceKHR,
     required_extensions: &Vec<&CStr>,
 ) -> (vk::PhysicalDevice, QueueFamilyIndex) {
@@ -2817,9 +2200,7 @@ fn create_device(
     queue_family_index: QueueFamilyIndex,
     required_extensions: &Vec<&CStr>,
 ) -> (ash::Device, vk::Queue) {
-    let enabled_features = vk::PhysicalDeviceFeatures {
-        ..Default::default()
-    };
+    let enabled_features = unsafe { instance.get_physical_device_features(physical_device) };
     let queue_create_infos = vec![vk::DeviceQueueCreateInfo {
         queue_family_index: queue_family_index,
         queue_count: 1,
@@ -2871,7 +2252,7 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
         _ => "[Unknown]",
     };
     let message = CStr::from_ptr((*p_callback_data).p_message);
-    println!("[Debug]{}{}{:?}", severity, types, message);
+    println!("{}{}{:?}", severity, types, message);
 
     vk::FALSE
 }
@@ -2880,15 +2261,191 @@ fn populate_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEX
         s_type: vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         p_next: ptr::null(),
         flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
-        message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING |
-            // vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
-            // vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
-            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+            | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
+            | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+            | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+
         message_type: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
             | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
             | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
         pfn_user_callback: Some(vulkan_debug_utils_callback),
         p_user_data: ptr::null_mut(),
         _marker: PhantomData,
+    }
+}
+impl SwapchainResources {
+    pub(crate) fn recreate(&mut self, size: PhysicalSize<u32>) {
+        *self = SwapchainResources::create(
+            &self.surface_loader,
+            &self.swapchain_loader,
+            &self.device,
+            self.physical_device,
+            self.render_pass,
+            Some(self.swapchain),
+            self.swapchain_image_format,
+            size,
+            self.allocator.clone(),
+            self.surface,
+            self.per_swapchain_image_set_layout,
+            &self.queue_family_indices,
+        );
+    }
+    pub(crate) fn create(
+        surface_loader: &ash::khr::surface::Instance,
+        swapchain_loader: &ash::khr::swapchain::Device,
+        device: &ash::Device,
+        physical_device: vk::PhysicalDevice,
+        render_pass: vk::RenderPass,
+        previous_swapchain: Option<vk::SwapchainKHR>,
+        swapchain_image_format: vk::SurfaceFormatKHR,
+        window_size: PhysicalSize<u32>,
+        allocator: SharedAllocator,
+        surface: vk::SurfaceKHR,
+        per_swapchain_image_set_layout: vk::DescriptorSetLayout,
+        queue_family_indices: &[QueueFamilyIndex],
+    ) -> Self {
+        let window_size = vk::Extent2D {
+            width: window_size.width,
+            height: window_size.height,
+        };
+
+        eprintln!(
+            "Surface loader valid: {}",
+            !(surface_loader as *const _ as usize == 0)
+        );
+        let image_format = swapchain_image_format;
+
+        let capabilities = unsafe {
+            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
+        }
+        .unwrap();
+
+        let image_count = if capabilities.min_image_count == capabilities.max_image_count {
+            capabilities.max_image_count
+        } else {
+            capabilities.min_image_count + 1
+        };
+
+        let swapchain_create_info = vk::SwapchainCreateInfoKHR {
+            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            surface,
+            min_image_count: image_count,
+            image_sharing_mode: vk::SharingMode::EXCLUSIVE,
+            image_color_space: image_format.color_space,
+            image_format: image_format.format,
+            image_extent: window_size,
+            present_mode: vk::PresentModeKHR::FIFO,
+            pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
+            old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
+            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+            clipped: vk::TRUE,
+            image_array_layers: 1,
+            p_queue_family_indices: queue_family_indices.as_ptr(),
+            queue_family_index_count: queue_family_indices.len() as u32,
+
+            ..Default::default()
+        };
+
+        let swapchain = unsafe {
+            swapchain_loader
+                .create_swapchain(&swapchain_create_info, None)
+                .unwrap()
+        };
+        let swapchain_images = unsafe {
+            swapchain_loader
+                .get_swapchain_images(swapchain)
+                .expect("Failed to get Swapchain Images.")
+        };
+
+        let (framebuffers, color_buffers, normal_buffers, position_buffers, allocations) =
+            create_framebuffers(
+                device,
+                &swapchain_images,
+                render_pass,
+                allocator.clone(),
+                window_size,
+                image_format.format,
+            );
+
+        // one set per swapchain image, * 4 for color normal position and final_color * 3 for
+        // safety
+        let required_sets: u32 = (swapchain_images.len() * 4 * 3) as u32;
+
+        let pool_sizes = vec![vk::DescriptorPoolSize {
+            // per uniform buffer, so six descriptors per
+            // set(2x what is needed for safety
+            descriptor_count: 6 * required_sets,
+            ty: vk::DescriptorType::INPUT_ATTACHMENT,
+        }];
+
+        let descriptor_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo {
+                        max_sets: required_sets,
+                        p_pool_sizes: pool_sizes.as_ptr(),
+                        pool_size_count: pool_sizes.len() as u32,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+
+        let mut interleaved = vec![];
+        for i in 0..color_buffers.len() {
+            interleaved.push(color_buffers[i]);
+            interleaved.push(normal_buffers[i]);
+            interleaved.push(position_buffers[i]);
+        }
+
+        let descriptor_sets = create_attachment_descriptor_sets(
+            device,
+            descriptor_pool,
+            per_swapchain_image_set_layout,
+            &interleaved,
+            &[0, 1, 2],
+        );
+
+        eprintln!("swapchain created successfully");
+
+        Self {
+            swapchain,
+            swapchain_image_format: image_format,
+            color_buffers,
+            normal_buffers,
+            position_buffers,
+            frame_buffer_allocations: allocations,
+            framebuffers,
+            allocator,
+            per_swapchain_image_descriptor_sets: descriptor_sets,
+            surface_loader: surface_loader.clone(),
+            swapchain_loader: swapchain_loader.clone(),
+            device: device.clone(),
+            physical_device,
+            render_pass,
+            surface,
+            per_swapchain_image_set_layout,
+            queue_family_indices: queue_family_indices.to_vec(),
+        }
+    }
+    fn choose_swapchain_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKHR> {
+        let prefered_color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+        let prefered_formats = vec![
+            vk::Format::B8G8R8A8_SRGB,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::Format::B8G8R8A8_UNORM,
+            vk::Format::R8G8B8A8_UNORM,
+        ];
+
+        for available in formats {
+            for format in &prefered_formats {
+                if available.format == *format && available.color_space == prefered_color_space {
+                    return Some(*available);
+                }
+            }
+        }
+        return formats.first().copied();
     }
 }

@@ -8,6 +8,7 @@ layout(location = 0) out vec4 f_color;
 layout(location = 1) out vec3 f_normal;
 layout(location = 2) out vec4 f_position;
 
+
 void main() {
     f_color = vec4(in_color, 1.0);
     f_normal = in_normal;
