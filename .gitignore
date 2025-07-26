@@ -24,5 +24,7 @@ Cargo.lock
 
 /target
 
-
 core
+perf.data
+perf.data.old
+flamegraph.svg
