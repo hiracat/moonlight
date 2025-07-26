@@ -25,14 +25,15 @@
 
           cloc
         ];
-        VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
-        shellHook = "
-        export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
-        export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib:$LD_LIBRARY_PATH
-        export LD_LIBRARY_PATH=${pkgs.libxkbcommon}/lib:$LD_LIBRARY_PATH
-        export SHADERC_LIB_DIR=${pkgs.shaderc.lib}/lib
-        zsh
-        ";
+        shellHook = ''
+          export VK_LAYER_PATH=${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d
+          export SHELL=${pkgs.zsh}/bin/zsh
+          export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib:$LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH=${pkgs.libxkbcommon}/lib:$LD_LIBRARY_PATH
+          export SHADERC_LIB_DIR=${pkgs.shaderc.lib}/lib
+          zsh
+        '';
       };
     };
 }

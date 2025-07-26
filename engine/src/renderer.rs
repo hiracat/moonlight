@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation)]
 use crate::layouts::{self, BINDINGS};
-use ash::vk::{self, Extent3D};
+use ash::vk::{self, Extent3D, TaggedStructure};
 use bytemuck::{bytes_of, Pod, Zeroable};
 use gpu_allocator::vulkan::*;
 use half::f16;
@@ -291,7 +291,7 @@ impl Vertex {
     }
 }
 
-pub const FRAMES_IN_FLIGHT: usize = 3;
+pub const FRAMES_IN_FLIGHT: usize = 2;
 
 pub struct Renderer {
     // needs to be kept alive, dont forget is very important
@@ -349,7 +349,7 @@ pub(crate) struct SwapchainResources {
     pub(crate) swapchain: vk::SwapchainKHR,
     pub(crate) swapchain_image_format: vk::SurfaceFormatKHR,
     // one per swapchain image
-    pub(crate) per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
+    pub(crate) per_swapchain_image_descriptor_sets_0: Vec<vk::DescriptorSet>,
 
     framebuffers: Vec<vk::Framebuffer>,
     frame_buffer_allocations: Vec<Allocation>,
@@ -502,16 +502,6 @@ impl Renderer {
 
         // NOTE: RENDERING START
 
-        // if let Some(still_in_use) = self.swapchain_image_still_in_use[self.swapchain_image_index] {
-        //     unsafe {
-        //         self.device
-        //             .wait_for_fences(&[still_in_use], true, 3_000_000_000)
-        //             .unwrap();
-        //     }
-        // }
-        // self.swapchain_image_still_in_use[self.swapchain_image_index] =
-        //     Some(self.in_flight_fence[self.current_frame]);
-
         dbg!(self.current_frame);
 
         {
@@ -561,7 +551,7 @@ impl Renderer {
                 for _ in 0..5 {
                     match mem[self.current_frame].mapped_slice_mut() {
                         Some(mut write) => {
-                            let _ = write.write(data);
+                            write.write(data).unwrap();
                             break;
                         }
                         None => {
@@ -582,7 +572,7 @@ impl Renderer {
                         "WARNING: model {:?} does not have transform component, giving identity matrix", entity
                     );
                     transform = Transform::new();
-                    let _ = world.component_add(entity, transform);
+                    world.component_add(entity, transform).unwrap();
                 } else {
                     transform = *world
                         .component_get::<Transform>(entity)
@@ -719,6 +709,17 @@ impl Renderer {
 
         let entities = world.query_mut::<Model>();
 
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.graphics_pipelines[0].pipeline_layout,
+                1, // NOTE: first set, if i jsut specifify one set, then this is setting which set
+                // im binding to
+                &[camera_descripor_set[self.current_frame]],
+                &[],
+            );
+        }
         for (_entity, model) in entities {
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
@@ -726,10 +727,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.graphics_pipelines[0].pipeline_layout,
                     0,
-                    &[
-                        camera_descripor_set[self.current_frame],
-                        model.descriptor_set.as_ref().unwrap()[self.current_frame],
-                    ],
+                    &[model.descriptor_set.as_ref().unwrap()[self.current_frame]],
                     &[],
                 );
 
@@ -766,8 +764,10 @@ impl Renderer {
                 self.graphics_pipelines[1].pipeline,
             );
             let attachment_descriptor_set =
-                self.swapchain.per_swapchain_image_descriptor_sets[self.swapchain_image_index];
+                self.swapchain.per_swapchain_image_descriptor_sets_0[self.swapchain_image_index];
+
             let light_per_frame_descriptor_set = self.lighting_per_frame_sets_1[self.current_frame];
+
             self.device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -776,14 +776,14 @@ impl Renderer {
                 &[attachment_descriptor_set, light_per_frame_descriptor_set],
                 &[],
             );
-            self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
+            self.device.cmd_draw(frame.command_buffer, 3, 1, 0, 0);
 
             self.device.cmd_bind_pipeline(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.graphics_pipelines[2].pipeline,
             );
-            self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
+            self.device.cmd_draw(frame.command_buffer, 3, 1, 0, 0);
         }
 
         unsafe {
@@ -798,11 +798,11 @@ impl Renderer {
                     frame.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.graphics_pipelines[3].pipeline_layout,
-                    0,
-                    &[light.descriptor_set.as_ref().unwrap()[self.current_frame]],
+                    2,
+                    &[light.descriptor_set_2.as_ref().unwrap()[self.current_frame]],
                     &[],
                 );
-                self.device.cmd_draw(frame.command_buffer, 10, 1, 0, 0);
+                self.device.cmd_draw(frame.command_buffer, 3, 1, 0, 0);
             }
         }
         unsafe {
@@ -959,7 +959,7 @@ impl Renderer {
         }
 
         let pool_sizes = vec![vk::DescriptorPoolSize {
-            descriptor_count: 5,
+            descriptor_count: 50,
             ty: vk::DescriptorType::UNIFORM_BUFFER,
         }];
         let descriptor_pool = unsafe {
@@ -987,7 +987,7 @@ impl Renderer {
 
         let pool_sizes = vec![vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 3,
+            descriptor_count: 50,
         }];
         let per_object_create_info = vk::DescriptorPoolCreateInfo {
             max_sets: 100,
@@ -1008,7 +1008,7 @@ impl Renderer {
 
         let lighting_per_frame_pool_sizes = vec![vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 6,
+            descriptor_count: 50,
         }];
         let lighting_per_frame_create_info = vk::DescriptorPoolCreateInfo {
             max_sets: FRAMES_IN_FLIGHT as u32,
@@ -1092,6 +1092,8 @@ pub(crate) fn create_attachment_descriptor_sets(
         binding_indices.len()
     );
 
+    dbg!(&attachments);
+
     let frame_count = attachments.len() / binding_indices.len();
 
     let set_layouts = vec![attachment_layout; frame_count];
@@ -1106,18 +1108,26 @@ pub(crate) fn create_attachment_descriptor_sets(
             })
             .unwrap()
     };
-    let mut descriptor_writes = vec![];
+
+    //NOTE: these two have to be seperate, otherwise on realloc when the vec expands, the
+    //references become invalid, and  the borrow checker doesnt catch
+    let mut image_infos = Vec::new();
+    for i in 0..attachments.len() {
+        image_infos.push(vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: attachments[i],
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        });
+    }
+    let mut descriptor_writes = Vec::new();
     for i in 0..attachments.len() {
         let frame_index = i / binding_indices.len(); // Which frame/set this attachment belongs to
         let binding_index = i % binding_indices.len(); // Which binding within that frame
 
+        dbg!(&image_infos[i]);
         descriptor_writes.push(vk::WriteDescriptorSet {
             dst_set: descriptor_sets[frame_index],
-            p_image_info: &vk::DescriptorImageInfo {
-                sampler: vk::Sampler::null(),
-                image_view: attachments[i],
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            },
+            p_image_info: &image_infos[i],
             descriptor_count: 1,
             dst_binding: binding_indices[binding_index],
             descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
@@ -1126,10 +1136,12 @@ pub(crate) fn create_attachment_descriptor_sets(
         })
     }
 
-    let writes = &descriptor_writes;
-    dbg!(writes);
+    dbg!(&descriptor_writes);
 
     unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
+    //HACK: this manually drops them because otherwise the vec will realize that its no longer in
+    //use and end up overwritten, this keeps it alive until after the function
+    drop(image_infos);
 
     descriptor_sets
 }
@@ -1705,8 +1717,13 @@ fn create_graphics_pipelines(
     };
 
     // required even if empty
-    let dummy_vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
-    let dummy_vertex_input_state = [dummy_vertex_input_state].as_ptr();
+    let dummy_vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
+        vertex_binding_description_count: 0,
+        vertex_attribute_description_count: 0,
+        p_vertex_binding_descriptions: std::ptr::null(),
+        p_vertex_attribute_descriptions: std::ptr::null(),
+        ..Default::default()
+    };
 
     let deferred_stages = [
         vk::PipelineShaderStageCreateInfo {
@@ -1776,16 +1793,16 @@ fn create_graphics_pipelines(
     // layout. Thus, it is a good idea to design shaders so that many pipelines have common
     // resource locations, which allows them to share pipeline layouts.
 
+    let set_layouts = [
+        descriptor_layouts.geometry_per_model_layout_0,
+        descriptor_layouts.geometry_per_frame_layout_1,
+    ];
     let deferred_layout = {
         let deferred_layout_create_info = vk::PipelineLayoutCreateInfo {
             push_constant_range_count: 0,
             p_push_constant_ranges: ptr::null(),
-            p_set_layouts: [
-                descriptor_layouts.geometry_per_model_layout_0,
-                descriptor_layouts.geometry_per_frame_layout_1,
-            ]
-            .as_ptr(),
-            set_layout_count: 2,
+            p_set_layouts: set_layouts.as_ptr(),
+            set_layout_count: set_layouts.len() as u32,
             ..Default::default()
         };
 
@@ -1824,16 +1841,49 @@ fn create_graphics_pipelines(
         rasterization_samples: vk::SampleCountFlags::TYPE_1,
         ..Default::default()
     };
-    let rasterization_state = &vk::PipelineRasterizationStateCreateInfo {
+    let rasterization_state = vk::PipelineRasterizationStateCreateInfo {
         cull_mode: vk::CullModeFlags::NONE,
         front_face: vk::FrontFace::COUNTER_CLOCKWISE,
         line_width: 1.0,
         ..Default::default()
     };
-    let input_assembly_state = &vk::PipelineInputAssemblyStateCreateInfo {
+    let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
         topology: vk::PrimitiveTopology::TRIANGLE_LIST,
         ..Default::default()
     };
+
+    let deferred_color_blend_attachments = [vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::FALSE,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+        ..Default::default()
+    }; 3];
+    let deferred_color_blend_state = vk::PipelineColorBlendStateCreateInfo {
+        s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        p_attachments: deferred_color_blend_attachments.as_ptr(),
+        attachment_count: deferred_color_blend_attachments.len() as u32,
+        ..Default::default()
+    };
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+
+    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::TRUE,
+        depth_write_enable: vk::TRUE,
+        depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+        stencil_test_enable: vk::FALSE,
+        depth_bounds_test_enable: vk::FALSE,
+        ..Default::default()
+    };
+
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+        p_dynamic_states: dynamic_states.as_ptr(),
+        dynamic_state_count: dynamic_states.len() as u32,
+        ..Default::default()
+    };
+    let tessellation_state = vk::PipelineTessellationStateCreateInfo::default();
+
     // We have to indicate which subpass of which render pass this pipeline is going to be
     // used in. The pipeline will only be usable from this particular subpass.
     let deferred_graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
@@ -1843,51 +1893,28 @@ fn create_graphics_pipelines(
         p_vertex_input_state: &vertex_input_state,
         // How vertices are arranged into primitive shapes. The default primitive shape
         // is a triangle.
-        p_input_assembly_state: input_assembly_state,
+        p_input_assembly_state: &input_assembly_state,
         // How primitives are transformed and clipped to fit the framebuffer. We use a
         // resizable viewport, set to draw over the entire window.
-        p_viewport_state: &vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1),
+        p_viewport_state: &viewport_state,
         // How polygons are culled and converted into a raster of pixels. The default
         // value does not perform any culling.
-        p_rasterization_state: rasterization_state,
+        p_rasterization_state: &rasterization_state,
         // How multiple fragment shader samples are converted to a single pixel value.
         // The default value does not perform any multisampling.
         p_multisample_state: &multisample_state,
         // How pixel values are combined with the values already present in the
         // framebuffer. The default value overwrites the old value with the new one,
         // without any blending.
-        p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
-            p_attachments: [vk::PipelineColorBlendAttachmentState {
-                blend_enable: vk::FALSE,
-                ..Default::default()
-            }; 3]
-                .as_ptr(),
+        p_color_blend_state: &deferred_color_blend_state,
 
-            attachment_count: 3,
-            ..Default::default()
-        },
-        p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::TRUE,
-            depth_write_enable: vk::TRUE,
-            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
-            stencil_test_enable: vk::FALSE,
-            depth_bounds_test_enable: vk::FALSE,
-            ..Default::default()
-        },
+        p_depth_stencil_state: &depth_stencil_state,
 
         // Dynamic states allows us to specify parts of the pipeline settings when
         // recording the command buffer, before we perform drawing. Here, we specify
         // that the viewport should be dynamic.
-        p_dynamic_state: &vk::PipelineDynamicStateCreateInfo {
-            p_dynamic_states: [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR].as_ptr(),
-            dynamic_state_count: 2,
-            ..Default::default()
-        },
-        p_tessellation_state: &vk::PipelineTessellationStateCreateInfo {
-            ..Default::default()
-        },
+        p_dynamic_state: &dynamic_state,
+        p_tessellation_state: &tessellation_state,
 
         layout: deferred_layout,
         // the renderpass this graphics pipeline is one
@@ -1898,7 +1925,11 @@ fn create_graphics_pipelines(
         base_pipeline_index: 0,
         // and the handle to that pipeline
         base_pipeline_handle: vk::Pipeline::null(),
-        ..Default::default()
+
+        s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+        p_next: ::core::ptr::null(),
+        flags: vk::PipelineCreateFlags::default(),
+        _marker: PhantomData,
     };
 
     let blend_attachment = vk::PipelineColorBlendAttachmentState {
@@ -1908,114 +1939,99 @@ fn create_graphics_pipelines(
         alpha_blend_op: vk::BlendOp::MAX,
         src_alpha_blend_factor: vk::BlendFactor::ONE,
         dst_alpha_blend_factor: vk::BlendFactor::ONE,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
         blend_enable: vk::TRUE,
         ..Default::default()
     };
-    let lighting_blend_attachments = vec![blend_attachment; 1];
+    let color_blend_attachments = [blend_attachment; 3];
+    let color_blend_state = vk::PipelineColorBlendStateCreateInfo {
+        s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        p_attachments: color_blend_attachments.as_ptr(),
+        attachment_count: color_blend_attachments.len() as u32,
+        ..Default::default()
+    };
 
+    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::FALSE,
+        depth_write_enable: vk::FALSE, // dont update depth values
+        depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+        stencil_test_enable: vk::FALSE,
+        depth_bounds_test_enable: vk::FALSE,
+        ..Default::default()
+    };
     let directional_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: directional_stages.as_ptr(),
         stage_count: directional_stages.len() as u32,
         layout: lighting_layout,
-        p_vertex_input_state: dummy_vertex_input_state,
-        p_input_assembly_state: input_assembly_state,
-        p_viewport_state: &vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1),
-        p_rasterization_state: rasterization_state,
+        p_vertex_input_state: &dummy_vertex_input_state,
+        p_input_assembly_state: &input_assembly_state,
+        p_viewport_state: &viewport_state,
+        p_rasterization_state: &rasterization_state,
         p_multisample_state: &multisample_state,
-        p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
-            p_attachments: lighting_blend_attachments.as_ptr(),
-            attachment_count: lighting_blend_attachments.len() as u32,
-            ..Default::default()
-        },
-        p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::FALSE,
-            depth_write_enable: vk::FALSE, // dont update depth values
-            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
-            stencil_test_enable: vk::FALSE,
-            depth_bounds_test_enable: vk::FALSE,
-            ..Default::default()
-        },
-        p_dynamic_state: &vk::PipelineDynamicStateCreateInfo {
-            p_dynamic_states: [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR].as_ptr(),
-            dynamic_state_count: 2,
-            ..Default::default()
-        },
-
+        p_color_blend_state: &color_blend_state,
+        p_depth_stencil_state: &depth_stencil_state,
+        p_dynamic_state: &dynamic_state,
         subpass: lighting_subpass,
         render_pass,
-        ..Default::default()
+        p_tessellation_state: &tessellation_state,
+
+        s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+        p_next: ::core::ptr::null(),
+        flags: vk::PipelineCreateFlags::default(),
+        base_pipeline_handle: vk::Pipeline::default(),
+        base_pipeline_index: i32::default(),
+        _marker: PhantomData,
     };
 
     let ambient_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: ambient_stages.as_ptr(),
         stage_count: ambient_stages.len() as u32,
-        p_vertex_input_state: dummy_vertex_input_state,
-        p_rasterization_state: rasterization_state,
+        p_vertex_input_state: &dummy_vertex_input_state,
+        p_rasterization_state: &rasterization_state,
         layout: lighting_layout,
-        p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
-            p_attachments: lighting_blend_attachments.as_ptr(),
-            attachment_count: lighting_blend_attachments.len() as u32,
-            ..Default::default()
-        },
-        p_dynamic_state: &vk::PipelineDynamicStateCreateInfo {
-            p_dynamic_states: [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR].as_ptr(),
-            dynamic_state_count: 2,
-            ..Default::default()
-        },
-        p_input_assembly_state: input_assembly_state,
+        p_color_blend_state: &color_blend_state,
+        p_dynamic_state: &dynamic_state,
+        p_input_assembly_state: &input_assembly_state,
         p_multisample_state: &multisample_state,
-        p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::TRUE,
-            depth_write_enable: vk::FALSE, // dont update depth values
-            depth_compare_op: vk::CompareOp::EQUAL,
-            stencil_test_enable: vk::FALSE,
-            depth_bounds_test_enable: vk::FALSE,
-            ..Default::default()
-        },
-        p_viewport_state: &vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1),
+        p_depth_stencil_state: &depth_stencil_state,
+        p_viewport_state: &viewport_state,
 
         subpass: lighting_subpass,
         render_pass,
-        ..Default::default()
+
+        p_tessellation_state: &tessellation_state,
+
+        s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+        p_next: ::core::ptr::null(),
+        flags: vk::PipelineCreateFlags::default(),
+        base_pipeline_handle: vk::Pipeline::default(),
+        base_pipeline_index: i32::default(),
+        _marker: PhantomData,
     };
 
     let point_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: point_stages.as_ptr(),
         stage_count: point_stages.len() as u32,
-        p_vertex_input_state: dummy_vertex_input_state,
-        p_input_assembly_state: input_assembly_state,
-        p_rasterization_state: rasterization_state,
+        p_vertex_input_state: &dummy_vertex_input_state,
+        p_input_assembly_state: &input_assembly_state,
+        p_rasterization_state: &rasterization_state,
         layout: lighting_layout,
         p_multisample_state: &multisample_state,
-        p_color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
-            p_attachments: lighting_blend_attachments.as_ptr(),
-            attachment_count: lighting_blend_attachments.len() as u32,
-            ..Default::default()
-        },
-        p_dynamic_state: &vk::PipelineDynamicStateCreateInfo {
-            p_dynamic_states: [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR].as_ptr(),
-            dynamic_state_count: 2,
-            ..Default::default()
-        },
-        p_viewport_state: &vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1),
-        p_depth_stencil_state: &vk::PipelineDepthStencilStateCreateInfo {
-            depth_test_enable: vk::TRUE,
-            depth_write_enable: vk::FALSE, // dont update depth values
-            depth_compare_op: vk::CompareOp::EQUAL,
-            stencil_test_enable: vk::FALSE,
-            depth_bounds_test_enable: vk::FALSE,
-            ..Default::default()
-        },
+        p_color_blend_state: &color_blend_state,
+        p_dynamic_state: &dynamic_state,
+        p_viewport_state: &viewport_state,
+        p_depth_stencil_state: &depth_stencil_state,
 
         subpass: lighting_subpass,
         render_pass,
-        ..Default::default()
+        p_tessellation_state: &tessellation_state,
+
+        s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+        p_next: ::core::ptr::null(),
+        flags: vk::PipelineCreateFlags::default(),
+        base_pipeline_handle: vk::Pipeline::default(),
+        base_pipeline_index: i32::default(),
+        _marker: PhantomData,
     };
 
     let pipelines = unsafe {
@@ -2335,7 +2351,7 @@ impl SwapchainResources {
             image_color_space: image_format.color_space,
             image_format: image_format.format,
             image_extent: window_size,
-            present_mode: vk::PresentModeKHR::FIFO,
+            present_mode: vk::PresentModeKHR::MAILBOX,
             pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
@@ -2367,6 +2383,11 @@ impl SwapchainResources {
                 window_size,
                 image_format.format,
             );
+
+        dbg!(&framebuffers);
+        dbg!(&color_buffers);
+        dbg!(&normal_buffers);
+        dbg!(&position_buffers);
 
         // one set per swapchain image, * 4 for color normal position and final_color * 3 for
         // safety
@@ -2400,6 +2421,8 @@ impl SwapchainResources {
             interleaved.push(position_buffers[i]);
         }
 
+        dbg!(&interleaved);
+
         let descriptor_sets = create_attachment_descriptor_sets(
             device,
             descriptor_pool,
@@ -2419,7 +2442,7 @@ impl SwapchainResources {
             frame_buffer_allocations: allocations,
             framebuffers,
             allocator,
-            per_swapchain_image_descriptor_sets: descriptor_sets,
+            per_swapchain_image_descriptor_sets_0: descriptor_sets,
             surface_loader: surface_loader.clone(),
             swapchain_loader: swapchain_loader.clone(),
             device: device.clone(),

@@ -1,6 +1,5 @@
 use core::f32;
 
-use half::f16;
 use moonlight::ecs::World;
 use moonlight::{
     components::{
@@ -135,7 +134,7 @@ impl ApplicationHandler for App {
             Transform::from(
                 Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
                 Some(Rotor3::from_rotation_xz(PI * 0.25)), // Slight rotation for dramatic pose
-                Some(Vec3::new(5.0, 5.0, 5.0)),
+                Some(Vec3::new(1.0, 1.0, 1.0)),
             ),
         );
         let _ = self.world.component_add(fox, Controllable);
@@ -156,9 +155,9 @@ impl ApplicationHandler for App {
         // THE GROUND - Ancient mystical platform
         // ───────────────────────────────────────────────────────
         let _ = self.world.component_add(ground, Transform::new());
-        // let _ = self
-        //     .world
-        //     .component_add(ground, load_model("data/models/groundplane.obj", renderer));
+        let _ = self
+            .world
+            .component_add(ground, load_model("data/models/groundplane.obj", renderer));
 
         // Ground collision - the full 40x40 area with some depth
         let _ = self.world.component_add(
@@ -213,67 +212,67 @@ impl ApplicationHandler for App {
         let _ = self.world.component_add(z_axis, monument_collider);
 
         // Attach models to monuments
-        // let _ = self
-        //     .world
-        //     .component_add(x_axis, load_model("data/models/square.obj", renderer));
-        // let _ = self
-        //     .world
-        //     .component_add(y_axis, load_model("data/models/square.obj", renderer));
-        // let _ = self
-        //     .world
-        //     .component_add(z_axis, load_model("data/models/square.obj", renderer));
+        let _ = self
+            .world
+            .component_add(x_axis, load_model("data/models/square.obj", renderer));
+        let _ = self
+            .world
+            .component_add(y_axis, load_model("data/models/square.obj", renderer));
+        let _ = self
+            .world
+            .component_add(z_axis, load_model("data/models/square.obj", renderer));
 
         // ───────────────────────────────────────────────────────
         // DRAMATIC LIGHTING - Three-point mystical lighting setup
         // ───────────────────────────────────────────────────────
 
         // RED LIGHT: "Crimson Flame" - Key light, high intensity, following the red monument
-        // let _ = self.world.component_add(
-        //     red_light,
-        //     PointLight::create(
-        //         renderer,
-        //         Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
-        //         250.0,                    // High intensity for drama
-        //         None,
-        //         None,
-        //     ),
-        // );
-        // let _ = self.world.component_add(
-        //     red_light,
-        //     Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
-        // );
-        //
-        // // GREEN LIGHT: "Emerald Glow" - Fill light, medium intensity, illuminating the left side
-        // let _ = self.world.component_add(
-        //     green_light,
-        //     PointLight::create(
-        //         renderer,
-        //         Vec3::new(0.2, 1.0, 0.3), // Vibrant green
-        //         15.0,                     // Medium intensity
-        //         None,
-        //         None,
-        //     ),
-        // );
-        // let _ = self.world.component_add(
-        //     green_light,
-        //     Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
-        // );
-        //
-        // // BLUE LIGHT: "Azure Whisper" - Rim light, subtle, creating mystical atmosphere
-        // let _ = self.world.component_add(
-        //     blue_light,
-        //     PointLight::create(
-        //         renderer,
-        //         Vec3::new(0.3, 0.4, 1.0), // Cool blue
-        //         12.0,                     // Lower intensity for subtle rim lighting
-        //         None,
-        //         None,
-        //     ),
-        // );
-        // let _ = self.world.component_add(
-        //     blue_light,
-        //     Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
-        // );
+        let _ = self.world.component_add(
+            red_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
+                23.0,                     // High intensity for drama
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            red_light,
+            Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
+        );
+
+        // GREEN LIGHT: "Emerald Glow" - Fill light, medium intensity, illuminating the left side
+        let _ = self.world.component_add(
+            green_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(0.2, 1.0, 0.3), // Vibrant green
+                15.0,                     // Medium intensity
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            green_light,
+            Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
+        );
+
+        // BLUE LIGHT: "Azure Whisper" - Rim light, subtle, creating mystical atmosphere
+        let _ = self.world.component_add(
+            blue_light,
+            PointLight::create(
+                renderer,
+                Vec3::new(0.3, 0.4, 1.0), // Cool blue
+                12.0,                     // Lower intensity for subtle rim lighting
+                None,
+                None,
+            ),
+        );
+        let _ = self.world.component_add(
+            blue_light,
+            Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
+        );
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {

@@ -13,4 +13,5 @@ void main() {
     f_color = vec4(in_color, 1.0);
     f_normal = in_normal;
     f_position = in_position;
+    // f_color = vec4(0.2, 0.3, 0.5, 1.0);
 }

@@ -27,6 +27,7 @@ fn main() {
         if path.extension().unwrap_or(OsStr::new("")) != "glsl" {
             continue;
         }
+        println!("cargo:rerun-if-changed={}", path.display());
 
         let mut file = File::open(path).expect("failed to open file");
         let mut source = String::new();

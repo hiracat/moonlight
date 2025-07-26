@@ -23,7 +23,6 @@ void main() {
 
     out_color = color;
     out_normal = mat3(model.normals) * normal;
-    // In your vertex shader:
     out_position = model.model * vec4(position, 1.0);
 
 }

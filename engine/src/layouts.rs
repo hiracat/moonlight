@@ -26,16 +26,16 @@ pub(crate) static BINDINGS: Bindings = Bindings {
 impl DescriptorLayouts {
     pub fn init(device: &ash::Device) -> Self {
         Self {
-            geometry_per_model_layout_0: Self::create_geometry_per_model_layout(device),
-            geometry_per_frame_layout_1: Self::create_geometry_per_frame_layout(device),
-            lighting_per_light_layout_2: Self::create_lighting_per_light_layout(device),
-            lighting_per_frame_layout_1: Self::create_lighting_per_frame_layout(device),
+            geometry_per_model_layout_0: Self::create_geometry_per_model_layout_0(device),
+            geometry_per_frame_layout_1: Self::create_geometry_per_frame_layout_1(device),
+            lighting_per_light_layout_2: Self::create_lighting_per_light_layout_2(device),
+            lighting_per_frame_layout_1: Self::create_lighting_per_frame_layout_1(device),
             lighting_per_swapchain_image_attachment_0:
-                Self::create_lighting_per_swapchain_image_layout(device),
+                Self::create_lighting_per_swapchain_image_layout_0(device),
         }
     }
 
-    fn create_geometry_per_model_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+    fn create_geometry_per_model_layout_0(device: &ash::Device) -> vk::DescriptorSetLayout {
         let geometry_bindings = vec![
             // model
             vk::DescriptorSetLayoutBinding {
@@ -59,7 +59,7 @@ impl DescriptorLayouts {
 
         geometry
     }
-    fn create_geometry_per_frame_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+    fn create_geometry_per_frame_layout_1(device: &ash::Device) -> vk::DescriptorSetLayout {
         let geometry_bindings = vec![
             // camera
             vk::DescriptorSetLayoutBinding {
@@ -83,7 +83,7 @@ impl DescriptorLayouts {
 
         geometry
     }
-    fn create_lighting_per_frame_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+    fn create_lighting_per_frame_layout_1(device: &ash::Device) -> vk::DescriptorSetLayout {
         let lighting_bindings = vec![
             //ambient
             vk::DescriptorSetLayoutBinding {
@@ -116,7 +116,9 @@ impl DescriptorLayouts {
 
         lighting
     }
-    fn create_lighting_per_swapchain_image_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+    fn create_lighting_per_swapchain_image_layout_0(
+        device: &ash::Device,
+    ) -> vk::DescriptorSetLayout {
         let lighting_bindings = vec![
             //color attachment
             vk::DescriptorSetLayoutBinding {
@@ -157,7 +159,7 @@ impl DescriptorLayouts {
 
         lighting
     }
-    fn create_lighting_per_light_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
+    fn create_lighting_per_light_layout_2(device: &ash::Device) -> vk::DescriptorSetLayout {
         let lighting_bindings = vec![
             //point light data
             vk::DescriptorSetLayoutBinding {

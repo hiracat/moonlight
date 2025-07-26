@@ -29,10 +29,7 @@ void main() {
     float directional_intensity = max(dot(normalize(subpassLoad(u_normals).rgb), light_direction), 0.0);
     vec3 directional_color = directional_intensity * directional.color;
     vec3 combined_color = directional_color * subpassLoad(u_color).rgb;
-    // f_color = vec4(combined_color, 1.0);
+    f_color = vec4(combined_color, 1.0);
     // f_color = vec3(gl_FragDepth, 0,0);
-    f_color = vec4(1.0, 0.2, 2.6, 1.0);
+    // f_color = vec4(1.0, 0.2, 2.6, 1.0);
 }
-
-    // vec3 color = subpassLoad(u_color).rgb;
-    // f_color = color;

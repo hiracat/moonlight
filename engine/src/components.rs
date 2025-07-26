@@ -506,7 +506,7 @@ pub struct PointLight {
     pub(crate) u_buffers: Option<Vec<vk::Buffer>>,
     // write to this to upload values, only need to update desriptors to point at this once
     pub(crate) allocations: Option<Vec<Allocation>>,
-    pub(crate) descriptor_set: Option<Vec<vk::DescriptorSet>>,
+    pub(crate) descriptor_set_2: Option<Vec<vk::DescriptorSet>>,
 }
 
 impl HasUBO for PointLight {
@@ -533,7 +533,7 @@ impl HasUBO for PointLight {
 
 impl DescriptorPerObject for PointLight {
     fn set_descriptor_sets(&mut self, sets: Vec<DescriptorSet>) {
-        self.descriptor_set = Some(sets);
+        self.descriptor_set_2 = Some(sets);
     }
 }
 
@@ -544,7 +544,6 @@ impl PointLight {
         brightness: f32,
         linear: Option<f32>,
         quadratic: Option<f32>,
-        position: &mut Transform,
     ) -> Self {
         //TODO: this is even more bullshit, ill get to it eventually
         let mut light = PointLight {
@@ -555,12 +554,12 @@ impl PointLight {
             dirty: true,
             u_buffers: None,
             allocations: None,
-            descriptor_set: None,
+            descriptor_set_2: None,
         };
         light.populate_u_buffers(
             &renderer.device,
             renderer.allocator.clone(),
-            position,
+            &mut Transform::new(),
             FRAMES_IN_FLIGHT,
         );
         light.allocate_descriptor_sets(
@@ -571,7 +570,7 @@ impl PointLight {
         );
         light.write_descriptor_sets(
             &renderer.device,
-            light.descriptor_set.as_ref().unwrap(),
+            light.descriptor_set_2.as_ref().unwrap(),
             BINDINGS.point,
         );
         light
