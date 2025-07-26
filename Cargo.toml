@@ -7,3 +7,5 @@ resolver = "3"
 
 [profile.dev]
 codegen-units = 16
+[profile.release]
+debug = true

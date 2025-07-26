@@ -817,7 +817,7 @@ impl Renderer {
             p_wait_semaphores: &frame.image_available,
             p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             command_buffer_count: 1,
-            p_command_buffers: [frame.command_buffer].as_ptr(),
+            p_command_buffers: &frame.command_buffer,
             p_signal_semaphores: &frame.render_finished,
             signal_semaphore_count: 1,
             ..Default::default()
@@ -958,83 +958,83 @@ impl Renderer {
             per_frame.push(PerFrame::create(&device, queue_family_index));
         }
 
-        let pool_sizes = vec![vk::DescriptorPoolSize {
-            descriptor_count: 50,
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-        }];
-        let descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo {
-                        max_sets: FRAMES_IN_FLIGHT as u32,
-                        p_pool_sizes: pool_sizes.as_ptr(),
-                        pool_size_count: pool_sizes.len() as u32,
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .unwrap()
+        let geometry_per_frame_sets_1 = {
+            let pool_sizes = [vk::DescriptorPoolSize {
+                descriptor_count: 50,
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+            }];
+
+            let descriptor_pool = unsafe {
+                device
+                    .create_descriptor_pool(
+                        &vk::DescriptorPoolCreateInfo {
+                            max_sets: FRAMES_IN_FLIGHT as u32,
+                            p_pool_sizes: pool_sizes.as_ptr(),
+                            pool_size_count: pool_sizes.len() as u32,
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .unwrap()
+            };
+            let layouts = [descriptor_set_layouts.geometry_per_frame_layout_1; FRAMES_IN_FLIGHT];
+
+            let alloc_info = vk::DescriptorSetAllocateInfo {
+                p_set_layouts: layouts.as_ptr(),
+                descriptor_set_count: layouts.len() as u32,
+                descriptor_pool,
+                ..Default::default()
+            };
+
+            unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() }
         };
 
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            p_set_layouts: [descriptor_set_layouts.geometry_per_frame_layout_1; FRAMES_IN_FLIGHT]
-                .as_ptr(),
-            descriptor_pool,
-            descriptor_set_count: FRAMES_IN_FLIGHT as u32,
-            ..Default::default()
-        };
-        let sets = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
-
-        let pool_sizes = vec![vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 50,
-        }];
-        let per_object_create_info = vk::DescriptorPoolCreateInfo {
-            max_sets: 100,
-            p_pool_sizes: pool_sizes.as_ptr(),
-            pool_size_count: pool_sizes.len() as u32,
-            ..Default::default()
-        };
-        let lighting_per_light = unsafe {
-            device
-                .create_descriptor_pool(&per_object_create_info, None)
-                .unwrap()
-        };
-        let geometry_per_model = unsafe {
-            device
-                .create_descriptor_pool(&per_object_create_info, None)
-                .unwrap()
+        let (lighting_per_light, geometry_per_model) = {
+            let pool_sizes = vec![vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 50,
+            }];
+            let create_info = vk::DescriptorPoolCreateInfo {
+                max_sets: 100,
+                p_pool_sizes: pool_sizes.as_ptr(),
+                pool_size_count: pool_sizes.len() as u32,
+                ..Default::default()
+            };
+            let lighting = unsafe { device.create_descriptor_pool(&create_info, None).unwrap() };
+            let geometry = unsafe { device.create_descriptor_pool(&create_info, None).unwrap() };
+            (lighting, geometry)
         };
 
-        let lighting_per_frame_pool_sizes = vec![vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 50,
-        }];
-        let lighting_per_frame_create_info = vk::DescriptorPoolCreateInfo {
-            max_sets: FRAMES_IN_FLIGHT as u32,
-            p_pool_sizes: lighting_per_frame_pool_sizes.as_ptr(),
-            pool_size_count: lighting_per_frame_pool_sizes.len() as u32,
-            ..Default::default()
-        };
-        let lighting_per_frame_pool = unsafe {
-            device
-                .create_descriptor_pool(&lighting_per_frame_create_info, None)
-                .unwrap()
-        };
+        let lighting_per_frame_sets_1 = {
+            let pool_sizes = vec![vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 50,
+            }];
+            let create_info = vk::DescriptorPoolCreateInfo {
+                max_sets: FRAMES_IN_FLIGHT as u32,
+                p_pool_sizes: pool_sizes.as_ptr(),
+                pool_size_count: pool_sizes.len() as u32,
+                ..Default::default()
+            };
+            let lighting_per_frame_pool =
+                unsafe { device.create_descriptor_pool(&create_info, None).unwrap() };
 
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            p_set_layouts: [descriptor_set_layouts.lighting_per_frame_layout_1; FRAMES_IN_FLIGHT]
-                .as_ptr(),
-            descriptor_pool: lighting_per_frame_pool,
-            descriptor_set_count: FRAMES_IN_FLIGHT as u32,
-            ..Default::default()
+            let set_layouts =
+                [descriptor_set_layouts.lighting_per_frame_layout_1; FRAMES_IN_FLIGHT];
+            let alloc_info = vk::DescriptorSetAllocateInfo {
+                p_set_layouts: set_layouts.as_ptr(),
+                descriptor_pool: lighting_per_frame_pool,
+                descriptor_set_count: set_layouts.len() as u32,
+                ..Default::default()
+            };
+
+            unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() }
         };
-        let lighting_per_frame = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
 
         Renderer {
             model_pool_0: geometry_per_model,
             lighting_per_light_pool_2: lighting_per_light,
-            lighting_per_frame_sets_1: lighting_per_frame,
+            lighting_per_frame_sets_1,
             _entry: entry,
             debug_messenger,
             debug_utils_loader,
@@ -1046,7 +1046,7 @@ impl Renderer {
             swapchain,
             render_pass,
             allocator: shared_allocator,
-            geometry_per_frame_1: sets,
+            geometry_per_frame_1: geometry_per_frame_sets_1,
             surface,
             surface_loader,
             swapchain_loader: swapchain_loader.clone(),
