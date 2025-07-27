@@ -1,5 +1,9 @@
 use core::f32;
+use std::path::Path;
 
+use gltf;
+use image::ImageReader;
+use moonlight::components::Texture;
 use moonlight::ecs::World;
 use moonlight::{
     components::{
@@ -7,12 +11,9 @@ use moonlight::{
     },
     renderer::{self, Camera, Renderer, Vertex},
 };
-use obj::load_obj;
 use std::{
     collections::HashSet,
     f32::consts::PI,
-    fs::File,
-    io::BufReader,
     time::{Duration, Instant},
 };
 use ultraviolet::{Rotor3, Slerp, Vec3};
@@ -51,28 +52,34 @@ impl Default for App {
     }
 }
 
+///Panics:
+///panics if the number of meshes in the gltf asset is != 1, or if the mesh does not contain
+///positions, normals and texture coordinates
 fn load_model(path: &str, renderer: &mut Renderer) -> Model {
-    let input = BufReader::new(File::open(path).unwrap());
-    let model = load_obj::<obj::Vertex, _, u32>(input).unwrap();
-    let vertices: Vec<Vertex> = model
-        .vertices
-        .iter()
-        .map(|v| Vertex::new(v.position.into(), v.normal.into(), Vec3::one()))
+    let (document, buffers, _images) = gltf::import(path).unwrap();
+    assert_eq!(document.meshes().len(), 1);
+    let mesh = &document.meshes().next().unwrap();
+    let primative: &gltf::Primitive = &mesh.primitives().next().unwrap();
+
+    let reader = primative.reader(|buffer| Some(&buffers[buffer.index()]));
+
+    let indices = reader.read_indices().unwrap().into_u32().collect();
+    let positions = reader.read_positions().unwrap();
+    let normals = reader.read_normals().unwrap();
+    let tex_coords = reader.read_tex_coords(0).unwrap().into_f32();
+
+    let vertices = positions
+        .zip(normals)
+        .zip(tex_coords)
+        .map(|((position, normal), uv)| Vertex {
+            position,
+            normal,
+            uv,
+        })
         .collect();
-    let indices: Vec<u32> = model.indices.clone();
 
     Model::create(renderer, vertices, indices)
 }
-
-// fn load_image(path: &str, format: image::ImageFormat, renderer: &Renderer) -> Texture {
-//     let image = ImageReader::open(path)
-//         .expect(&format!("invalid image path {}", path))
-//         .decode()
-//         .expect(&format!("invaid image {}", path));
-//
-//     dbg!(path);
-//     Texture::create(renderer, image)
-// }
 
 impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
@@ -85,7 +92,9 @@ impl ApplicationHandler for App {
         }
 
         let window = renderer::create_window(event_loop);
-        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+        window
+            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .unwrap();
         window.set_cursor_visible(false);
         self.renderer = Some(Renderer::init(event_loop, &window));
         let renderer = unsafe { self.renderer.as_mut().unwrap_unchecked() };
@@ -94,7 +103,7 @@ impl ApplicationHandler for App {
         // 2) Create “static” resources (camera, lights, input, etc.)
         // ───────────────────────────────────────────────────────
         // Camera at (0, 5, -6), fov=60°, near=1.0, far=100.0
-        let camera = Camera::create(Vec3::new(0.0, 5.0, -6.0), 60.0, 3.0, 50.0, renderer);
+        let camera = Camera::create(Vec3::new(0.0, 5.0, -6.0), 60.0, 1.0, 200.0, renderer);
         // Sun (directional) and ambient light
         let directional =
             DirectionalLight::create(renderer, [200.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
@@ -103,6 +112,7 @@ impl ApplicationHandler for App {
         // Keyboard + mouse input resources
         let keyboard = Keyboard::new();
         let mouse_movement = MouseMovement::default();
+        let empty_image = Texture::default_image(renderer);
 
         // Register resources into the world
         self.world.resource_add(camera);
@@ -111,6 +121,7 @@ impl ApplicationHandler for App {
         self.world.resource_add(window.clone());
         self.world.resource_add(keyboard);
         self.world.resource_add(mouse_movement);
+        self.world.resource_add(empty_image);
 
         let renderer = self.renderer.as_mut().unwrap();
 
@@ -125,154 +136,206 @@ impl ApplicationHandler for App {
         let x_axis = self.world.entity_create();
         let y_axis = self.world.entity_create();
         let z_axis = self.world.entity_create();
+        let standing_block = self.world.entity_create();
+
+        let image = ImageReader::open(Path::new("data/textures/fox_texture.png"))
+            .unwrap()
+            .decode()
+            .unwrap();
+
+        let image = Texture::create_image(&image, renderer);
+        self.world.component_add(fox, image).unwrap();
+
+        let image = ImageReader::open(Path::new("data/textures/ground_soft.jpg"))
+            .unwrap()
+            .decode()
+            .unwrap();
+
+        let image = Texture::create_image(&image, renderer);
+        self.world.component_add(ground, image).unwrap();
 
         // ───────────────────────────────────────────────────────
         // THE FOX - Center stage, elevated on a mystical platform
         // ───────────────────────────────────────────────────────
-        let _ = self.world.component_add(
-            fox,
-            Transform::from(
-                Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
-                Some(Rotor3::from_rotation_xz(PI * 0.25)), // Slight rotation for dramatic pose
-                Some(Vec3::new(1.0, 1.0, 1.0)),
-            ),
-        );
-        let _ = self.world.component_add(fox, Controllable);
+        self.world
+            .component_add(
+                fox,
+                Transform::from(
+                    Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
+                    Some(Rotor3::from_rotation_xz(PI * 0.25)), // Slight rotation for dramatic pose
+                    Some(Vec3::new(1.0, 1.0, 1.0)),
+                ),
+            )
+            .unwrap();
+        self.world.component_add(fox, Controllable).unwrap();
 
         // Fox collision - smaller and more precise
-        let fox_half_extents = Vec3::new(0.3, 0.6, 0.3);
-        let fox_center_offset = Vec3::new(0.0, 0.6, 0.0);
-        let _ = self.world.component_add(
-            fox,
-            Collider::Aabb(Aabb::new(fox_half_extents, fox_center_offset)),
-        );
-        let _ = self.world.component_add(fox, RigidBody::new());
-        let _ = self
-            .world
-            .component_add(fox, load_model("data/models/low poly fox.obj", renderer));
+        let fox_half_extents = Vec3::new(0.4, 0.588, 0.4);
+        let fox_center_offset = Vec3::new(0.0, 0.0, 0.0);
+        self.world
+            .component_add(
+                fox,
+                Collider::Aabb(Aabb::new(fox_half_extents, fox_center_offset)),
+            )
+            .unwrap();
+        self.world.component_add(fox, RigidBody::new()).unwrap();
+        self.world
+            .component_add(fox, load_model("data/models/low_poly_fox.glb", renderer))
+            .unwrap();
 
-        // ───────────────────────────────────────────────────────
-        // THE GROUND - Ancient mystical platform
-        // ───────────────────────────────────────────────────────
-        let _ = self.world.component_add(ground, Transform::new());
-        let _ = self
-            .world
-            .component_add(ground, load_model("data/models/groundplane.obj", renderer));
+        self.world
+            .component_add(
+                ground,
+                Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
+            )
+            .unwrap();
+        self.world
+            .component_add(ground, load_model("data/models/ground_plane.glb", renderer))
+            .unwrap();
 
         // Ground collision - the full 40x40 area with some depth
-        let _ = self.world.component_add(
-            ground,
-            Collider::Aabb(Aabb::new(
-                Vec3::new(20.0, 1.0, 20.0), // Half-extents: 40x2x40 total size
-                Vec3::new(0.0, -1.0, 0.0),  // Center offset: buried 1 unit down
-            )),
-        );
+        self.world
+            .component_add(
+                ground,
+                Collider::Aabb(Aabb::new(
+                    Vec3::new(20.0, 4.0, 20.0), // Half-extents: 40x2x40 total size
+                    Vec3::new(0.0, -4.0, 0.0),  // Center offset: buried 1 unit down
+                )),
+            )
+            .unwrap();
 
-        // ───────────────────────────────────────────────────────
-        // FLOATING MONUMENT CUBES - Ancient guardians in formation
-        // ───────────────────────────────────────────────────────
+        self.world
+            .component_add(
+                x_axis,
+                Transform::from(
+                    Some(Vec3::new(8.0, 0.0, 8.0)), // High and forward-right
+                    None,
+                    Some(Vec3::new(10.0, 9.0, 10.0)),
+                ),
+            )
+            .unwrap();
+        self.world
+            .component_add(
+                y_axis,
+                Transform::from(
+                    Some(Vec3::new(-12.0, 0.0, -3.0)), // Tallest, to the left and slightly back
+                    None,
+                    Some(Vec3::new(2.0, 2.0, 2.0)),
+                ),
+            )
+            .unwrap();
+        self.world
+            .component_add(
+                z_axis,
+                Transform::from(
+                    Some(Vec3::new(5.0, 0.0, -10.0)), // Behind the fox, watching over
+                    None,
+                    Some(Vec3::new(3.0, 3.0, 3.0)),
+                ),
+            )
+            .unwrap();
 
-        // X-AXIS CUBE: "The Crimson Guardian" - Front right, rotating
-        let _ = self.world.component_add(
-            x_axis,
-            Transform::from(
-                Some(Vec3::new(8.0, 6.0, 8.0)), // High and forward-right
-                Some(Rotor3::from_rotation_yz(PI * 0.125) * Rotor3::from_rotation_xz(PI * 0.25)), // Complex rotation
-                Some(Vec3::new(2.0, 5.0, 5.0)),
-            ),
-        );
-
-        // Y-AXIS CUBE: "The Emerald Sentinel" - Left side, towering
-        let _ = self.world.component_add(
-            y_axis,
-            Transform::from(
-                Some(Vec3::new(-12.0, 10.0, -3.0)), // Tallest, to the left and slightly back
-                Some(Rotor3::from_rotation_xy(PI * 0.1) * Rotor3::from_rotation_xz(PI * 0.5)), // Tilted dramatically
-                None,
-            ),
-        );
-
-        // Z-AXIS CUBE: "The Azure Watcher" - Behind and to the right
-        let _ = self.world.component_add(
-            z_axis,
-            Transform::from(
-                Some(Vec3::new(5.0, 4.0, -10.0)), // Behind the fox, watching over
-                Some(Rotor3::from_rotation_xz(PI * 0.2) * Rotor3::from_rotation_xy(PI * 0.15)), // Tilted forward slightly
-                None,
-            ),
-        );
+        self.world
+            .component_add(
+                standing_block,
+                Transform::from(
+                    Some(Vec3::new(4.0, 5.5, -3.0)),
+                    None,
+                    Some(Vec3::new(3.0, 0.3, 3.0)),
+                ),
+            )
+            .unwrap();
 
         // Colliders for the floating monuments - smaller, more precise
-        let monument_collider = Collider::Aabb(Aabb::new(
-            Vec3::new(0.5, 0.5, 0.5), // 1x1x1 cubes
-            Vec3::new(0.0, 0.0, 0.0), // Centered
-        ));
-        let _ = self.world.component_add(x_axis, monument_collider);
-        let _ = self.world.component_add(y_axis, monument_collider);
-        let _ = self.world.component_add(z_axis, monument_collider);
+        let cube_collider = Collider::Aabb(Aabb::new(Vec3::new(1.0, 1.0, 1.0), Vec3::zero()));
+        self.world.component_add(x_axis, cube_collider).unwrap();
+        self.world.component_add(y_axis, cube_collider).unwrap();
+        self.world.component_add(z_axis, cube_collider).unwrap();
+        self.world
+            .component_add(standing_block, cube_collider)
+            .unwrap();
 
         // Attach models to monuments
-        let _ = self
-            .world
-            .component_add(x_axis, load_model("data/models/square.obj", renderer));
-        let _ = self
-            .world
-            .component_add(y_axis, load_model("data/models/square.obj", renderer));
-        let _ = self
-            .world
-            .component_add(z_axis, load_model("data/models/square.obj", renderer));
+        self.world
+            .component_add(x_axis, load_model("data/models/large_cube.glb", renderer))
+            .unwrap();
+        self.world
+            .component_add(y_axis, load_model("data/models/large_cube.glb", renderer))
+            .unwrap();
+        self.world
+            .component_add(z_axis, load_model("data/models/large_cube.glb", renderer))
+            .unwrap();
+        self.world
+            .component_add(
+                standing_block,
+                load_model("data/models/large_cube.glb", renderer),
+            )
+            .unwrap();
 
         // ───────────────────────────────────────────────────────
         // DRAMATIC LIGHTING - Three-point mystical lighting setup
         // ───────────────────────────────────────────────────────
 
         // RED LIGHT: "Crimson Flame" - Key light, high intensity, following the red monument
-        let _ = self.world.component_add(
-            red_light,
-            PointLight::create(
-                renderer,
-                Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
-                23.0,                     // High intensity for drama
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            red_light,
-            Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
-        );
+        self.world
+            .component_add(
+                red_light,
+                PointLight::create(
+                    renderer,
+                    Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
+                    23.0,                     // High intensity for drama
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        self.world
+            .component_add(
+                red_light,
+                Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
+            )
+            .unwrap();
 
         // GREEN LIGHT: "Emerald Glow" - Fill light, medium intensity, illuminating the left side
-        let _ = self.world.component_add(
-            green_light,
-            PointLight::create(
-                renderer,
-                Vec3::new(0.2, 1.0, 0.3), // Vibrant green
-                15.0,                     // Medium intensity
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            green_light,
-            Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
-        );
+        self.world
+            .component_add(
+                green_light,
+                PointLight::create(
+                    renderer,
+                    Vec3::new(0.2, 1.0, 0.3), // Vibrant green
+                    15.0,                     // Medium intensity
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        self.world
+            .component_add(
+                green_light,
+                Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
+            )
+            .unwrap();
 
         // BLUE LIGHT: "Azure Whisper" - Rim light, subtle, creating mystical atmosphere
-        let _ = self.world.component_add(
-            blue_light,
-            PointLight::create(
-                renderer,
-                Vec3::new(0.3, 0.4, 1.0), // Cool blue
-                12.0,                     // Lower intensity for subtle rim lighting
-                None,
-                None,
-            ),
-        );
-        let _ = self.world.component_add(
-            blue_light,
-            Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
-        );
+        self.world
+            .component_add(
+                blue_light,
+                PointLight::create(
+                    renderer,
+                    Vec3::new(0.3, 0.4, 1.0), // Cool blue
+                    12.0,                     // Lower intensity for subtle rim lighting
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        self.world
+            .component_add(
+                blue_light,
+                Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
+            )
+            .unwrap();
+        self.prev_frame_end = Instant::now();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
@@ -451,7 +514,7 @@ fn camera_update(world: &mut World, _delta_time: f32) {
 
     camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
 
-    let target_distance = 20.0;
+    let target_distance = 10.0;
 
     let backward = Vec3 {
         x: 0.0,
@@ -498,7 +561,7 @@ fn player_update(world: &mut World, delta_time: f32) {
     // BUG: allows the player to jump at the apex of their jump, but the period of time which the
     // bug is viable to exploit is almost zero so not going to fix
     if keyboard.contains(&KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
-        jump = 5.0
+        jump = 8.0
     }
     if !(delta_v == Vec3::zero()) {
         delta_v = camera_rotation * delta_v;

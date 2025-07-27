@@ -27,7 +27,9 @@ fn bench_component_add(c: &mut Criterion) {
         b.iter(|| {
             for &id in &ids {
                 // Use black_box to prevent compiler optimizing away the value
-                let _ = world.component_add(id, black_box((1u64, 2u64, 3u64)));
+                world
+                    .component_add(id, black_box((1u64, 2u64, 3u64)))
+                    .unwrap();
             }
         })
     });
@@ -40,7 +42,7 @@ fn bench_query(c: &mut Criterion) {
             let mut world = World::init();
             let ids: Vec<EntityId> = (0..10_000).map(|_| world.entity_create()).collect();
             for &id in &ids {
-                let _ = world.component_add(id, (1u64, 2u64, 3u64));
+                world.component_add(id, (1u64, 2u64, 3u64)).unwrap();
             }
 
             let results = world.query::<(u64, u64, u64)>();
@@ -77,7 +79,7 @@ fn bench_component_remove(c: &mut Criterion) {
     c.bench_function("component_remove_10k", |b| {
         b.iter(|| {
             for &id in &ids {
-                let _ = world.component_remove::<u64>(id);
+                world.component_remove::<u64>(id).unwrap();
             }
         })
     });

@@ -1,15 +1,19 @@
 #![allow(clippy::cast_possible_truncation)]
-use crate::layouts::{self, BINDINGS};
-use ash::vk::{self, Extent3D, TaggedStructure};
+use crate::{
+    components::Texture,
+    layouts::{self, BINDINGS},
+};
+use ash::vk::{self, Extent3D, TaggedStructure, VertexInputAttributeDescription};
 use bytemuck::{bytes_of, Pod, Zeroable};
 use gpu_allocator::vulkan::*;
-use half::f16;
+use image::{EncodableLayout, ImageReader};
 use std::{
     ffi::CStr,
     fs,
     io::Write,
     marker::PhantomData,
     os::raw::c_void,
+    path::Path,
     ptr::{self},
     slice,
     sync::{Arc, Mutex},
@@ -20,7 +24,7 @@ use winit::dpi::PhysicalSize;
 const VALIDATION_ENABLE: bool = true;
 type SharedAllocator = Arc<Mutex<Allocator>>;
 
-use ultraviolet::{projection, Rotor3, Vec3};
+use ultraviolet as uv;
 //INFO: idk how to fix this, one wants raw window handles and the other says no
 #[allow(deprecated)]
 use winit::{
@@ -35,8 +39,8 @@ pub const LIGHTING_SUBPASS: SubpassIndex = 1;
 
 #[derive(Default)]
 pub struct Camera {
-    pub position: Vec3,
-    pub rotation: Rotor3,
+    pub position: uv::Vec3,
+    pub rotation: uv::Rotor3,
     pub fov_rads: f32,
     pub near: f32,
     pub far: f32,
@@ -51,11 +55,17 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn create(position: Vec3, fov: f32, near: f32, far: f32, renderer: &mut Renderer) -> Self {
+    pub fn create(
+        position: uv::Vec3,
+        fov: f32,
+        near: f32,
+        far: f32,
+        renderer: &mut Renderer,
+    ) -> Self {
         let size: [f32; 2] = renderer.window.inner_size().into();
         let aspect_ratio = size[0] / size[1];
         let fov_rads = fov * (std::f32::consts::PI / 180.0);
-        let rotation = Rotor3::identity();
+        let rotation = uv::Rotor3::identity();
 
         let mut camera = Self {
             pitch: 0.0,
@@ -91,15 +101,20 @@ impl HasUBO for Camera {
 
     #[allow(unused)]
     fn get_ubo_data(&self, context: &mut Self::Context) -> Self::UBOData {
-        let forward = (-Vec3::unit_z()).rotated_by(self.rotation);
+        let forward = (-uv::Vec3::unit_z()).rotated_by(self.rotation);
         let look_at = self.position + forward;
         CameraUBO {
             view: ultraviolet::Mat4::look_at(
                 self.position,
                 look_at,
-                Vec3::new(0.0, 1.0, 0.0), // Up vector
+                uv::Vec3::new(0.0, 1.0, 0.0), // Up vector
             ),
-            proj: projection::perspective_vk(self.fov_rads, self.aspect_ratio, self.near, self.far),
+            proj: uv::projection::perspective_vk(
+                self.fov_rads,
+                self.aspect_ratio,
+                self.near,
+                self.far,
+            ),
         }
     }
     fn get_ubo_buffers(&self) -> Option<&Vec<vk::Buffer>> {
@@ -199,7 +214,6 @@ pub(crate) trait HasUBO {
             memory.push(alloc);
             uniform_buffer.push(buffer);
         }
-        dbg!(&uniform_buffer);
         self.set_ubo_buffers(uniform_buffer, memory);
     }
 }
@@ -255,7 +269,6 @@ pub fn alloc_buffer(
         allocations.push(alloc);
         buffers.push(buffer);
     }
-    dbg!(&buffers);
     (buffers, allocations)
 }
 
@@ -271,23 +284,41 @@ pub(crate) struct CameraUBO {
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    pub color: [f16; 3],
-    _padding: [u8; 2],
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
-    pub fn new(postion: Vec3, normal: Vec3, color: Vec3) -> Self {
-        let color: [f16; 3] = [
-            f16::from_f32(color.x),
-            f16::from_f32(color.y),
-            f16::from_f32(color.z),
-        ];
+    pub fn new(postion: uv::Vec3, normal: uv::Vec3, uv: uv::Vec2) -> Self {
         Self {
             position: *postion.as_array(),
             normal: *normal.as_array(),
-            color,
-            _padding: [0, 0],
+            uv: *uv.as_array(),
         }
+    }
+    fn get_vertex_attributes() -> Vec<VertexInputAttributeDescription> {
+        vec![
+            // position
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0x0,
+            },
+            // normal
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0xC,
+            },
+            // uv
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 0x18,
+            },
+        ]
     }
 }
 
@@ -311,7 +342,7 @@ pub struct Renderer {
 
     pub framebuffer_resized: bool,
     pub start_time: Instant,
-    swapchain_image_index: usize,
+    swapchain_image_index: u32,
     frame_counter: u64,
     current_frame: usize,
 
@@ -328,16 +359,19 @@ pub struct Renderer {
     pub(crate) descriptor_layouts: layouts::DescriptorLayouts,
 
     pub(crate) model_pool_0: vk::DescriptorPool,
-    pub(crate) geometry_per_frame_1: Vec<vk::DescriptorSet>,
-
-    pub(crate) lighting_per_frame_sets_1: Vec<vk::DescriptorSet>,
-
+    pub(crate) image_descriptor_pool_0: vk::DescriptorPool,
     pub(crate) lighting_per_light_pool_2: vk::DescriptorPool,
+
+    pub(crate) geometry_per_frame_1: Vec<vk::DescriptorSet>,
+    pub(crate) lighting_per_frame_sets_1: Vec<vk::DescriptorSet>,
 
     graphics_pipelines: Vec<GraphicsPipeline>,
     pub(crate) swapchain: SwapchainResources,
     per_frame: Vec<PerFrame>,
     pub(crate) allocator: SharedAllocator,
+
+    pub(crate) one_time_submit_pool: vk::CommandPool,
+    pub(crate) one_time_submit: vk::CommandBuffer,
 }
 
 struct GraphicsPipeline {
@@ -473,6 +507,13 @@ impl Renderer {
         self.frame_counter += 1;
         dbg!(self.frame_counter);
 
+        if self.framebuffer_resized {
+            // Use the new dimensions of the window.
+            self.swapchain.recreate(window_size);
+            world.resource_get_mut::<Camera>().unwrap().aspect_ratio =
+                window_size.width as f32 / window_size.height as f32;
+        }
+
         let is_suboptimal;
         (self.swapchain_image_index, is_suboptimal) = unsafe {
             match self.swapchain_loader.acquire_next_image(
@@ -481,7 +522,7 @@ impl Renderer {
                 frame.image_available,
                 vk::Fence::null(),
             ) {
-                Ok((index, suboptimal)) => (index as usize, suboptimal),
+                Ok((index, suboptimal)) => (index, suboptimal),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     self.framebuffer_resized = true;
                     return;
@@ -489,20 +530,11 @@ impl Renderer {
                 Err(e) => panic!("failed to acquire next image: {e}"),
             }
         };
-
-        if self.framebuffer_resized {
-            // Use the new dimensions of the window.
-            self.swapchain.recreate(window_size);
-            world.resource_get_mut::<Camera>().unwrap().aspect_ratio =
-                window_size.width as f32 / window_size.height as f32
-        }
         if is_suboptimal {
             self.framebuffer_resized = true;
         }
 
         // NOTE: RENDERING START
-
-        dbg!(self.current_frame);
 
         {
             let camera = world
@@ -616,7 +648,8 @@ impl Renderer {
                             pipeline_statistics: vk::QueryPipelineStatisticFlags::empty(),
                             subpass: 0, // ingored
                             render_pass: self.render_pass,
-                            framebuffer: self.swapchain.framebuffers[self.swapchain_image_index],
+                            framebuffer: self.swapchain.framebuffers
+                                [self.swapchain_image_index as usize],
                             query_flags: vk::QueryControlFlags::empty(),
                             occlusion_query_enable: vk::FALSE,
                             ..Default::default()
@@ -631,7 +664,7 @@ impl Renderer {
         let clear_values = vec![
             vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [0.1, 0.1, 0.1, 1.0],
+                    float32: [0.0, 0.0, 0.0, 1.0],
                 },
             },
             vk::ClearValue {
@@ -662,7 +695,7 @@ impl Renderer {
                 frame.command_buffer,
                 &vk::RenderPassBeginInfo {
                     render_pass: self.render_pass,
-                    framebuffer: self.swapchain.framebuffers[self.swapchain_image_index],
+                    framebuffer: self.swapchain.framebuffers[self.swapchain_image_index as usize],
                     p_clear_values: clear_values.as_ptr(),
                     clear_value_count: clear_values.len() as u32,
                     render_area: vk::Rect2D {
@@ -706,9 +739,6 @@ impl Renderer {
         };
 
         let camera_descripor_set = &self.geometry_per_frame_1;
-
-        let entities = world.query_mut::<Model>();
-
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
@@ -720,7 +750,46 @@ impl Renderer {
                 &[],
             );
         }
-        for (_entity, model) in entities {
+
+        let white_texture_set_2 = world.resource_get::<Texture>().unwrap().descriptor_set_2;
+
+        let entities = world.query_entities::<Model>();
+        let mut need_rebind_white = true;
+        for entity in entities {
+            if world.has_component::<Texture>(entity) {
+                need_rebind_white = true;
+                let model = world
+                    .component_get::<Texture>(entity)
+                    .expect("ecs corrupted, panic");
+                let model_texture = model.descriptor_set_2;
+
+                unsafe {
+                    self.device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.graphics_pipelines[0].pipeline_layout,
+                        2, // the set to bind to
+                        &[model_texture],
+                        &[],
+                    )
+                };
+            } else if need_rebind_white {
+                unsafe {
+                    self.device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.graphics_pipelines[0].pipeline_layout,
+                        2, //
+                        &[white_texture_set_2],
+                        &[],
+                    );
+                }
+                need_rebind_white = false;
+            }
+            let model = world
+                .component_get::<Model>(entity)
+                .expect("ecs corrupted, panic");
+
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     frame.command_buffer,
@@ -763,8 +832,8 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.graphics_pipelines[1].pipeline,
             );
-            let attachment_descriptor_set =
-                self.swapchain.per_swapchain_image_descriptor_sets_0[self.swapchain_image_index];
+            let attachment_descriptor_set = self.swapchain.per_swapchain_image_descriptor_sets_0
+                [self.swapchain_image_index as usize];
 
             let light_per_frame_descriptor_set = self.lighting_per_frame_sets_1[self.current_frame];
 
@@ -812,10 +881,11 @@ impl Renderer {
                 .unwrap();
         }
 
+        let wait_dst_access_mask = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
         let queue_submit_info = vk::SubmitInfo {
             wait_semaphore_count: 1,
             p_wait_semaphores: &frame.image_available,
-            p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            p_wait_dst_stage_mask: &wait_dst_access_mask,
             command_buffer_count: 1,
             p_command_buffers: &frame.command_buffer,
             p_signal_semaphores: &frame.render_finished,
@@ -835,7 +905,7 @@ impl Renderer {
             wait_semaphore_count: 1,
             p_swapchains: &self.swapchain.swapchain,
             swapchain_count: 1,
-            p_image_indices: &(self.swapchain_image_index as u32),
+            p_image_indices: &self.swapchain_image_index,
             p_results: present_results.as_mut_ptr(),
             ..Default::default()
         };
@@ -888,7 +958,7 @@ impl Renderer {
         let debug_messenger = setup_debug_utils(&debug_utils_loader);
         eprintln!("set up debug utility");
 
-        let required_extensions = vec![
+        let required_extensions = [
             ash::vk::KHR_SWAPCHAIN_NAME,
             // ash::vk::KHR_SHADER_NON_SEMANTIC_INFO_NAME,
         ];
@@ -989,7 +1059,7 @@ impl Renderer {
             unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() }
         };
 
-        let (lighting_per_light, geometry_per_model) = {
+        let (lighting_per_light, geometry_per_model, image_descriptor_pool) = {
             let pool_sizes = vec![vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 50,
@@ -1002,7 +1072,25 @@ impl Renderer {
             };
             let lighting = unsafe { device.create_descriptor_pool(&create_info, None).unwrap() };
             let geometry = unsafe { device.create_descriptor_pool(&create_info, None).unwrap() };
-            (lighting, geometry)
+
+            let pool_sizes = vec![vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 20,
+            }];
+            let image_create_info = vk::DescriptorPoolCreateInfo {
+                max_sets: 100,
+                p_pool_sizes: pool_sizes.as_ptr(),
+                pool_size_count: pool_sizes.len() as u32,
+                ..Default::default()
+            };
+
+            let image = unsafe {
+                device
+                    .create_descriptor_pool(&image_create_info, None)
+                    .unwrap()
+            };
+
+            (lighting, geometry, image)
         };
 
         let lighting_per_frame_sets_1 = {
@@ -1031,7 +1119,25 @@ impl Renderer {
             unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() }
         };
 
+        let pool_create_info = vk::CommandPoolCreateInfo {
+            flags: vk::CommandPoolCreateFlags::empty(),
+            queue_family_index,
+            ..Default::default()
+        };
+        let one_time_command_pool =
+            unsafe { device.create_command_pool(&pool_create_info, None).unwrap() };
+        let alloc_info = vk::CommandBufferAllocateInfo {
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_pool: one_time_command_pool,
+            command_buffer_count: 1,
+            ..Default::default()
+        };
+        let one_time_submit = unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] };
+
         Renderer {
+            image_descriptor_pool_0: image_descriptor_pool,
+            one_time_submit,
+            one_time_submit_pool: one_time_command_pool,
             model_pool_0: geometry_per_model,
             lighting_per_light_pool_2: lighting_per_light,
             lighting_per_frame_sets_1,
@@ -1092,8 +1198,6 @@ pub(crate) fn create_attachment_descriptor_sets(
         binding_indices.len()
     );
 
-    dbg!(&attachments);
-
     let frame_count = attachments.len() / binding_indices.len();
 
     let set_layouts = vec![attachment_layout; frame_count];
@@ -1124,7 +1228,6 @@ pub(crate) fn create_attachment_descriptor_sets(
         let frame_index = i / binding_indices.len(); // Which frame/set this attachment belongs to
         let binding_index = i % binding_indices.len(); // Which binding within that frame
 
-        dbg!(&image_infos[i]);
         descriptor_writes.push(vk::WriteDescriptorSet {
             dst_set: descriptor_sets[frame_index],
             p_image_info: &image_infos[i],
@@ -1135,8 +1238,6 @@ pub(crate) fn create_attachment_descriptor_sets(
             ..Default::default()
         })
     }
-
-    dbg!(&descriptor_writes);
 
     unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
     //HACK: this manually drops them because otherwise the vec will realize that its no longer in
@@ -1177,7 +1278,6 @@ pub fn create_framebuffers(
         depth: 1,
     };
 
-    dbg!(swapchain_images);
     let color_format = vk::Format::A2B10G10R10_UNORM_PACK32;
     let depth_format = vk::Format::D32_SFLOAT;
     let normal_format = vk::Format::R16G16B16A16_SFLOAT;
@@ -1476,7 +1576,7 @@ pub fn create_framebuffers(
 
 #[allow(clippy::too_many_lines)]
 fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -> vk::RenderPass {
-    let attachments = vec![
+    let attachments = [
         // final color attachment
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
@@ -1490,7 +1590,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // color attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
             format: vk::Format::A2B10G10R10_UNORM_PACK32,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -1500,7 +1600,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // normal attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
             format: vk::Format::R16G16B16A16_SFLOAT,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -1520,7 +1620,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         // position attachment (gbuffer)
         vk::AttachmentDescription {
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
             format: vk::Format::R32G32B32A32_SFLOAT,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -1528,7 +1628,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
             ..Default::default()
         },
     ];
-    let geometry_color_attachment_ref = vec![
+    let geometry_color_attachment_ref = [
         // gcolor
         vk::AttachmentReference {
             attachment: 1,
@@ -1549,7 +1649,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         attachment: 3,
         layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
-    let lighting_input_attachment_ref = vec![
+    let lighting_input_attachment_ref = [
         // gcolor attachment
         vk::AttachmentReference {
             attachment: 1,
@@ -1569,13 +1669,13 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
             ..Default::default()
         },
     ];
-    let lighting_color_attachment_ref = vec![vk::AttachmentReference {
+    let lighting_color_attachment_ref = [vk::AttachmentReference {
         attachment: 0, // Color attachment
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         ..Default::default()
     }];
 
-    let subpasses = vec![
+    let subpasses = [
         // geometry pass
         vk::SubpassDescription {
             p_color_attachments: geometry_color_attachment_ref.as_ptr(),
@@ -1604,7 +1704,7 @@ fn create_renderpass(device: &ash::Device, swapchain_image_format: vk::Format) -
         },
     ];
 
-    let dependancies = vec![vk::SubpassDependency {
+    let dependancies = [vk::SubpassDependency {
         src_subpass: 0,
         dst_subpass: 1,
         src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1679,34 +1779,13 @@ fn create_graphics_pipelines(
     let point_vert = create_shader_module(device, "shaders/point_vert.spv");
     let point_frag = create_shader_module(device, "shaders/point_frag.spv");
 
-    let vertex_bindings = vec![vk::VertexInputBindingDescription {
+    let vertex_bindings = [vk::VertexInputBindingDescription {
         binding: 0,
         stride: 32,
         input_rate: vk::VertexInputRate::VERTEX,
     }];
-    let vertex_attributes = vec![
-        // position
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: 0,
-        },
-        // normal
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: 12,
-        },
-        // color
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R16G16B16_SFLOAT,
-            offset: 24,
-        },
-    ];
+
+    let vertex_attributes = Vertex::get_vertex_attributes();
 
     let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
         p_vertex_binding_descriptions: vertex_bindings.as_ptr(),
@@ -1736,6 +1815,8 @@ fn create_graphics_pipelines(
             module: deferred_frag,
             p_name: SHADER_ENTRY_NAME.as_ptr(),
             stage: vk::ShaderStageFlags::FRAGMENT,
+            p_specialization_info: ptr::null(),
+
             ..Default::default()
         },
     ];
@@ -1796,6 +1877,7 @@ fn create_graphics_pipelines(
     let set_layouts = [
         descriptor_layouts.geometry_per_model_layout_0,
         descriptor_layouts.geometry_per_frame_layout_1,
+        descriptor_layouts.geometry_static_texture_layout_2,
     ];
     let deferred_layout = {
         let deferred_layout_create_info = vk::PipelineLayoutCreateInfo {
@@ -1943,7 +2025,7 @@ fn create_graphics_pipelines(
         blend_enable: vk::TRUE,
         ..Default::default()
     };
-    let color_blend_attachments = [blend_attachment; 3];
+    let color_blend_attachments = [blend_attachment; 1];
     let color_blend_state = vk::PipelineColorBlendStateCreateInfo {
         s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         p_attachments: color_blend_attachments.as_ptr(),
@@ -2150,7 +2232,7 @@ fn create_physical_device(
     instance: &ash::Instance,
     // TODO: should use this to test surface support but dont feel like it
     _surface: vk::SurfaceKHR,
-    required_extensions: &Vec<&CStr>,
+    required_extensions: &[&CStr],
 ) -> (vk::PhysicalDevice, QueueFamilyIndex) {
     let physical_devices = unsafe { instance.enumerate_physical_devices().unwrap() };
 
@@ -2214,11 +2296,11 @@ fn create_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_index: QueueFamilyIndex,
-    required_extensions: &Vec<&CStr>,
+    required_extensions: &[&CStr],
 ) -> (ash::Device, vk::Queue) {
     let enabled_features = unsafe { instance.get_physical_device_features(physical_device) };
-    let queue_create_infos = vec![vk::DeviceQueueCreateInfo {
-        queue_family_index: queue_family_index,
+    let queue_create_infos = [vk::DeviceQueueCreateInfo {
+        queue_family_index,
         queue_count: 1,
         p_queue_priorities: [1.0].as_ptr(),
         ..Default::default()
@@ -2351,7 +2433,7 @@ impl SwapchainResources {
             image_color_space: image_format.color_space,
             image_format: image_format.format,
             image_extent: window_size,
-            present_mode: vk::PresentModeKHR::MAILBOX,
+            present_mode: vk::PresentModeKHR::FIFO,
             pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
@@ -2384,16 +2466,11 @@ impl SwapchainResources {
                 image_format.format,
             );
 
-        dbg!(&framebuffers);
-        dbg!(&color_buffers);
-        dbg!(&normal_buffers);
-        dbg!(&position_buffers);
-
         // one set per swapchain image, * 4 for color normal position and final_color * 3 for
         // safety
         let required_sets: u32 = (swapchain_images.len() * 4 * 3) as u32;
 
-        let pool_sizes = vec![vk::DescriptorPoolSize {
+        let pool_sizes = [vk::DescriptorPoolSize {
             // per uniform buffer, so six descriptors per
             // set(2x what is needed for safety
             descriptor_count: 6 * required_sets,
@@ -2420,8 +2497,6 @@ impl SwapchainResources {
             interleaved.push(normal_buffers[i]);
             interleaved.push(position_buffers[i]);
         }
-
-        dbg!(&interleaved);
 
         let descriptor_sets = create_attachment_descriptor_sets(
             device,
@@ -2471,4 +2546,54 @@ impl SwapchainResources {
         }
         return formats.first().copied();
     }
+}
+
+pub(crate) fn instant_submit_command_buffer(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    command_record: impl FnOnce(vk::CommandBuffer),
+) {
+    let begin_info = vk::CommandBufferBeginInfo {
+        p_inheritance_info: ptr::null(),
+        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+        ..Default::default()
+    };
+
+    unsafe {
+        device
+            .begin_command_buffer(command_buffer, &begin_info)
+            .unwrap()
+    };
+
+    command_record(command_buffer);
+
+    unsafe { device.end_command_buffer(command_buffer).unwrap() };
+
+    let submits = vk::SubmitInfo {
+        command_buffer_count: 1,
+        p_wait_semaphores: ptr::null(),
+        p_command_buffers: &command_buffer,
+        p_signal_semaphores: ptr::null(),
+        wait_semaphore_count: 0,
+        p_wait_dst_stage_mask: ptr::null(),
+        signal_semaphore_count: 0,
+        ..Default::default()
+    };
+    let create_info = vk::FenceCreateInfo {
+        ..Default::default()
+    };
+    let fence = unsafe { device.create_fence(&create_info, None).unwrap() };
+
+    unsafe { device.queue_submit(queue, &[submits], fence).unwrap() }
+
+    let wait = [fence];
+    unsafe { device.wait_for_fences(&wait, true, u64::MAX).unwrap() };
+    unsafe {
+        device
+            .reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())
+            .unwrap()
+    };
+    unsafe { device.destroy_fence(fence, None) };
 }

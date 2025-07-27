@@ -1,16 +1,17 @@
 #![allow(dead_code)]
 #![allow(unreachable_patterns)]
-use core::fmt;
 use gpu_allocator::vulkan::*;
-use std::sync::Arc;
+use image::{DynamicImage, EncodableLayout, ImageBuffer, ImageReader, RgbaImage};
+use std::{io::Write, path::Path, ptr};
+use ultraviolet as uv;
 
-use ash::vk::{self, DescriptorSet};
+use ash::vk::{self, ComponentMapping, DescriptorSet};
 
 use ultraviolet::{Mat4, Rotor3, Vec3};
 
 use crate::{
     layouts::{self, BINDINGS},
-    renderer::{alloc_buffer, HasUBO, Renderer, Vertex, FRAMES_IN_FLIGHT},
+    renderer::{self, alloc_buffer, HasUBO, Renderer, Vertex, FRAMES_IN_FLIGHT},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -48,13 +49,11 @@ impl Transform {
 #[derive(Debug, Copy, Clone)]
 pub struct RigidBody {
     pub velocity: Vec3,
-    pub grounded: bool,
 }
 impl RigidBody {
     pub fn new() -> Self {
         Self {
             velocity: Vec3::zero(),
-            grounded: false,
         }
     }
 }
@@ -86,12 +85,15 @@ trait DescriptorPerObject {
 }
 
 impl Collider {
+    ///Panics: panics if any scale has negative components
     pub fn penetration_vector(
         from: &Collider,
         to: &Collider,
         from_tr: &Transform,
         to_tr: &Transform,
     ) -> Option<Vec3> {
+        debug_assert!(from_tr.scale.x > 0.0 && from_tr.scale.y > 0.0 && from_tr.scale.z > 0.0);
+        debug_assert!(to_tr.scale.x > 0.0 && to_tr.scale.y > 0.0 && to_tr.scale.z > 0.0);
         match (from, to) {
             (Collider::Aabb(from), Collider::Aabb(to)) => {
                 let from_max = (from.max * from_tr.scale) + from_tr.position;
@@ -255,81 +257,6 @@ impl Model {
         model
     }
 }
-
-/// marker/cache component
-pub struct Texture {
-    pub(crate) image: Arc<image::DynamicImage>,
-}
-impl fmt::Debug for Texture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Marker, no debug information available yet")
-    }
-}
-// impl Texture {
-//     pub fn create(renderer: &Renderer, image: DynamicImage) -> Self {
-//         let image = image.as_rgba8().expect("image is invalid");
-//
-//         let dst_image = Image::new(
-//             renderer.memory_allocator.clone(),
-//             ImageCreateInfo {
-//                 format: vulkano::format::Format::R8G8B8A8_SRGB,
-//                 extent: [image.width(), image.height(), 1],
-//                 initial_layout: vulkano::image::ImageLayout::Undefined,
-//                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
-//                 ..Default::default()
-//             },
-//             AllocationCreateInfo {
-//                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-//                 ..Default::default()
-//             },
-//         )
-//         .unwrap();
-//
-//         let staging_buffer = Buffer::new_slice::<u8>(
-//             renderer.memory_allocator.clone(),
-//             BufferCreateInfo {
-//                 usage: BufferUsage::TRANSFER_SRC,
-//                 ..Default::default()
-//             },
-//             AllocationCreateInfo {
-//                 memory_type_filter: MemoryTypeFilter::PREFER_HOST
-//                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-//                 ..Default::default()
-//             },
-//             image.len() as u64,
-//         )
-//         .unwrap();
-//
-//         let mut staging_buffer_write = staging_buffer.write().unwrap();
-//         staging_buffer_write.copy_from_slice(image.as_raw());
-//         drop(staging_buffer_write);
-//         let mut builder = AutoCommandBufferBuilder::primary(
-//             &renderer.command_pool,
-//             renderer.queue.queue_family_index(),
-//             CommandBufferUsage::OneTimeSubmit,
-//         )
-//         .unwrap();
-//
-//         builder
-//             .copy_buffer_to_image(
-//                 vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
-//                     staging_buffer,
-//                     dst_image.clone(),
-//                 ),
-//             )
-//             .unwrap();
-//
-//         let command_buffer = builder.build().unwrap();
-//
-//         let future = sync::now(renderer.device.clone())
-//             .then_execute(renderer.queue.clone(), command_buffer)
-//             .unwrap()
-//             .then_signal_fence_and_flush()
-//             .unwrap();
-//         future.wait(None).unwrap();
-//         Texture { image: dst_image }
-//     }
-// }
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
 #[repr(C)]
@@ -700,4 +627,311 @@ fn ray_starts_inside_aabb() {
     assert!(result.is_some(), "Expected ray to exit the box");
     let t = result.unwrap();
     assert!(t > 0.0, "Expected hit to be forward from the origin");
+}
+#[derive(Debug)]
+pub struct Texture {
+    image: vk::Image,
+    memory: Allocation,
+
+    pub(crate) descriptor_set_2: vk::DescriptorSet,
+    sampler: vk::Sampler,
+}
+
+impl Texture {
+    pub fn default_image(renderer: &mut Renderer) -> Texture {
+        let mut image = RgbaImage::new(1, 1);
+        image.put_pixel(0, 0, image::Rgba::<u8>([u8::MAX, u8::MAX, u8::MAX, 0]));
+        let dynamic_image = DynamicImage::ImageRgba8(image);
+        Texture::create_image(&dynamic_image, renderer)
+    }
+    pub fn create_image(image: &DynamicImage, renderer: &mut Renderer) -> Texture {
+        let image = image.to_rgba8();
+        let create_info = vk::BufferCreateInfo {
+            p_queue_family_indices: &renderer.queue_family_index,
+            queue_family_index_count: 1,
+            size: (image.width() * image.height() * 4) as u64,
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            flags: vk::BufferCreateFlags::empty(),
+            ..Default::default()
+        };
+        let staging_buffer = unsafe { renderer.device.create_buffer(&create_info, None).unwrap() };
+
+        let requirements = unsafe {
+            renderer
+                .device
+                .get_buffer_memory_requirements(staging_buffer)
+        };
+
+        let staging_mem_desc = AllocationCreateDesc {
+            name: "image staging buffer",
+            requirements,
+            location: gpu_allocator::MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        };
+        let mut staging_mem = renderer
+            .allocator
+            .lock()
+            .unwrap()
+            .allocate(&staging_mem_desc)
+            .unwrap();
+
+        unsafe {
+            renderer
+                .device
+                .bind_buffer_memory(staging_buffer, staging_mem.memory(), staging_mem.offset())
+                .unwrap()
+        }
+
+        let image_format = vk::Format::R8G8B8A8_SRGB;
+
+        let create_info = vk::ImageCreateInfo {
+            p_queue_family_indices: &renderer.queue_family_index,
+            queue_family_index_count: 1,
+            usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            tiling: vk::ImageTiling::OPTIMAL,
+            extent: vk::Extent3D {
+                width: image.width(),
+                height: image.height(),
+                depth: 1,
+            },
+            flags: vk::ImageCreateFlags::empty(),
+            format: image_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            image_type: vk::ImageType::TYPE_2D,
+            mip_levels: 1,
+            array_layers: 1,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            ..Default::default()
+        };
+        let final_image = unsafe { renderer.device.create_image(&create_info, None).unwrap() };
+
+        let requirements = unsafe { renderer.device.get_image_memory_requirements(final_image) };
+
+        let final_image_mem_desc = AllocationCreateDesc {
+            name: "image memory",
+            requirements,
+            location: gpu_allocator::MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        };
+        let image_mem = renderer
+            .allocator
+            .lock()
+            .unwrap()
+            .allocate(&final_image_mem_desc)
+            .unwrap();
+
+        unsafe {
+            renderer
+                .device
+                .bind_image_memory(final_image, image_mem.memory(), image_mem.offset())
+                .unwrap()
+        }
+
+        staging_mem
+            .mapped_slice_mut()
+            .unwrap()
+            .write(image.as_bytes())
+            .unwrap();
+
+        let subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        renderer::instant_submit_command_buffer(
+            &renderer.device,
+            renderer.one_time_submit,
+            renderer.one_time_submit_pool,
+            renderer.queue,
+            |command_buffer| {
+                let to_writable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    image: final_image,
+                    subresource_range,
+                    src_access_mask: vk::AccessFlags::empty(),
+                    dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    ..Default::default()
+                };
+
+                unsafe {
+                    renderer.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_writable],
+                    )
+                };
+
+                let regions = [vk::BufferImageCopy {
+                    image_offset: vk::Offset3D::default(),
+                    image_subresource: vk::ImageSubresourceLayers {
+                        mip_level: 0,
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        layer_count: 1,
+                        base_array_layer: 0,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: image.width(),
+                        height: image.height(),
+                        depth: 1,
+                    },
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                }];
+
+                unsafe {
+                    renderer.device.cmd_copy_buffer_to_image(
+                        command_buffer,
+                        staging_buffer,
+                        final_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &regions,
+                    )
+                };
+                let to_readable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_access_mask: vk::AccessFlags::SHADER_READ,
+                    image: final_image,
+                    subresource_range,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    ..Default::default()
+                };
+                //barrier the image into the shader readable layout
+                unsafe {
+                    renderer.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_readable],
+                    )
+                };
+            },
+        );
+
+        unsafe { renderer.device.destroy_buffer(staging_buffer, None) };
+        renderer
+            .allocator
+            .lock()
+            .unwrap()
+            .free(staging_mem)
+            .unwrap();
+
+        let allocate_info = vk::DescriptorSetAllocateInfo {
+            p_set_layouts: &renderer.descriptor_layouts.geometry_static_texture_layout_2,
+            descriptor_pool: renderer.image_descriptor_pool_0,
+            descriptor_set_count: 1,
+            ..Default::default()
+        };
+
+        let descriptor_set = unsafe {
+            renderer
+                .device
+                .allocate_descriptor_sets(&allocate_info)
+                .unwrap()[0]
+        };
+
+        let sampler_create_info = vk::SamplerCreateInfo {
+            flags: vk::SamplerCreateFlags::empty(),
+
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+
+            address_mode_u: vk::SamplerAddressMode::REPEAT,
+            address_mode_v: vk::SamplerAddressMode::REPEAT,
+            address_mode_w: vk::SamplerAddressMode::REPEAT,
+
+            mip_lod_bias: 0.0,
+            anisotropy_enable: vk::TRUE,
+            max_anisotropy: 16.0,
+
+            compare_enable: vk::FALSE,
+            compare_op: vk::CompareOp::ALWAYS,
+
+            min_lod: 0.0,
+            max_lod: vk::LOD_CLAMP_NONE, // or the max mip level of your texture
+
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+
+            ..Default::default()
+        };
+
+        let sampler = unsafe {
+            renderer
+                .device
+                .create_sampler(&sampler_create_info, None)
+                .unwrap()
+        };
+        let image_view_create_info = vk::ImageViewCreateInfo {
+            image: final_image,
+            format: image_format,
+            view_type: vk::ImageViewType::TYPE_2D,
+            components: vk::ComponentMapping {
+                r: vk::ComponentSwizzle::R,
+                g: vk::ComponentSwizzle::G,
+                b: vk::ComponentSwizzle::B,
+                a: vk::ComponentSwizzle::A,
+            },
+            subresource_range,
+            ..Default::default()
+        };
+        let image_view = unsafe {
+            renderer
+                .device
+                .create_image_view(&image_view_create_info, None)
+                .unwrap()
+        };
+
+        let descriptor_image_info = vk::DescriptorImageInfo {
+            sampler,
+            image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+
+        let descriptor_writes = [vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: 0,
+            p_image_info: &descriptor_image_info,
+            p_buffer_info: ptr::null(),
+            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            dst_array_element: 0,
+            p_texel_buffer_view: ptr::null(),
+            ..Default::default()
+        }];
+
+        unsafe {
+            renderer
+                .device
+                .update_descriptor_sets(&descriptor_writes, &[])
+        };
+
+        Self {
+            image: final_image,
+            memory: image_mem,
+            sampler,
+            descriptor_set_2: descriptor_set,
+        }
+    }
 }
