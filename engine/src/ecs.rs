@@ -2,11 +2,8 @@
 use std::{
     any::{Any, TypeId},
     collections::{hash_map::HashMap, HashSet},
-    fmt::Debug,
     time::Instant,
 };
-
-// use thiserror::Error;
 
 macro_rules! assert_unique_types {
     ($($ty:ident)+) => {
@@ -558,24 +555,25 @@ impl_join!(Join4Opt3, Join4Opt3Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, pe
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WorldError {
-    // #[error("entity already has component")]
+    #[error("entity already has component")]
     ComponentAlreadyAdded,
-    // #[error("entity does not have the requested component")]
+    #[error("entity does not have the requested component")]
     EntityMissingComponent,
-    // #[error("the requested entity does not exist")]
+    #[error("the requested entity does not exist")]
     EntityMissing,
-
+    #[error("the requested component does not exist")]
     ComponentTypeMissing,
+    #[error("a resource of this type has already been added")]
+    ResourceAlreadyAdded,
 }
 
-#[derive(Debug)]
 pub struct World {
     entities: HashSet<EntityId>,
 
     component_storages: HashMap<TypeId, Box<dyn ErasedComponentStorage>>,
-    resource_storage: HashMap<TypeId, Box<dyn ErasedComponentStorage>>,
+    resource_storage: HashMap<TypeId, Box<dyn Any>>,
 
     next_free: u32,
     last_dead: Vec<u32>,
@@ -844,13 +842,13 @@ impl<T: 'static> ComponentStorage<T> {
     }
 }
 
-trait ErasedComponentStorage: Any + std::fmt::Debug {
+trait ErasedComponentStorage: Any {
     fn remove_entity(&mut self, entity: EntityId);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-impl<T: 'static + std::fmt::Debug> ErasedComponentStorage for ComponentStorage<T> {
+impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
     /// returns true if remove was successful
     fn remove_entity(&mut self, entity: EntityId) {
         self.remove(entity);
@@ -905,18 +903,14 @@ impl World {
             false => Err(WorldError::EntityMissing),
         }
     }
-    pub fn add<T: 'static + Debug>(
-        &mut self,
-        entity: EntityId,
-        component: T,
-    ) -> Result<(), WorldError> {
+    pub fn add<T: 'static>(&mut self, entity: EntityId, component: T) -> Result<(), WorldError> {
         if self.entities.contains(&entity) {
             self.get_or_make_storage::<T>().add(entity, component)
         } else {
             Err(WorldError::EntityMissing)
         }
     }
-    pub fn replace<T: 'static + Debug>(
+    pub fn replace<T: 'static>(
         &mut self,
         entity: EntityId,
         component: T,
@@ -927,21 +921,56 @@ impl World {
             Err(WorldError::EntityMissing)
         }
     }
-    pub fn remove<T: 'static + Debug>(&mut self, entity: EntityId) -> Result<(), WorldError> {
+    pub fn remove<T: 'static>(&mut self, entity: EntityId) -> Result<(), WorldError> {
         self.get_storage_mut::<T>()
             .map_or(Err(WorldError::EntityMissingComponent), |x| {
                 x.remove(entity)
             })
     }
 
-    pub fn get<T: 'static + Fetch + Debug>(&self, entity: EntityId) -> T::OptionalItems<'_> {
+    pub fn get<T: 'static + Fetch>(&self, entity: EntityId) -> T::OptionalItems<'_> {
         T::get(entity, self)
     }
-    pub fn get_mut<T: 'static + FetchMut + Debug>(
-        &mut self,
-        entity: EntityId,
-    ) -> T::OptionalItems<'_> {
+    pub fn get_mut<T: 'static + FetchMut>(&mut self, entity: EntityId) -> T::OptionalItems<'_> {
         T::get_mut(entity, self)
+    }
+    pub fn add_resource<T: 'static>(&mut self, resource: T) -> Result<(), WorldError> {
+        let resource: Box<dyn Any> = Box::new(resource);
+        match self.resource_storage.entry(TypeId::of::<T>()) {
+            std::collections::hash_map::Entry::Vacant(x) => {
+                x.insert(resource);
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(WorldError::ResourceAlreadyAdded)
+            }
+        }
+    }
+    pub fn remove_resource<T: 'static>(&mut self) -> Option<T> {
+        match self.resource_storage.entry(TypeId::of::<T>()) {
+            std::collections::hash_map::Entry::Vacant(_) => None,
+            std::collections::hash_map::Entry::Occupied(x) => Some(
+                *x.remove()
+                    .downcast::<T>()
+                    .expect("storage should only contain matching typeid"),
+            ),
+        }
+    }
+    pub fn get_resource<T: 'static>(&mut self) -> Option<&T> {
+        Some(
+            self.resource_storage
+                .get(&TypeId::of::<T>())?
+                .downcast_ref::<T>()
+                .expect("incorrect type in storage"),
+        )
+    }
+    pub fn get_mut_resource<T: 'static>(&mut self) -> Option<&mut T> {
+        Some(
+            self.resource_storage
+                .get_mut(&TypeId::of::<T>())?
+                .downcast_mut::<T>()
+                .expect("incorrect type in storage"),
+        )
     }
 
     /// Panics: panics if any of the queried types are identical
@@ -967,9 +996,7 @@ impl World {
         QueryMut { iter: iterator }
     }
 
-    fn get_or_make_storage<'s, T: 'static + std::fmt::Debug>(
-        &'s mut self,
-    ) -> &'s mut ComponentStorage<T> {
+    fn get_or_make_storage<'s, T: 'static>(&'s mut self) -> &'s mut ComponentStorage<T> {
         let entry = self
             .component_storages
             .entry(TypeId::of::<T>())
@@ -1023,9 +1050,6 @@ where
     );
 }
 
-fn main() {
-    test()
-}
 fn test() {
     correctness();
     benchmark();
@@ -1119,7 +1143,7 @@ fn benchmark() {
             &format!("query_mut (Req<A>,Req<B>,Opt<D>) x{}", n),
             10,
             || {
-                for (_, (ab, arr, opt_i)) in
+                for (_, (_, arr, opt_i)) in
                     world.query_mut::<(ReqM<(f64, u32)>, ReqM<[f64; 16]>, OptM<i64>)>()
                 {
                     if let Some(i) = opt_i {
@@ -1351,7 +1375,7 @@ fn correctness() {
 
         // Verify removal - entities without f64 should not appear in required f64 queries
         let mut count_with_f64 = 0;
-        for (e, (s, n, f)) in world.query::<(Req<String>, Req<u32>, Req<f64>)>() {
+        for (e, (_, _, f)) in world.query::<(Req<String>, Req<u32>, Req<f64>)>() {
             let entity_index = e.0 as usize;
             assert!(
                 entity_index % 2 == 1,
@@ -1364,7 +1388,7 @@ fn correctness() {
 
         // But all entities should still appear in optional f64 queries
         let mut total_count = 0;
-        for (_, (_, _, opt_f)) in world.query::<(Req<String>, Req<u32>, Opt<f64>)>() {
+        for (_, (_, _, _)) in world.query::<(Req<String>, Req<u32>, Opt<f64>)>() {
             total_count += 1;
             // Don't assert on opt_f value here since we know some are None
         }
@@ -1540,7 +1564,7 @@ fn correctness() {
         let mut complex_query_count = 0;
         let mut entities_with_all_optionals = 0;
 
-        for (e, (id, s_opt, f_opt, b_opt)) in
+        for (_, (id, s_opt, f_opt, b_opt)) in
             world.query::<(Req<u32>, Opt<String>, Opt<f64>, Opt<bool>)>()
         {
             complex_query_count += 1;
