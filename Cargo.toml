@@ -9,3 +9,4 @@ resolver = "3"
 codegen-units = 16
 [profile.release]
 debug = true
+edition = "2024"

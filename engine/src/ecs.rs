@@ -52,7 +52,7 @@ macro_rules! impl_join{
                 }
             }
 
-        struct $iter<'a, $($ty),+, $($opt_ty),*>
+        pub struct $iter<'a, $($ty),+, $($opt_ty),*>
         where
         $(
         $ty: Joinable+ 'a,
@@ -213,7 +213,7 @@ macro_rules! impl_join_mut {
                 }
             }
 
-        struct $iter<'a, $($ty),+, $($opt_ty),*>
+        pub struct $iter<'a, $($ty),+, $($opt_ty),*>
         where
         $(
         $ty: JoinableMut + 'a,
@@ -555,17 +555,17 @@ impl_join!(Join4Opt3, Join4Opt3Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, pe
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug /*thiserror::Error*/)]
 pub enum WorldError {
-    #[error("entity already has component")]
+    // #[error("entity already has component")]
     ComponentAlreadyAdded,
-    #[error("entity does not have the requested component")]
+    // #[error("entity does not have the requested component")]
     EntityMissingComponent,
-    #[error("the requested entity does not exist")]
+    // #[error("the requested entity does not exist")]
     EntityMissing,
-    #[error("the requested component does not exist")]
+    // #[error("the requested component does not exist")]
     ComponentTypeMissing,
-    #[error("a resource of this type has already been added")]
+    // #[error("a resource of this type has already been added")]
     ResourceAlreadyAdded,
 }
 
@@ -579,7 +579,7 @@ pub struct World {
     last_dead: Vec<u32>,
 }
 
-struct Query<'a, C: Fetch> {
+pub struct Query<'a, C: Fetch> {
     iter: C::Iter<'a>,
 }
 impl<'w, C> Iterator for Query<'w, C>
@@ -594,7 +594,7 @@ where
     }
 }
 
-struct QueryMut<'a, C: FetchMut> {
+pub struct QueryMut<'a, C: FetchMut> {
     iter: C::Iter<'a>,
 }
 impl<'w, C> Iterator for QueryMut<'w, C>
@@ -609,7 +609,7 @@ where
     }
 }
 
-trait Fetch {
+pub trait Fetch {
     // reference to component storage iterator
     type Iter<'w>: Iterator;
     type Item<'w>;
@@ -618,7 +618,7 @@ trait Fetch {
     fn get<'w>(entity: EntityId, world: &'w World) -> Self::OptionalItems<'w>;
 }
 
-trait FetchMut {
+pub trait FetchMut {
     // reference to component storage iterator
     type Iter<'w>: Iterator;
     type Item<'w>;
@@ -626,7 +626,7 @@ trait FetchMut {
     fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w>;
     fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::OptionalItems<'w>;
 }
-trait Joinable {
+pub trait Joinable {
     type Ref<'a>: 'a + Copy
     where
         Self: 'a;
@@ -643,7 +643,7 @@ trait Joinable {
     fn join<'a>(self) -> Self::Iter<'a>;
 }
 
-trait JoinableMut {
+pub trait JoinableMut {
     type Mut<'a>: 'a
     where
         Self: 'a;
@@ -817,6 +817,9 @@ impl<T: 'static> ComponentStorage<T> {
         }
     }
     pub fn remove(&mut self, entity: EntityId) -> Result<(), WorldError> {
+        //PERF: this should be replaced with some sort of system which sets the entityid to
+        //u32::MAX, then there can be a cleanup which does a vec.retain(|x| x != u32::MAX), so you
+        //remove is O(logn), then cleanup is O(n), but only has to run every once in a while
         match self.data.binary_search_by_key(&entity, |x| x.0) {
             Ok(x) => {
                 self.data.remove(x);
@@ -921,6 +924,7 @@ impl World {
             Err(WorldError::EntityMissing)
         }
     }
+    //PERF: this should be replaced with some kind of batch removal system
     pub fn remove<T: 'static>(&mut self, entity: EntityId) -> Result<(), WorldError> {
         self.get_storage_mut::<T>()
             .map_or(Err(WorldError::EntityMissingComponent), |x| {
@@ -974,9 +978,9 @@ impl World {
     }
 
     /// Panics: panics if any of the queried types are identical
-    /// Usage: takes a tuple of any types and returns an iterator over each type, however, the
-    /// tuple can have at most 2 elements, more than two are needed, they can be nested
-    /// (T, (U, V)),
+    /// Usage: takes a tuple of any types and returns an iterator over each type, Req<T> ensures
+    /// that only entities with that type are returned, Opt<T> returns that type if it is on the
+    /// entity
     pub fn query<'w, C>(&'w self) -> Query<'w, C>
     where
         C: Fetch,
@@ -1050,10 +1054,7 @@ where
     );
 }
 
-fn test() {
-    correctness();
-    benchmark();
-}
+#[test]
 fn benchmark() {
     // You can tweak these sizes
     let scales = [1_000, 10_000, 1_000_000, 10_000_000];
@@ -1158,25 +1159,26 @@ fn benchmark() {
         );
         dbg!(counter);
 
-        // // 6) Remove a component from half the entities
-        // bench(&format!("remove D from half x{}", n), 1, || {
-        //     for e in 0..n {
-        //         if e % 2 == 0 {
-        //             let _ = world.remove::<i64>(EntityId(e as u32));
-        //         }
-        //     }
-        // });
-        //
-        // // 7) Destroy all entities in reverse
-        // bench(&format!("destroy all rev x{}", n), 1, || {
-        //     for e in (0..n).rev() {
-        //         let _ = world.destroy(EntityId(e as u32));
-        //     }
-        // });
+        // 6) Remove a component from half the entities
+        bench(&format!("remove D from half x{}", n), 1, || {
+            for e in 0..n {
+                if e % 2 == 0 {
+                    let _ = world.remove::<i64>(EntityId(e as u32));
+                }
+            }
+        });
+
+        // 7) Destroy all entities in reverse
+        bench(&format!("destroy all rev x{}", n), 1, || {
+            for e in (0..n).rev() {
+                let _ = world.destroy(EntityId(e as u32));
+            }
+        });
     }
 }
 
 // Test what happens with non-consecutive entity IDs
+#[test]
 fn correctness() {
     use std::collections::HashSet;
 
@@ -1342,7 +1344,6 @@ fn correctness() {
             *num += 1;
             *text = format!("modified-{}", *num);
         }
-
         // Verify simultaneous mutations
         for (_, (num, text)) in world.query::<(Req<u32>, Req<String>)>() {
             let expected_text = format!("modified-{}", *num);

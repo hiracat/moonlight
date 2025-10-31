@@ -3,17 +3,8 @@
 layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput u_color;
 layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput u_normals;
 layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput u_position;
-// these can also stay since they are static but may change from frame to frame, same set as input attachments
-layout(set = 1, binding = 0) uniform AmbientLightUBO{
-    vec3 color;
-    float intensity;
-} ambient;
-layout(set = 1, binding = 1) uniform DirectionalLight {
-    vec4 position;
-    vec3 color;
-} directional;
 // this needs a different set since it is rebound per object, since it is in a different grahpics pipeline it still uses set index one because different pipeline layout
-layout(set = 2, binding = 0) uniform PointLight {
+layout(set = 1, binding = 0) uniform PointLight {
     vec3 position;
     float _padding;
     vec3 color;
