@@ -124,7 +124,7 @@ pub fn create_renderpass(
         vk::SubpassDescription {
             p_input_attachments: lighting_input_attachment_ref.as_ptr(),
             p_color_attachments: lighting_color_attachment_ref.as_ptr(),
-            p_depth_stencil_attachment: ptr::null(),
+            p_depth_stencil_attachment: &geometry_depth_attachment_ref,
             p_preserve_attachments: ptr::null(),
             p_resolve_attachments: ptr::null(),
             input_attachment_count: lighting_input_attachment_ref.len() as u32,

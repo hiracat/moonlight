@@ -1,7 +1,4 @@
 use core::f32;
-use std::path::Path;
-
-use image::ImageReader;
 use moonlight;
 use moonlight::components::Camera;
 use moonlight::ecs::OptM;
@@ -13,6 +10,7 @@ use moonlight::physics::RigidBody;
 use moonlight::renderer::draw::Renderer;
 use moonlight::renderer::init::create_window;
 use moonlight::renderer::resources::Material;
+use moonlight::renderer::resources::Skybox;
 use moonlight::{
     components::{AmbientLight, DirectionalLight,  PointLight, Transform},
 };
@@ -96,6 +94,8 @@ impl ApplicationHandler for App {
         let keyboard = Keyboard::new();
         let mouse_movement = MouseMovement::default();
 
+        let renderer = self.renderer.as_mut().unwrap();
+
         // Register resources into the world
         self.world.add_resource(camera).unwrap();
         self.world.add_resource(directional).unwrap();
@@ -104,7 +104,16 @@ impl ApplicationHandler for App {
         self.world.add_resource(keyboard).unwrap();
         self.world.add_resource(mouse_movement).unwrap();
 
-        let renderer = self.renderer.as_mut().unwrap();
+        let skybox = renderer.resource_manager.create_cubemap([
+            "data/textures/skybox/px.png",
+            "data/textures/skybox/nx.png",
+            "data/textures/skybox/py.png",
+            "data/textures/skybox/ny.png",
+            "data/textures/skybox/pz.png",
+            "data/textures/skybox/nz.png",
+        ]);
+        let skybox = Skybox::new(skybox);
+        self.world.add_resource(skybox).unwrap();
 
         // ───────────────────────────────────────────────────────
         // 3) Spawn entities
@@ -119,15 +128,6 @@ impl ApplicationHandler for App {
         let z_axis = self.world.spawn();
         let standing_block = self.world.spawn();
 
-        let image = ImageReader::open(Path::new("data/textures/fox_texture.png"))
-            .unwrap()
-            .decode()
-            .unwrap();
-
-        let image = ImageReader::open(Path::new("data/textures/ground_soft.jpg"))
-            .unwrap()
-            .decode()
-            .unwrap();
 
         // ───────────────────────────────────────────────────────
         // THE FOX - Center stage, elevated on a mystical platform
@@ -159,6 +159,7 @@ impl ApplicationHandler for App {
         let albedo = renderer.resource_manager.create_texture("data/textures/fox_texture.png");
         self.world
             .add(fox, Material::create(albedo)).unwrap();
+
         let albedo = renderer.resource_manager.create_texture("data/textures/ground.jpg");
         self.world
             .add(ground, Material::create(albedo)).unwrap();
@@ -175,7 +176,7 @@ impl ApplicationHandler for App {
         self.world
             .add(
                 ground,
-                Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
+                Transform::from(None, None, Some(Vec3::new(1000.0, 1.0, 1000.0))),
             )
             .unwrap();
         self.world
@@ -187,7 +188,7 @@ impl ApplicationHandler for App {
             .add(
                 ground,
                 Collider::Aabb(Aabb::new(
-                    Vec3::new(20.0, 4.0, 20.0), // Half-extents: 40x2x40 total size
+                    Vec3::new(1.0, 4.0, 1.0), // Half-extents: 40x2x40 total size
                     Vec3::new(0.0, -4.0, 0.0),  // Center offset: buried 1 unit down
                 )),
             )

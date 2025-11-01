@@ -10,7 +10,7 @@ use ash::vk;
 use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 
 use crate::ecs::{Opt, World};
-use crate::renderer::resources::{Material, Mesh, ResourceManager};
+use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
 use crate::renderer::resources::{Texture, Vertex};
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
@@ -46,6 +46,7 @@ pub enum PipelineKey {
     Directional,
     Ambient,
     Point,
+    Skybox,
     // anything this and after is fairgame to be created from a number
     CustomStart,
     End = u32::MAX,
@@ -79,6 +80,11 @@ pub fn create_builtin_graphics_pipelines(
         device,
         Path::new("shaders/point_vert.spv"),
         Path::new("shaders/point_frag.spv"),
+    );
+    let skybox = create_pipeline_layout_from_vert_frag(
+        device,
+        Path::new("shaders/skybox_vert.spv"),
+        Path::new("shaders/skybox_frag.spv"),
     );
 
     let geometry_desc = GraphicsPipelineDesc {
@@ -150,6 +156,7 @@ pub fn create_builtin_graphics_pipelines(
 
     let mut ambient_desc = geometry_desc;
     ambient_desc.subpass_index = LIGHTING_SUBPASS;
+    ambient_desc.depth_stencil_state.depth_write_enable = false;
     ambient_desc.color_blend_state = ColorBlendState {
         logic_op: None,
         blend_constants: [0.0; 4],
@@ -180,6 +187,28 @@ pub fn create_builtin_graphics_pipelines(
     point_desc.pipeline_layout = point.1;
     point_desc.shaders = &point.0;
     let point_pipeline = create_graphics_pipeline(device, &point_desc).unwrap();
+
+    let mut skybox_desc = point_desc;
+
+    skybox_desc.pipeline_layout = skybox.1;
+    skybox_desc.shaders = &skybox.0;
+    skybox_desc.depth_stencil_state.depth_test_enable = true;
+    skybox_desc.depth_stencil_state.depth_write_enable = false;
+    skybox_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::LESS_OR_EQUAL;
+    skybox_desc.color_blend_state = ColorBlendState {
+        logic_op: None,
+        attachments: vec![
+            vk::PipelineColorBlendAttachmentState {
+                blend_enable: vk::FALSE,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+                ..Default::default()
+            };
+            2
+        ],
+        blend_constants: [0.0; 4],
+    };
+
+    let skybox_pipeline = create_graphics_pipeline(device, &skybox_desc).unwrap();
 
     let mut pipelines = Vec::new();
     pipelines.push(PipelineBundle {
@@ -331,6 +360,43 @@ pub fn create_builtin_graphics_pipelines(
 
                 builder.submit(device);
                 jobs
+            },
+        ),
+    });
+    pipelines.push(PipelineBundle {
+        pipeline: skybox_pipeline,
+        layout: skybox.1,
+        descriptor_set_layouts: skybox.2,
+        write_data_and_build_draw_jobs: Box::new(
+            |device,
+             resource_manager,
+             descriptor_pool,
+             world,
+             descriptor_set_layouts,
+             swapchain_descriptor_set| {
+                let mut builder = DescriptorWriteBuilder::new();
+                let cubemap = *world.get_resource::<Skybox>().unwrap();
+                let camera = world.get_resource::<Camera>().unwrap();
+                let camera_set = builder.add_uniform_buffer(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[0],
+                    0,
+                    &camera.as_inverse_ubo(),
+                );
+                let cubemap_set = builder.add_texture(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[1],
+                    0,
+                    Some(cubemap.material),
+                );
+                builder.submit(device);
+
+                vec![DrawJob {
+                    mesh: None,
+                    descriptor_sets: vec![camera_set, cubemap_set],
+                }]
             },
         ),
     });

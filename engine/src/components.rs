@@ -42,6 +42,14 @@ pub struct CameraUBO {
     view: uv::Mat4,
     proj: uv::Mat4,
 }
+#[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct CameraInverseUBO {
+    view: uv::Mat4,
+    proj: uv::Mat4,
+    inverse_view: uv::Mat4,
+    inverse_proj: uv::Mat4,
+}
 
 pub struct AmbientLight {
     pub color: [f32; 3],
@@ -226,6 +234,20 @@ impl Camera {
                 self.near,
                 self.far,
             ),
+        }
+    }
+    pub fn as_inverse_ubo(&self) -> CameraInverseUBO {
+        let rotation_matrix = self.rotation.reversed().into_matrix().into_homogeneous();
+        let translation_matrix = uv::Mat4::from_translation(-self.position);
+        let view = rotation_matrix * translation_matrix;
+        let proj =
+            uv::projection::perspective_vk(self.fov_rads, self.aspect_ratio, self.near, self.far);
+
+        CameraInverseUBO {
+            view,
+            proj,
+            inverse_view: view.inversed(),
+            inverse_proj: proj.inversed(),
         }
     }
 }

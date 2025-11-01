@@ -39,6 +39,17 @@ pub struct Texture {
     id: usize,
     path: Option<&'static str>,
 }
+#[derive(Debug, Clone, Copy)]
+pub struct Skybox {
+    pub(crate) material: Material,
+}
+impl Skybox {
+    pub fn new(cubemap: Texture) -> Self {
+        Self {
+            material: Material { albedo: cubemap },
+        }
+    }
+}
 impl Material {
     pub fn create(albedo: Texture) -> Self {
         Self { albedo }
@@ -179,7 +190,7 @@ impl ResourceManager {
         let pixel = Rgba::from([255, 255, 255, 0]);
         let mut image = DynamicImage::new_rgb8(1, 1);
         image.put_pixel(0, 0, pixel);
-        let default = GpuTexture::create(
+        let default = GpuTexture::create_2d(
             device,
             queue_family_index,
             allocator.clone(),
@@ -210,7 +221,7 @@ impl ResourceManager {
             .unwrap()
             .decode()
             .unwrap();
-        self.textures.push(Some(GpuTexture::create(
+        self.textures.push(Some(GpuTexture::create_2d(
             &self.device,
             self.queue_family_index,
             self.allocator.clone(),
@@ -222,6 +233,29 @@ impl ResourceManager {
         Texture {
             id: self.textures.len() - 1,
             path: Some(path),
+        }
+    }
+    pub fn create_cubemap(&mut self, paths: [&'static str; 6]) -> Texture {
+        let images: [DynamicImage; 6] = paths.map(|path| {
+            ImageReader::open(Path::new(path))
+                .unwrap()
+                .decode()
+                .unwrap()
+        });
+        self.textures.push(Some(GpuTexture::create_cubemap(
+            &self.device,
+            self.queue_family_index,
+            self.allocator.clone(),
+            images.into(),
+            self.queue,
+            self.one_time_submit_buffer,
+            self.one_time_submit_pool,
+        )));
+        Texture {
+            id: self.textures.len() - 1,
+            //HACK: need to either seperate different texture types out(probably smartest and
+            //easiest, or figure out a way to do multiple path types per texture(maybe enum)
+            path: None,
         }
     }
     pub fn create_mesh(&mut self, path: &'static str) -> Mesh {
@@ -312,7 +346,253 @@ impl ResourceManager {
 }
 
 impl GpuTexture {
-    pub fn create(
+    pub fn create_cubemap(
+        device: &ash::Device,
+        queue_family_index: QueueFamilyIndex,
+        allocator: SharedAllocator,
+        mut images: [DynamicImage; 6],
+        queue: vk::Queue,
+        one_time_submit_buffer: vk::CommandBuffer,
+        one_time_submit_pool: vk::CommandPool,
+    ) -> Self {
+        let image_bytes: Vec<_> = images
+            .iter_mut()
+            .map(|x| x.to_rgba8().into_raw())
+            .flatten()
+            .collect();
+
+        let create_info = vk::BufferCreateInfo {
+            p_queue_family_indices: &queue_family_index,
+            queue_family_index_count: 1,
+            // 4 bits per pixel * 6 images
+            size: (images[0].width() * images[0].height() * 4 * 6) as u64,
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            flags: vk::BufferCreateFlags::empty(),
+            ..Default::default()
+        };
+        let staging_buffer = unsafe { device.create_buffer(&create_info, None).unwrap() };
+
+        let requirements = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
+
+        let staging_mem_desc = AllocationCreateDesc {
+            name: "image staging buffer",
+            requirements,
+            location: gpu_allocator::MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        };
+        let mut staging_mem = allocator
+            .lock()
+            .unwrap()
+            .allocate(&staging_mem_desc)
+            .unwrap();
+
+        unsafe {
+            device
+                .bind_buffer_memory(staging_buffer, staging_mem.memory(), staging_mem.offset())
+                .unwrap()
+        }
+
+        let image_format = vk::Format::R8G8B8A8_SRGB;
+
+        let create_info = vk::ImageCreateInfo {
+            p_queue_family_indices: &queue_family_index,
+            queue_family_index_count: 1,
+            usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            tiling: vk::ImageTiling::OPTIMAL,
+            extent: vk::Extent3D {
+                width: images[0].width(),
+                height: images[0].height(),
+                depth: 1,
+            },
+            flags: vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            format: image_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            image_type: vk::ImageType::TYPE_2D,
+            mip_levels: 1,
+            array_layers: 6,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            ..Default::default()
+        };
+        let final_image = unsafe { device.create_image(&create_info, None).unwrap() };
+
+        let requirements = unsafe { device.get_image_memory_requirements(final_image) };
+
+        let final_image_mem_desc = AllocationCreateDesc {
+            name: "image memory",
+            requirements,
+            location: gpu_allocator::MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        };
+        let image_mem = allocator
+            .lock()
+            .unwrap()
+            .allocate(&final_image_mem_desc)
+            .unwrap();
+
+        unsafe {
+            device
+                .bind_image_memory(final_image, image_mem.memory(), image_mem.offset())
+                .unwrap()
+        }
+
+        staging_mem
+            .mapped_slice_mut()
+            .unwrap()
+            .write(&image_bytes)
+            .unwrap();
+
+        let subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 6,
+        };
+        instant_submit_command_buffer(
+            &device,
+            one_time_submit_buffer,
+            one_time_submit_pool,
+            queue,
+            |command_buffer| {
+                let to_writable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    image: final_image,
+                    subresource_range,
+                    src_access_mask: vk::AccessFlags::empty(),
+                    dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    ..Default::default()
+                };
+
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_writable],
+                    )
+                };
+
+                let regions = [vk::BufferImageCopy {
+                    image_offset: vk::Offset3D::default(),
+                    image_subresource: vk::ImageSubresourceLayers {
+                        mip_level: 0,
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        layer_count: 6,
+                        base_array_layer: 0,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: images[0].width(),
+                        height: images[0].height(),
+                        depth: 1,
+                    },
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                }];
+
+                unsafe {
+                    device.cmd_copy_buffer_to_image(
+                        command_buffer,
+                        staging_buffer,
+                        final_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &regions,
+                    )
+                };
+                let to_readable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_access_mask: vk::AccessFlags::SHADER_READ,
+                    image: final_image,
+                    subresource_range,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    ..Default::default()
+                };
+                //barrier the image into the shader readable layout
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_readable],
+                    )
+                };
+            },
+        );
+
+        unsafe { device.destroy_buffer(staging_buffer, None) };
+        allocator.lock().unwrap().free(staging_mem).unwrap();
+
+        let sampler_create_info = vk::SamplerCreateInfo {
+            flags: vk::SamplerCreateFlags::empty(),
+
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+
+            address_mode_u: vk::SamplerAddressMode::REPEAT,
+            address_mode_v: vk::SamplerAddressMode::REPEAT,
+            address_mode_w: vk::SamplerAddressMode::REPEAT,
+
+            mip_lod_bias: 0.0,
+            anisotropy_enable: vk::TRUE,
+            max_anisotropy: 16.0,
+
+            compare_enable: vk::FALSE,
+            compare_op: vk::CompareOp::ALWAYS,
+
+            min_lod: 0.0,
+            max_lod: vk::LOD_CLAMP_NONE, // or the max mip level of your texture
+
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+
+            ..Default::default()
+        };
+
+        let sampler = unsafe { device.create_sampler(&sampler_create_info, None).unwrap() };
+        let image_view_create_info = vk::ImageViewCreateInfo {
+            image: final_image,
+            format: image_format,
+            view_type: vk::ImageViewType::CUBE,
+            components: vk::ComponentMapping {
+                r: vk::ComponentSwizzle::R,
+                g: vk::ComponentSwizzle::G,
+                b: vk::ComponentSwizzle::B,
+                a: vk::ComponentSwizzle::A,
+            },
+            subresource_range,
+            ..Default::default()
+        };
+        let image_view = unsafe {
+            device
+                .create_image_view(&image_view_create_info, None)
+                .unwrap()
+        };
+        Self {
+            image_view,
+            image: final_image,
+            memory: image_mem,
+            sampler,
+        }
+    }
+    pub fn create_2d(
         device: &ash::Device,
         queue_family_index: QueueFamilyIndex,
         allocator: SharedAllocator,

@@ -86,7 +86,7 @@ impl SwapchainResources {
             image_color_space: image_format.color_space,
             image_format: image_format.format,
             image_extent: window_size,
-            present_mode: vk::PresentModeKHR::MAILBOX,
+            present_mode: vk::PresentModeKHR::FIFO,
             pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
