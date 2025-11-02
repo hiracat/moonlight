@@ -12,3 +12,5 @@ image = "0.25.6"
 winit = { version = "0.30.5", features = ["rwh_04", "rwh_05"] }
 half = { version = "2.6.0", features = ["bytemuck"] }
 gltf = "1.4.1"
+egui-winit = "0.33.0"
+egui = "0.33.0"

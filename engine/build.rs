@@ -2,7 +2,7 @@ use core::panic;
 use std::{
     env,
     ffi::OsStr,
-    fs::{self, create_dir, File},
+    fs::{self, File, create_dir},
     io::Read,
     path::Path,
 };

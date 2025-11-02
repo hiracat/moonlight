@@ -7,7 +7,7 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
+use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 
 use crate::ecs::{Opt, World};
 use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
@@ -160,17 +160,20 @@ pub fn create_builtin_graphics_pipelines(
     ambient_desc.color_blend_state = ColorBlendState {
         logic_op: None,
         blend_constants: [0.0; 4],
-        attachments: vec![vk::PipelineColorBlendAttachmentState {
-            color_blend_op: vk::BlendOp::ADD,
-            src_color_blend_factor: vk::BlendFactor::ONE,
-            dst_color_blend_factor: vk::BlendFactor::ONE,
-            alpha_blend_op: vk::BlendOp::MAX,
-            src_alpha_blend_factor: vk::BlendFactor::ONE,
-            dst_alpha_blend_factor: vk::BlendFactor::ONE,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-            blend_enable: vk::TRUE,
-            ..Default::default()
-        }],
+        attachments: vec![
+            vk::PipelineColorBlendAttachmentState {
+                color_blend_op: vk::BlendOp::ADD,
+                src_color_blend_factor: vk::BlendFactor::ONE,
+                dst_color_blend_factor: vk::BlendFactor::ONE,
+                alpha_blend_op: vk::BlendOp::MAX,
+                src_alpha_blend_factor: vk::BlendFactor::ONE,
+                dst_alpha_blend_factor: vk::BlendFactor::ONE,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+                blend_enable: vk::TRUE,
+                ..Default::default()
+            };
+            1
+        ],
     };
     ambient_desc.pipeline_layout = ambient.1;
     ambient_desc.shaders = &ambient.0;
@@ -181,6 +184,7 @@ pub fn create_builtin_graphics_pipelines(
     directional_desc.pipeline_layout = directional_layouts.1;
     directional_desc.shaders = &directional_layouts.0;
     let directional_pipeline = create_graphics_pipeline(device, &directional_desc).unwrap();
+    dbg!("here");
 
     let mut point_desc = directional_desc;
 
@@ -203,11 +207,12 @@ pub fn create_builtin_graphics_pipelines(
                 color_write_mask: vk::ColorComponentFlags::RGBA,
                 ..Default::default()
             };
-            2
+            1
         ],
         blend_constants: [0.0; 4],
     };
 
+    dbg!("here");
     let skybox_pipeline = create_graphics_pipeline(device, &skybox_desc).unwrap();
 
     let mut pipelines = Vec::new();

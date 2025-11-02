@@ -15,7 +15,8 @@ pub fn create_renderpass(
             format: swapchain_image_format,
             samples: vk::SampleCountFlags::TYPE_1,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+
             ..Default::default()
         },
         // color attachment (gbuffer)

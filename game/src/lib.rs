@@ -1,6 +1,7 @@
 use core::f32;
 use moonlight;
 use moonlight::components::Camera;
+use moonlight::components::{AmbientLight, DirectionalLight, PointLight, Transform};
 use moonlight::ecs::OptM;
 use moonlight::ecs::ReqM;
 use moonlight::ecs::World;
@@ -11,9 +12,6 @@ use moonlight::renderer::draw::Renderer;
 use moonlight::renderer::init::create_window;
 use moonlight::renderer::resources::Material;
 use moonlight::renderer::resources::Skybox;
-use moonlight::{
-    components::{AmbientLight, DirectionalLight,  PointLight, Transform},
-};
 use std::{
     collections::HashSet,
     f32::consts::PI,
@@ -27,6 +25,9 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::WindowId,
 };
+static mut OFFSET_X: f32 = 0.0;
+static mut OFFSET_Y: f32 = 0.0;
+static mut OFFSET_Z: f32 = 0.0;
 
 type Keyboard = HashSet<KeyCode>;
 
@@ -57,7 +58,6 @@ impl Default for App {
     }
 }
 
-
 impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -69,10 +69,8 @@ impl ApplicationHandler for App {
         }
 
         let window = create_window(event_loop);
-        window
-            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .unwrap();
-        window.set_cursor_visible(false);
+        //HACK: magic number, i dont care right now
+
         self.renderer = Some(Renderer::init(event_loop, &window));
 
         // ───────────────────────────────────────────────────────
@@ -128,7 +126,6 @@ impl ApplicationHandler for App {
         let z_axis = self.world.spawn();
         let standing_block = self.world.spawn();
 
-
         // ───────────────────────────────────────────────────────
         // THE FOX - Center stage, elevated on a mystical platform
         // ───────────────────────────────────────────────────────
@@ -155,23 +152,31 @@ impl ApplicationHandler for App {
             .unwrap();
         self.world.add(fox, RigidBody::new()).unwrap();
         self.world
-            .add(fox, renderer.resource_manager.create_mesh("data/models/low_poly_fox.glb")).unwrap();
-        let albedo = renderer.resource_manager.create_texture("data/textures/fox_texture.png");
-        self.world
-            .add(fox, Material::create(albedo)).unwrap();
+            .add(
+                fox,
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/low_poly_fox.glb"),
+            )
+            .unwrap();
+        let albedo = renderer
+            .resource_manager
+            .create_texture("data/textures/fox_texture.png");
+        self.world.add(fox, Material::create(albedo)).unwrap();
 
-        let albedo = renderer.resource_manager.create_texture("data/textures/ground.jpg");
+        let albedo = renderer
+            .resource_manager
+            .create_texture("data/textures/ground.jpg");
+        self.world.add(ground, Material::create(albedo)).unwrap();
+        self.world.add(x_axis, Material::create(albedo)).unwrap();
+        self.world.add(y_axis, Material::create(albedo)).unwrap();
+        self.world.add(z_axis, Material::create(albedo)).unwrap();
+        let albedo = renderer
+            .resource_manager
+            .create_texture("data/textures/ground_soft.jpg");
         self.world
-            .add(ground, Material::create(albedo)).unwrap();
-        self.world
-            .add(x_axis, Material::create(albedo)).unwrap();
-        self.world
-            .add(y_axis, Material::create(albedo)).unwrap();
-        self.world
-            .add(z_axis, Material::create(albedo)).unwrap();
-        let albedo = renderer.resource_manager.create_texture("data/textures/ground_soft.jpg");
-        self.world
-            .add(standing_block, Material::create(albedo)).unwrap();
+            .add(standing_block, Material::create(albedo))
+            .unwrap();
 
         self.world
             .add(
@@ -180,7 +185,12 @@ impl ApplicationHandler for App {
             )
             .unwrap();
         self.world
-            .add(ground, renderer.resource_manager.create_mesh("data/models/ground_plane.glb"))
+            .add(
+                ground,
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/ground_plane.glb"),
+            )
             .unwrap();
 
         // Ground collision - the full 40x40 area with some depth
@@ -188,8 +198,8 @@ impl ApplicationHandler for App {
             .add(
                 ground,
                 Collider::Aabb(Aabb::new(
-                    Vec3::new(1.0, 4.0, 1.0), // Half-extents: 40x2x40 total size
-                    Vec3::new(0.0, -4.0, 0.0),  // Center offset: buried 1 unit down
+                    Vec3::new(1.0, 4.0, 1.0),  // Half-extents: 40x2x40 total size
+                    Vec3::new(0.0, -4.0, 0.0), // Center offset: buried 1 unit down
                 )),
             )
             .unwrap();
@@ -245,18 +255,35 @@ impl ApplicationHandler for App {
 
         // Attach models to monuments
         self.world
-            .add(x_axis, renderer.resource_manager.create_mesh("data/models/large_cube.glb"))
+            .add(
+                x_axis,
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/large_cube.glb"),
+            )
             .unwrap();
         self.world
-            .add(y_axis, renderer.resource_manager.create_mesh("data/models/large_cube.glb"))
+            .add(
+                y_axis,
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/large_cube.glb"),
+            )
             .unwrap();
         self.world
-            .add(z_axis, renderer.resource_manager.create_mesh("data/models/large_cube.glb"))
+            .add(
+                z_axis,
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/large_cube.glb"),
+            )
             .unwrap();
         self.world
             .add(
                 standing_block,
-                renderer.resource_manager.create_mesh("data/models/large_cube.glb"),
+                renderer
+                    .resource_manager
+                    .create_mesh("data/models/large_cube.glb"),
             )
             .unwrap();
 
@@ -323,6 +350,21 @@ impl ApplicationHandler for App {
         self.prev_frame_end = Instant::now();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let window = self.renderer.as_mut().unwrap().window.clone();
+        let response = self
+            .renderer
+            .as_mut()
+            .unwrap()
+            .ui
+            .winit_egui_state
+            .on_window_event(&window, &event);
+        if response.consumed == true {
+            return;
+        }
+        if response.repaint == true {
+            self.renderer.as_ref().unwrap().window.request_redraw();
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
@@ -330,20 +372,64 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => self.renderer.as_mut().unwrap().framebuffer_resized = true,
             WindowEvent::RedrawRequested => {
-
                 println!("frame {} starts here", self.current_frame);
+                let window = self.renderer.as_ref().unwrap().window.clone();
+                let mut offset_x = unsafe { OFFSET_X };
+                let mut offset_y = unsafe { OFFSET_Y };
+                let mut offset_z = unsafe { OFFSET_Z };
+                let raw_input = self
+                    .renderer
+                    .as_mut()
+                    .unwrap()
+                    .ui
+                    .winit_egui_state
+                    .take_egui_input(&window);
+                let full_output = self
+                    .renderer
+                    .as_mut()
+                    .unwrap()
+                    .ui
+                    .ui_ctx
+                    .run(raw_input, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            egui::Window::new("Scaling Test").show(&ctx, |ui| {
+                                ui.add(
+                                    egui::Slider::new(&mut offset_x, -3.0..=3.0).text("offset x"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut offset_y, -3.0..=3.0).text("offset y"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut offset_z, -3.0..=3.0).text("offset z"),
+                                );
+                            })
+                        });
+                    });
+
+                unsafe {
+                    OFFSET_X = offset_x;
+                    OFFSET_Y = offset_y;
+                    OFFSET_Z = offset_z;
+                }
 
                 let delta_time = self.delta_time.as_secs_f32();
                 let world = &mut self.world;
                 player_update(world, delta_time);
                 physics_update(world, delta_time);
-                camera_update(world, delta_time);
-
+                camera_update(world, delta_time, Vec3::new(offset_x, offset_y, offset_z));
+                // camera_update(world, delta_time);
+                // reset mouse move after camera handles it
                 *self.world.get_mut_resource::<MouseMovement>().unwrap() = MouseMovement::default();
+
+                self.renderer.as_mut().unwrap().ui.full_output = Some(full_output);
                 self.renderer.as_mut().unwrap().draw2(&mut self.world);
                 self.delta_time = self.prev_frame_end.elapsed();
-                println!("\x1b[H\x1b[J");
-                eprintln!("fps for frame {} is {}",self.current_frame, 1.0 / self.delta_time.as_secs_f32());
+                // println!("\x1b[H\x1b[J");
+                eprintln!(
+                    "fps for frame {} is {}",
+                    self.current_frame,
+                    1.0 / self.delta_time.as_secs_f32()
+                );
 
                 self.current_frame += 1;
                 self.prev_frame_end = Instant::now();
@@ -357,6 +443,12 @@ impl ApplicationHandler for App {
                     match event.physical_key {
                         PhysicalKey::Code(code) => {
                             keyboard.insert(code);
+                            if code == KeyCode::Escape {
+                                window
+                                    .set_cursor_grab(winit::window::CursorGrabMode::None)
+                                    .unwrap();
+                                window.set_cursor_visible(true);
+                            }
                         }
                         PhysicalKey::Unidentified(_) => {}
                     }
@@ -369,6 +461,16 @@ impl ApplicationHandler for App {
                         PhysicalKey::Unidentified(_) => {}
                     }
                 }
+            }
+            WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            } => {
+                window
+                    .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                    .unwrap();
+                window.set_cursor_visible(false);
             }
             WindowEvent::Focused(focused) => {
                 if focused {
@@ -435,26 +537,26 @@ fn physics_update(world: &mut World, delta_time: f32) {
     for i in 0..collidable.len() {
         for j in i + 1..collidable.len() {
             match Collider::penetration_vector(
-                collidable[i].1 .1,
-                collidable[j].1 .1,
-                collidable[i].1 .0,
-                collidable[j].1 .0,
+                collidable[i].1.1,
+                collidable[j].1.1,
+                collidable[i].1.0,
+                collidable[j].1.0,
             ) {
                 Some(pen_vec) => {
-                    if let Some(body1) = &collidable[i].1 .2
-                        && let Some(body2) = &collidable[j].1 .2
+                    if let Some(body1) = &collidable[i].1.2
+                        && let Some(body2) = &collidable[j].1.2
                     {
-                        collidable[i].1 .0.position += pen_vec * 0.5;
+                        collidable[i].1.0.position += pen_vec * 0.5;
                         collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
-                        collidable[j].1 .0.position -= pen_vec * 0.5;
+                        collidable[j].1.0.position -= pen_vec * 0.5;
                         collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
                     } else {
-                        if let Some(body) = &collidable[i].1 .2 {
-                            collidable[i].1 .0.position += pen_vec;
+                        if let Some(body) = &collidable[i].1.2 {
+                            collidable[i].1.0.position += pen_vec;
                             collision_penetrations.push((collidable[i].0, pen_vec));
                         }
-                        if let Some(body) = &collidable[j].1 .2 {
-                            collidable[j].1 .0.position -= pen_vec;
+                        if let Some(body) = &collidable[j].1.2 {
+                            collidable[j].1.0.position -= pen_vec;
                             collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                         }
                     }
@@ -479,12 +581,16 @@ fn set_axis_component(velocity: Vec3, collision_vector: Vec3, restitution: f32) 
     let projection = collision * velocity.dot(collision);
     return velocity - (1.0 + restitution) * projection;
 }
-fn camera_update(world: &mut World, _delta_time: f32) {
+fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let mouse = *world.get_resource::<MouseMovement>().unwrap();
 
     let player = world.query::<(Controllable,)>().next().unwrap().0;
 
-    let player_position = world.get::<(Transform,)>(player).unwrap().position;
+    let player_transform = world.get::<(Transform,)>(player).unwrap();
+
+    let player_relative_offset = player_transform.rotation * offset;
+
+    let target = player_transform.position + player_relative_offset;
 
     // let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
     let camera = world.get_mut_resource::<Camera>().unwrap();
@@ -513,7 +619,7 @@ fn camera_update(world: &mut World, _delta_time: f32) {
 
     let offset = backward * target_distance;
 
-    camera.position = player_position + offset;
+    camera.position = target + offset;
 }
 
 fn player_update(world: &mut World, delta_time: f32) {

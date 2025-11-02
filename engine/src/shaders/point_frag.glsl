@@ -14,7 +14,6 @@ layout(set = 1, binding = 0) uniform PointLight {
     float quadratic;   // Controls quadratic distance falloff
 } point;
 layout(location = 0) out vec4 f_color;
-layout(location = 1) out vec3 tex_cord;
 // Simple Reinhard tonemapping function
 vec3 toneMap(vec3 color, float exposure) {
     // Apply exposure adjustment

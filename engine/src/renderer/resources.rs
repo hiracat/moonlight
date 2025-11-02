@@ -1,13 +1,13 @@
 use std::{io::Write, path::Path};
 
 use ash::vk;
-use bytemuck::{bytes_of, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
 
 use crate::renderer::draw::{
-    alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, Renderer, SharedAllocator,
+    QueueFamilyIndex, Renderer, SharedAllocator, alloc_buffers, instant_submit_command_buffer,
 };
 
 pub struct ResourceManager {
@@ -346,6 +346,154 @@ impl ResourceManager {
 }
 
 impl GpuTexture {
+    pub fn update_subimage(
+        &mut self,
+        patch: DynamicImage,
+        offset_x: usize,
+        offset_y: usize,
+        device: &ash::Device,
+        allocator: SharedAllocator,
+        queue_family_index: QueueFamilyIndex,
+        queue: vk::Queue,
+        one_time_submit_buffer: vk::CommandBuffer,
+        one_time_submit_pool: vk::CommandPool,
+    ) {
+        let image = patch.to_rgba8();
+        let create_info = vk::BufferCreateInfo {
+            p_queue_family_indices: &queue_family_index,
+            queue_family_index_count: 1,
+            size: (image.width() * image.height() * 4) as u64,
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            flags: vk::BufferCreateFlags::empty(),
+            ..Default::default()
+        };
+        let staging_buffer = unsafe { device.create_buffer(&create_info, None).unwrap() };
+
+        let requirements = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
+
+        let staging_mem_desc = AllocationCreateDesc {
+            name: "image patch staging buffer",
+            requirements,
+            location: gpu_allocator::MemoryLocation::CpuToGpu,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        };
+        let mut staging_mem = allocator
+            .lock()
+            .unwrap()
+            .allocate(&staging_mem_desc)
+            .unwrap();
+
+        unsafe {
+            device
+                .bind_buffer_memory(staging_buffer, staging_mem.memory(), staging_mem.offset())
+                .unwrap()
+        }
+
+        staging_mem
+            .mapped_slice_mut()
+            .unwrap()
+            .write(image.as_bytes())
+            .unwrap();
+
+        let subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        instant_submit_command_buffer(
+            &device,
+            one_time_submit_buffer,
+            one_time_submit_pool,
+            queue,
+            |command_buffer| {
+                let to_writable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    image: self.image,
+                    subresource_range,
+                    src_access_mask: vk::AccessFlags::empty(),
+                    dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    ..Default::default()
+                };
+
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_writable],
+                    )
+                };
+
+                let regions = [vk::BufferImageCopy {
+                    image_offset: vk::Offset3D {
+                        x: offset_x as i32,
+                        y: offset_y as i32,
+                        z: 0,
+                    },
+                    image_subresource: vk::ImageSubresourceLayers {
+                        mip_level: 0,
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        layer_count: 1,
+                        base_array_layer: 0,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: patch.width(),
+                        height: patch.height(),
+                        depth: 1,
+                    },
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                }];
+
+                unsafe {
+                    device.cmd_copy_buffer_to_image(
+                        command_buffer,
+                        staging_buffer,
+                        self.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &regions,
+                    )
+                };
+                let to_readable = vk::ImageMemoryBarrier {
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_access_mask: vk::AccessFlags::SHADER_READ,
+                    image: self.image,
+                    subresource_range,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    ..Default::default()
+                };
+                //barrier the image into the shader readable layout
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_readable],
+                    )
+                };
+            },
+        );
+
+        unsafe { device.destroy_buffer(staging_buffer, None) };
+        allocator.lock().unwrap().free(staging_mem).unwrap();
+    }
     pub fn create_cubemap(
         device: &ash::Device,
         queue_family_index: QueueFamilyIndex,
@@ -379,7 +527,7 @@ impl GpuTexture {
             name: "image staging buffer",
             requirements,
             location: gpu_allocator::MemoryLocation::CpuToGpu,
-            linear: true,
+            linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
         let mut staging_mem = allocator
@@ -619,7 +767,7 @@ impl GpuTexture {
             name: "image staging buffer",
             requirements,
             location: gpu_allocator::MemoryLocation::CpuToGpu,
-            linear: true,
+            linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
         let mut staging_mem = allocator

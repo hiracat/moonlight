@@ -5,7 +5,7 @@ use crate::renderer::draw::SharedAllocator;
 
 pub struct Framebuffers {
     pub framebuffers: Vec<vk::Framebuffer>,
-    pub final_color_views: Vec<vk::ImageView>,
+    pub swapchain_image_views: Vec<vk::ImageView>,
 
     pub color_images: Vec<Image>,
     pub normal_images: Vec<Image>,
@@ -39,7 +39,7 @@ pub fn create_framebuffers(
     let position_format = vk::Format::R32G32B32A32_SFLOAT;
 
     let mut framebuffers = Vec::new();
-    let mut final_colors = Vec::new();
+    let mut swapchain_image_views = Vec::new();
     let mut colors = Vec::new();
     let mut normals = Vec::new();
     let mut positions = Vec::new();
@@ -100,7 +100,7 @@ pub fn create_framebuffers(
             color_subresource_range,
         );
 
-        let final_color_view = unsafe {
+        let swapchain_image_view = unsafe {
             device.create_image_view(
                 &vk::ImageViewCreateInfo {
                     format: swapchain_image_format,
@@ -115,7 +115,7 @@ pub fn create_framebuffers(
         .unwrap();
 
         let attachments = vec![
-            final_color_view,
+            swapchain_image_view,
             color.view,
             normal.view,
             depth.view,
@@ -138,14 +138,15 @@ pub fn create_framebuffers(
                 .unwrap()
         };
         framebuffers.push(framebuffer);
-        final_colors.push(final_color_view);
+        swapchain_image_views.push(swapchain_image_view);
         colors.push(color);
         normals.push(normal);
         positions.push(position);
     }
+    dbg!(&swapchain_image_views);
     Framebuffers {
         framebuffers,
-        final_color_views: final_colors,
+        swapchain_image_views,
         position_images: positions,
         normal_images: normals,
         color_images: colors,

@@ -2,7 +2,7 @@
 /// thing, just need a quick benchmark, seems simple to edit if i need to
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use moonlight::{ecs::EntityId, ecs::World};
 
 /// Benchmark creating N entities

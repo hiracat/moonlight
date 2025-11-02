@@ -3,7 +3,7 @@ use winit::dpi::PhysicalSize;
 
 use crate::renderer::{
     draw::{QueueFamilyIndex, SharedAllocator},
-    swapchain::framebuffers::{create_framebuffers, Framebuffers, Image},
+    swapchain::framebuffers::{Framebuffers, Image, create_framebuffers},
 };
 pub mod framebuffers;
 pub mod renderpass;
