@@ -87,6 +87,7 @@ pub struct UniformRingBuffer {
     buffer: vk::Buffer,
     memory: Allocation,
     size: u64,
+    alignment: usize,
     current: u64,
 }
 impl UniformRingBuffer {
@@ -106,26 +107,33 @@ impl UniformRingBuffer {
         );
         let buffer = buffers.0.remove(0);
         let allocation = buffers.1.remove(0);
+        let alignment = 64;
 
         Self {
             buffer: buffer,
             memory: allocation,
             size: size,
+            alignment: alignment,
             current: 0,
         }
     }
     pub fn allocate(&mut self, size: usize) -> (vk::Buffer, u64) {
-        if self.current + size as u64 > self.size {
+        let overflow = size % self.alignment;
+        let padding = self.alignment - overflow;
+        let aligned_size = size + padding;
+        if self.current + aligned_size as u64 > self.size {
             eprintln!(
                 "Ring buffer wrapping! current={}, size={}, buffer_size={}",
-                self.current, size, self.size
+                self.current, aligned_size, self.size
             );
             self.current = 0;
         }
 
         let offset = self.current;
-        self.current += size as u64;
+        self.current += aligned_size as u64;
 
+        assert_eq!(self.current as u64 % self.alignment as u64, 0);
+        assert_eq!(aligned_size as u64 % self.alignment as u64, 0);
         (self.buffer, offset)
     }
     pub fn write<T: Pod + Zeroable>(&mut self, data: &T, offset: u64) {

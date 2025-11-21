@@ -34,9 +34,10 @@ type Keyboard = HashSet<KeyCode>;
 #[derive(Debug)]
 struct Controllable;
 #[derive(Debug, Default, Clone, Copy)]
-struct MouseMovement {
+struct MouseState {
     x: f32,
     y: f32,
+    locked: bool,
 }
 
 pub struct App {
@@ -90,7 +91,7 @@ impl ApplicationHandler for App {
 
         // Keyboard + mouse input resources
         let keyboard = Keyboard::new();
-        let mouse_movement = MouseMovement::default();
+        let mouse_movement = MouseState::default();
 
         let renderer = self.renderer.as_mut().unwrap();
 
@@ -181,7 +182,7 @@ impl ApplicationHandler for App {
         self.world
             .add(
                 ground,
-                Transform::from(None, None, Some(Vec3::new(1000.0, 1.0, 1000.0))),
+                Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
             )
             .unwrap();
         self.world
@@ -287,19 +288,14 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        // ───────────────────────────────────────────────────────
-        // DRAMATIC LIGHTING - Three-point mystical lighting setup
-        // ───────────────────────────────────────────────────────
-
-        // RED LIGHT: "Crimson Flame" - Key light, high intensity, following the red monument
         self.world
             .add(
                 red_light,
                 PointLight::new(
                     Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
-                    23.0,                     // High intensity for drama
+                    35.0,                     // Medium intensity
                     None,
-                    None,
+                    Some(2.0),
                 ),
             )
             .unwrap();
@@ -310,15 +306,14 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        // GREEN LIGHT: "Emerald Glow" - Fill light, medium intensity, illuminating the left side
         self.world
             .add(
                 green_light,
                 PointLight::new(
                     Vec3::new(0.2, 1.0, 0.3), // Vibrant green
-                    15.0,                     // Medium intensity
+                    35.0,                     // Medium intensity
                     None,
-                    None,
+                    Some(2.0),
                 ),
             )
             .unwrap();
@@ -329,15 +324,14 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        // BLUE LIGHT: "Azure Whisper" - Rim light, subtle, creating mystical atmosphere
         self.world
             .add(
                 blue_light,
                 PointLight::new(
-                    Vec3::new(0.3, 0.4, 1.0), // Cool blue
-                    12.0,                     // Lower intensity for subtle rim lighting
-                    None,
-                    None,
+                    Vec3::new(0.1, 0.1, 1.0), // Cool blue
+                    55.0,                     // Medium intensity
+                    Some(1.2),
+                    Some(0.4),
                 ),
             )
             .unwrap();
@@ -392,15 +386,15 @@ impl ApplicationHandler for App {
                     .ui_ctx
                     .run(raw_input, |ctx| {
                         egui::CentralPanel::default().show(ctx, |ui| {
-                            egui::Window::new("Scaling Test").show(&ctx, |ui| {
+                            egui::Window::new("Camera Offset").show(&ctx, |ui| {
                                 ui.add(
-                                    egui::Slider::new(&mut offset_x, -3.0..=3.0).text("offset x"),
+                                    egui::Slider::new(&mut offset_x, -10.0..=10.0).text("offset x"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(&mut offset_y, -3.0..=3.0).text("offset y"),
+                                    egui::Slider::new(&mut offset_y, -10.0..=10.0).text("offset y"),
                                 );
                                 ui.add(
-                                    egui::Slider::new(&mut offset_z, -3.0..=3.0).text("offset z"),
+                                    egui::Slider::new(&mut offset_z, -10.0..=10.0).text("offset z"),
                                 );
                             })
                         });
@@ -418,8 +412,10 @@ impl ApplicationHandler for App {
                 physics_update(world, delta_time);
                 camera_update(world, delta_time, Vec3::new(offset_x, offset_y, offset_z));
                 // camera_update(world, delta_time);
-                // reset mouse move after camera handles it
-                *self.world.get_mut_resource::<MouseMovement>().unwrap() = MouseMovement::default();
+
+                // reset mouse movment after camera handles it
+                self.world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
+                self.world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
 
                 self.renderer.as_mut().unwrap().ui.full_output = Some(full_output);
                 self.renderer.as_mut().unwrap().draw2(&mut self.world);
@@ -435,6 +431,7 @@ impl ApplicationHandler for App {
                 self.prev_frame_end = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                let mut release_mouse = false;
                 let keyboard = self
                     .world
                     .get_mut_resource::<Keyboard>()
@@ -448,6 +445,7 @@ impl ApplicationHandler for App {
                                     .set_cursor_grab(winit::window::CursorGrabMode::None)
                                     .unwrap();
                                 window.set_cursor_visible(true);
+                                release_mouse = true;
                             }
                         }
                         PhysicalKey::Unidentified(_) => {}
@@ -461,6 +459,9 @@ impl ApplicationHandler for App {
                         PhysicalKey::Unidentified(_) => {}
                     }
                 }
+                if release_mouse {
+                    self.world.get_mut_resource::<MouseState>().unwrap().locked = false;
+                }
             }
             WindowEvent::MouseInput {
                 device_id,
@@ -471,6 +472,7 @@ impl ApplicationHandler for App {
                     .set_cursor_grab(winit::window::CursorGrabMode::Locked)
                     .unwrap();
                 window.set_cursor_visible(false);
+                self.world.get_mut_resource::<MouseState>().unwrap().locked = true;
             }
             WindowEvent::Focused(focused) => {
                 if focused {
@@ -494,9 +496,12 @@ impl ApplicationHandler for App {
     ) {
         #[allow(clippy::cast_possible_truncation)]
         if let DeviceEvent::MouseMotion { delta } = event {
-            let mvmt = self.world.get_mut_resource::<MouseMovement>().unwrap();
-            mvmt.x = delta.0 as f32;
-            mvmt.y = delta.1 as f32;
+            let state = self.world.get_mut_resource::<MouseState>().unwrap();
+            dbg!(&state);
+            if state.locked {
+                state.x = delta.0 as f32;
+                state.y = delta.1 as f32;
+            }
         }
     }
 }
@@ -566,11 +571,16 @@ fn physics_update(world: &mut World, delta_time: f32) {
         }
     }
     //NOTE: VELOCITY UPDATE
-    for collision in collision_penetrations {
+    for (entity, pen_vec) in collision_penetrations {
         let rigidbody = world
-            .get_mut::<(RigidBody,)>(collision.0)
+            .get_mut::<(RigidBody,)>(entity)
             .expect("thing with collision regesterd should have rigidbody");
-        rigidbody.velocity = set_axis_component(rigidbody.velocity, collision.1, 0.0)
+        let mut restitution = 0.3;
+        if rigidbody.velocity.y.abs() < 0.5 {
+            restitution = 0.0;
+        }
+        rigidbody.velocity = set_axis_component(rigidbody.velocity, pen_vec, restitution);
+        dbg!(rigidbody.velocity);
     }
 }
 
@@ -582,33 +592,25 @@ fn set_axis_component(velocity: Vec3, collision_vector: Vec3, restitution: f32) 
     return velocity - (1.0 + restitution) * projection;
 }
 fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
-    let mouse = *world.get_resource::<MouseMovement>().unwrap();
-
+    let mouse = *world.get_resource::<MouseState>().unwrap();
     let player = world.query::<(Controllable,)>().next().unwrap().0;
-
-    let player_transform = world.get::<(Transform,)>(player).unwrap();
-
-    let player_relative_offset = player_transform.rotation * offset;
-
-    let target = player_transform.position + player_relative_offset;
-
-    // let player_rotation = world.component_get::<Model>(player).unwrap().rotation;
+    let player_transform = world.get::<(Transform,)>(player).unwrap().clone();
     let camera = world.get_mut_resource::<Camera>().unwrap();
 
     let sensativity = 0.002;
     camera.pitch += mouse.y * sensativity;
     camera.yaw -= mouse.x * sensativity;
-    if camera.pitch < -PI / 2.0 + 0.01 {
-        camera.pitch = -PI / 2.0 + 0.02;
+    dbg!(camera.pitch / PI);
+    if camera.pitch / PI < -0.499999 {
+        camera.pitch = -(PI / 2.0) + 0.000001;
     }
-    if camera.pitch > PI / 2.0 - 0.01 {
-        camera.pitch = PI / 2.0 - 0.02;
+    if camera.pitch / PI > 0.500001 {
+        camera.pitch = (PI / 2.0) - 0.000001;
     }
-
+    dbg!(camera.pitch / PI);
     camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
 
     let target_distance = 10.0;
-
     let backward = Vec3 {
         x: 0.0,
         y: 0.0,
@@ -617,8 +619,10 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     .rotated_by(camera.rotation)
     .normalized();
 
-    let offset = backward * target_distance;
+    let camera_relative_offset = camera.rotation * offset;
+    let target = player_transform.position + camera_relative_offset;
 
+    let offset = backward * target_distance;
     camera.position = target + offset;
 }
 
@@ -632,7 +636,7 @@ fn player_update(world: &mut World, delta_time: f32) {
     let mut jump = 0.0;
     let mut max_speed = 3.0;
     if keyboard.contains(&KeyCode::ShiftLeft) {
-        max_speed *= 2.0;
+        max_speed *= 10.0;
     }
     if keyboard.contains(&KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
@@ -688,5 +692,9 @@ fn player_update(world: &mut World, delta_time: f32) {
             .slerp(face_direction, rotation_speed * delta_time)
             .normalized();
     }
+    if transform.position.y < -50.0 {
+        transform.position.y = 20.0;
+    }
+    dbg!(transform.position.y);
     rigidbody.velocity.y += jump;
 }
