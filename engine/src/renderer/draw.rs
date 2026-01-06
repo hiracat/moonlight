@@ -5,9 +5,10 @@ use crate::renderer::init::{
     create_device, create_instance, create_physical_device, setup_debug_utils,
 };
 use crate::renderer::pipelines::{
-    ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
-    PipelineBundle, PipelineKey, RasterState, VertexInputState, create_builtin_graphics_pipelines,
-    create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
+    create_builtin_graphics_pipelines, create_graphics_pipeline,
+    create_pipeline_layout_from_vert_frag, ColorBlendState, DepthStencilState,
+    GraphicsPipelineDesc, InputAssemblyState, MultisampleState, PipelineBundle, PipelineKey,
+    RasterState, VertexInputState,
 };
 use crate::renderer::resources::{GpuTexture, Mesh, ResourceManager};
 use crate::renderer::swapchain::renderpass::create_renderpass;
@@ -17,7 +18,7 @@ use ash::vk::{
     VertexInputBindingDescription,
 };
 use bytemuck::cast_slice;
-use egui::{ClippedPrimitive, TextureId, epaint};
+use egui::{epaint, ClippedPrimitive, TextureId};
 use gpu_allocator::vulkan::*;
 use image::{DynamicImage, ImageBuffer, Rgba};
 use std::collections::HashMap;
@@ -38,7 +39,7 @@ use winit::{
     window::Window,
 };
 
-pub const VALIDATION_ENABLE: bool = true;
+pub const VALIDATION_ENABLE: bool = false;
 pub const GEOMETRY_SUBPASS: u32 = 0;
 pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -622,10 +623,12 @@ impl Renderer {
 
         eprintln!("created surface");
         //need to make this optional to put stuff inside
-        if VALIDATION_ENABLE {}
         let debug_utils_loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
-        let debug_messenger = setup_debug_utils(&debug_utils_loader);
-        eprintln!("set up debug utility");
+        let mut debug_messenger = vk::DebugUtilsMessengerEXT::null();
+        if VALIDATION_ENABLE {
+            debug_messenger = setup_debug_utils(&debug_utils_loader);
+            eprintln!("set up debug utility");
+        }
 
         let required_extensions = [
             ash::vk::KHR_SWAPCHAIN_NAME,

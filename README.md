@@ -5,10 +5,13 @@ A custom Vulkan renderer written in Rust, featuring a homemade Entity Component 
 ## Running
 first download the whole project folder
 
-to build from scratch: clone repo and from the projects root just run ``cargo run`` or ``cargo run --release``, depends on a working vulkan driver and clib
+to build from scratch: clone repo and from the projects root just run ``cargo run`` or ``cargo run --release``, depends on a working vulkan driver
 
 a full example with prebuilt executables is available at this link: https://drive.proton.me/urls/PYJJB301MM#Ar6WVVxiseo3
 just run corruption or corruption.exe depending on platform
+
+### windows
+windows requies the visual c++ runtime, which can be found here: https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version
 
 ## Overview
 Moonlight is my project to understand graphics programming. It is a deferred renderer with a simple physics engine and egui integration.
