@@ -1,13 +1,15 @@
-use std::{io::Write, path::Path};
+/// This is for engine side components, anything that interacts with the engine in some special way
+/// is kept here, such as lights, meshes, textures and animations,
+use std::{collections::HashMap, io::Write, path::Path};
 
 use ash::vk;
-use bytemuck::{Pod, Zeroable, bytes_of};
+use bytemuck::{bytes_of, Pod, Zeroable};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
 
 use crate::renderer::draw::{
-    QueueFamilyIndex, Renderer, SharedAllocator, alloc_buffers, instant_submit_command_buffer,
+    alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, Renderer, SharedAllocator,
 };
 
 pub struct ResourceManager {
@@ -27,6 +29,252 @@ pub struct ResourceManager {
     queue: vk::Queue,
     one_time_submit_buffer: vk::CommandBuffer,
     one_time_submit_pool: vk::CommandPool,
+}
+
+// marks a entity as having animations, and stores the animations
+// referenced https://www.youtube.com/watch?v=da6d28IylL8 to make this, and https://whoisryosuke.com/blog/2022/importing-gltf-with-wgpu-and-rust
+#[derive(Debug)]
+pub struct Animated {
+    //PERF: this could possible be put into the resource manager since it can be large, but not
+    //necesary for now
+    animations: Vec<AnimationClip>,
+    skeleton: Skeleton,
+}
+
+#[derive(Debug)]
+pub struct Skeleton {
+    joints: Vec<Joint>,
+}
+
+#[derive(Debug)]
+pub struct Joint {
+    // set to usize::MAX for the root, but is really undefined
+    parent_index: usize,
+    children_indices: Vec<usize>,
+
+    bind_local_transform: uv::Mat4,
+    // comes from the gltf, from bone to world space
+    inverse_bind_matrix: uv::Mat4,
+
+    // edited by the animation channels
+    position: uv::Vec3,
+    rotation: uv::Rotor3,
+    scale: uv::Vec3,
+}
+
+impl Joint {
+    fn get_deformed_bind_matrix(&self) -> uv::Mat4 {
+        uv::Mat4::from_translation(self.position)
+            * self.rotation.into_matrix().into_homogeneous()
+            * uv::Mat4::from_nonuniform_scale(self.scale)
+            * self.bind_local_transform
+        //BUG: this is weird to multiply here again, perhaps the tutorial is wrong(thanks
+        //claude)
+    }
+}
+
+#[derive(Debug)]
+pub enum Keyframes {
+    Translation(Vec<uv::Vec3>),
+    Rotation(Vec<uv::Rotor3>),
+    Scale(Vec<uv::Vec3>),
+}
+
+#[derive(Debug)]
+pub struct AnimationClip {
+    pub name: String,
+    pub channels: Vec<AnimationChannel>,
+}
+
+#[derive(Debug)]
+pub struct AnimationChannel {
+    pub keyframes: Keyframes,
+    pub timestamps: Vec<f32>,
+    target_node_index: usize,
+}
+
+pub fn create_animations(path: &'static str) -> Animated {
+    let (document, buffers, _images) = gltf::import(path).unwrap();
+    assert_eq!(document.skins().len(), 1);
+
+    let skin = document.skins().next().unwrap();
+    let (joints, node_to_real) = load_joints(&skin, &buffers);
+
+    let skeleton = Skeleton { joints };
+
+    let mut animation_clips = Vec::new();
+    for animation in document.animations() {
+        let mut animation_channels = Vec::new();
+        for channel in animation.channels() {
+            let reader = channel.reader(|buffer| Some(&buffers[buffer.index()]));
+            let timestamps = if let Some(inputs) = reader.read_inputs() {
+                match inputs {
+                    gltf::accessor::Iter::Standard(times) => {
+                        let times: Vec<f32> = times.collect();
+                        times
+                    }
+                    gltf::accessor::Iter::Sparse(_) => {
+                        todo!()
+                    }
+                }
+            } else {
+                panic!("animation has no keyframes");
+            };
+
+            let keyframes = if let Some(outputs) = reader.read_outputs() {
+                match outputs {
+                    gltf::animation::util::ReadOutputs::Translations(translations) => {
+                        let translations_vec = translations.map(|x| uv::Vec3::from(x)).collect();
+                        Keyframes::Translation(translations_vec)
+                    }
+                    gltf::animation::util::ReadOutputs::Rotations(rotations) => {
+                        let rotations_vec = rotations
+                            .into_f32()
+                            .map(|x| uv::Rotor3::from_quaternion_array(x))
+                            .collect();
+                        Keyframes::Rotation(rotations_vec)
+                    }
+                    gltf::animation::util::ReadOutputs::Scales(scales) => {
+                        let scales_vec = scales.map(|x| uv::Vec3::from(x)).collect();
+                        Keyframes::Scale(scales_vec)
+                    }
+                    gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
+                        unimplemented!()
+                    }
+                }
+            } else {
+                panic!("unexpected reader output")
+            };
+
+            animation_channels.push(AnimationChannel {
+                target_node_index: *node_to_real
+                    .get(&channel.target().node().index())
+                    .expect("should have value for all nodes accessed"),
+                keyframes: keyframes,
+                timestamps: timestamps,
+            })
+        }
+        animation_clips.push(AnimationClip {
+            name: animation.name().unwrap_or("no name").to_string(),
+            channels: animation_channels,
+        });
+    }
+
+    Animated {
+        animations: animation_clips,
+        skeleton,
+    }
+}
+
+fn load_joints(
+    skin: &gltf::Skin,
+    buffers: &Vec<gltf::buffer::Data>,
+) -> (Vec<Joint>, HashMap<usize, usize>) {
+    let inverse_bind_accessor = skin.inverse_bind_matrices().unwrap();
+    let mut node_to_real = HashMap::new();
+
+    let mut node_to_joint_index: HashMap<usize, usize> = HashMap::new();
+
+    for (idx, joint) in skin.joints().enumerate() {
+        node_to_joint_index.insert(joint.index(), idx);
+    }
+
+    let inverse_bind_matrices: Vec<uv::Mat4> = if let Some(iter) =
+        gltf::accessor::Iter::<[[f32; 4]; 4]>::new(inverse_bind_accessor, |buffer| {
+            // map here transforms the option if it exists, basically just data.0
+            // without unwrapping
+            buffers.get(buffer.index()).map(|data| &data.0[..])
+        }) {
+        iter.map(|matrix_array| uv::Mat4::from(matrix_array))
+            .collect()
+    } else {
+        panic!("Failed to read inverse bind matrices");
+    };
+
+    let mut joint_hierarchy = Vec::new();
+
+    if let Some(root) = skin.skeleton() {
+        build_hierarchy(
+            &root,
+            usize::MAX,
+            &inverse_bind_matrices,
+            &mut joint_hierarchy,
+            &mut node_to_real,
+            &node_to_joint_index,
+        );
+    } else {
+        let mut child_indices = std::collections::HashSet::new();
+        for joint in skin.joints() {
+            for child in joint.children() {
+                child_indices.insert(child.index());
+            }
+        }
+
+        let mut only_one_root = true;
+        for joint in skin.joints() {
+            if !child_indices.contains(&joint.index()) {
+                if only_one_root {
+                    build_hierarchy(
+                        &joint,
+                        usize::MAX,
+                        &inverse_bind_matrices,
+                        &mut joint_hierarchy,
+                        &mut node_to_real,
+                        &node_to_joint_index,
+                    );
+                    only_one_root = false;
+                } else {
+                    panic!("skeleton should only have one root");
+                }
+            }
+        }
+    };
+
+    (joint_hierarchy, node_to_real)
+}
+
+fn build_hierarchy(
+    node: &gltf::Node,
+    parent_index: usize,
+    inverse_bind_matrices: &Vec<uv::Mat4>,
+    joints: &mut Vec<Joint>,
+    node_to_real: &mut HashMap<usize, usize>,
+    node_to_joint_index: &HashMap<usize, usize>,
+) {
+    let current_joint_index = joints.len();
+
+    // Add parent's child index
+    if parent_index != usize::MAX {
+        joints[parent_index]
+            .children_indices
+            .push(current_joint_index);
+    }
+    node_to_real.insert(node.index(), current_joint_index);
+
+    joints.push(Joint {
+        bind_local_transform: node.transform().matrix().into(),
+        position: node.transform().decomposed().0.into(),
+        rotation: uv::Rotor3::from_quaternion_array(node.transform().decomposed().1),
+        scale: node.transform().decomposed().2.into(),
+        // needs to be filled later
+        children_indices: Vec::new(),
+        inverse_bind_matrix: inverse_bind_matrices[*node_to_joint_index
+            .get(&node.index())
+            .expect("all joints should have an entry")],
+        // needs to be set later
+        parent_index: parent_index,
+    });
+
+    for child in node.children() {
+        build_hierarchy(
+            &child,
+            current_joint_index,
+            inverse_bind_matrices,
+            joints,
+            node_to_real,
+            node_to_joint_index,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

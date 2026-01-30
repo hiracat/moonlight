@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::{
     any::{Any, TypeId},
-    collections::{HashSet, hash_map::HashMap},
+    collections::{hash_map::HashMap, HashSet},
     time::Instant,
 };
 
@@ -823,6 +823,7 @@ impl<T: 'static> ComponentStorage<T> {
         match self.data.binary_search_by_key(&entity, |x| x.0) {
             Ok(x) => {
                 self.data.remove(x);
+                // deallocate empty storages
                 if self.data.len() < 1 {
                     self.data.shrink_to_fit();
                 }
@@ -854,7 +855,7 @@ trait ErasedComponentStorage: Any {
 impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
     /// returns true if remove was successful
     fn remove_entity(&mut self, entity: EntityId) {
-        self.remove(entity);
+        let _ = self.remove(entity);
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -1098,7 +1099,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Req<&str>)>();
 
                 for item in query {
-                    counter += item.1.1[0];
+                    counter += item.1 .1[0];
                     std::hint::black_box(counter);
                 }
             },
@@ -1114,7 +1115,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Opt<i64>)>();
 
                 for item in query {
-                    counter += item.1.2.unwrap_or(&0);
+                    counter += item.1 .2.unwrap_or(&0);
                     std::hint::black_box(counter);
                 }
             },

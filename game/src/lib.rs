@@ -1,4 +1,4 @@
-use core::f32;
+use core::{f32, panic};
 use moonlight;
 use moonlight::components::Camera;
 use moonlight::components::{AmbientLight, DirectionalLight, PointLight, Transform};
@@ -10,7 +10,7 @@ use moonlight::physics::Collider;
 use moonlight::physics::RigidBody;
 use moonlight::renderer::draw::Renderer;
 use moonlight::renderer::init::create_window;
-use moonlight::renderer::resources::Material;
+use moonlight::renderer::resources::{Material, create_animations};
 use moonlight::renderer::resources::Skybox;
 use std::{
     collections::HashSet,
@@ -69,6 +69,7 @@ impl ApplicationHandler for App {
             return;
         }
 
+
         let window = create_window(event_loop);
         //HACK: magic number, i dont care right now
 
@@ -95,6 +96,7 @@ impl ApplicationHandler for App {
 
         let renderer = self.renderer.as_mut().unwrap();
 
+
         // Register resources into the world
         self.world.add_resource(camera).unwrap();
         self.world.add_resource(directional).unwrap();
@@ -104,12 +106,12 @@ impl ApplicationHandler for App {
         self.world.add_resource(mouse_movement).unwrap();
 
         let skybox = renderer.resource_manager.create_cubemap([
-            "data/textures/skybox/px.png",
-            "data/textures/skybox/nx.png",
-            "data/textures/skybox/py.png",
-            "data/textures/skybox/ny.png",
-            "data/textures/skybox/pz.png",
-            "data/textures/skybox/nz.png",
+            "data/skybox/px.png",
+            "data/skybox/nx.png",
+            "data/skybox/py.png",
+            "data/skybox/ny.png",
+            "data/skybox/pz.png",
+            "data/skybox/nz.png",
         ]);
         let skybox = Skybox::new(skybox);
         self.world.add_resource(skybox).unwrap();
@@ -135,7 +137,7 @@ impl ApplicationHandler for App {
                 fox,
                 Transform::from(
                     Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
-                    Some(Rotor3::from_rotation_xz(PI * 0.25)), // Slight rotation for dramatic pose
+                    Some(Rotor3::identity()), // Slight rotation for dramatic pose
                     Some(Vec3::new(1.0, 1.0, 1.0)),
                 ),
             )
@@ -144,7 +146,7 @@ impl ApplicationHandler for App {
 
         // Fox collision - smaller and more precise
         let fox_half_extents = Vec3::new(0.4, 0.588, 0.4);
-        let fox_center_offset = Vec3::new(0.0, 0.0, 0.0);
+        let fox_center_offset = Vec3::new(0.0, 0.588, 0.0);
         self.world
             .add(
                 fox,
@@ -157,24 +159,27 @@ impl ApplicationHandler for App {
                 fox,
                 renderer
                     .resource_manager
-                    .create_mesh("data/models/low_poly_fox.glb"),
+                    .create_mesh("data/models/animated_fox.glb"),
             )
             .unwrap();
+        let animations = create_animations("data/models/animated_fox.glb");
+        dbg!(animations);
+        panic!();
         let albedo = renderer
             .resource_manager
-            .create_texture("data/textures/fox_texture.png");
+            .create_texture("data/models/textures/animated_fox_texture.png");
         self.world.add(fox, Material::create(albedo)).unwrap();
 
         let albedo = renderer
             .resource_manager
-            .create_texture("data/textures/ground.jpg");
+            .create_texture("data/models/textures/ground.jpg");
         self.world.add(ground, Material::create(albedo)).unwrap();
         self.world.add(x_axis, Material::create(albedo)).unwrap();
         self.world.add(y_axis, Material::create(albedo)).unwrap();
         self.world.add(z_axis, Material::create(albedo)).unwrap();
         let albedo = renderer
             .resource_manager
-            .create_texture("data/textures/ground_soft.jpg");
+            .create_texture("data/models/textures/ground_soft.jpg");
         self.world
             .add(standing_block, Material::create(albedo))
             .unwrap();
@@ -634,9 +639,9 @@ fn player_update(world: &mut World, delta_time: f32) {
 
     let mut delta_v = Vec3::zero();
     let mut jump = 0.0;
-    let mut max_speed = 3.0;
+    let mut max_speed = 7.0;
     if keyboard.contains(&KeyCode::ShiftLeft) {
-        max_speed *= 10.0;
+        max_speed = 20.0;
     }
     if keyboard.contains(&KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
