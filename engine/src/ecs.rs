@@ -1,7 +1,11 @@
 #![allow(dead_code)]
+//TODO: want to replace this code with an archetype based system, since i finnnnallllyyy understand
+//them, but i should build both systems and profile first
+
 use std::{
     any::{Any, TypeId},
     collections::{hash_map::HashMap, HashSet},
+    marker::PhantomData,
     time::Instant,
 };
 
@@ -20,16 +24,19 @@ macro_rules! get_first {
     };
 }
 macro_rules! impl_join{
-    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),*) => {
-        struct $struct<$($ty),+, $($opt_ty),*>{
+    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),* [not] $(($not_name:ident,$peek_not:ident: $not_ty:ident)),*) => {
+        struct $struct<$($ty,)+ $($opt_ty,)* $($not_ty),*>{
             $(
                 $name: $ty,
             )+
             $(
-                $opt_name: $opt_ty
+                $opt_name: $opt_ty,
+            )*
+            $(
+                $not_name: $not_ty
             ),*
         }
-        impl <$($ty),+, $($opt_ty),*> Joinable for $struct<$($ty),+, $($opt_ty),*>
+        impl <$($ty,)+ $($opt_ty,)* $($not_ty),*> Joinable for $struct<$($ty,)+ $($opt_ty,)* $($not_ty),*>
         where
             $(
                 $ty: Joinable,
@@ -37,28 +44,36 @@ macro_rules! impl_join{
             $(
                 $opt_ty: Joinable,
             )*
+            $(
+                $not_ty: Joinable,
+            )*
             {
                 type Ref<'a> = ($($ty::Ref<'a>,)+ $(Option<$opt_ty::Ref<'a>>,)*) where Self: 'a;
-                type Component<'a> = ($($ty::Component<'a>,)+$($opt_ty::Component<'a>,)*)
+                type Component<'a> = ($($ty::Component<'a>,)+$ ($opt_ty::Component<'a>,)* $($not_ty::Component<'a>,)*)
                 where
                     $($ty: 'a,)+
-                    $($opt_ty: 'a,)*;
-                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty),*>
+                    $($opt_ty: 'a,)*
+                    $($not_ty: 'a,)*;
+                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty,)* $($not_ty),*>
                 where
                     $($ty: 'a,)+
-                    $($opt_ty: 'a,)*;
+                    $($opt_ty: 'a,)*
+                    $($not_ty: 'a,)*;
                 fn join<'a>(self) -> Self::Iter<'a> {
-                    $iter::new($(self.$name.join(),)+ $(self.$opt_name.join()),*)
+                    $iter::new($(self.$name.join(),)+ $(self.$opt_name.join(),)* $(self.$not_name.join()),*)
                 }
             }
 
-        pub struct $iter<'a, $($ty),+, $($opt_ty),*>
+        pub struct $iter<'a, $($ty,)+ $($opt_ty,)* $($not_ty),*>
         where
         $(
         $ty: Joinable+ 'a,
         )+
         $(
         $opt_ty: Joinable+ 'a,
+        )*
+        $(
+        $not_ty: Joinable+ 'a,
         )*
         {
             $(
@@ -69,14 +84,21 @@ macro_rules! impl_join{
                 $opt_name: <$opt_ty as Joinable>::Iter<'a>,
                 $peek_opt: Option<(EntityId, <$opt_ty as Joinable>::Ref<'a>)>,
             )*
+            $(
+                $not_name: <$not_ty as Joinable>::Iter<'a>,
+                $peek_not: Option<(EntityId, <$not_ty as Joinable>::Ref<'a>)>,
+            )*
         }
-        impl<'a, $($ty),+, $($opt_ty),*> $iter<'a, $($ty),+, $($opt_ty),*>
+        impl<'a, $($ty),+, $($opt_ty,)* $($not_ty),*> $iter<'a, $($ty),+, $($opt_ty,)* $($not_ty,)*>
         where
             $(
                 $ty: Joinable,
             )+
             $(
                 $opt_ty: Joinable,
+            )*
+            $(
+                $not_ty: Joinable,
             )*
             {
                 fn new(
@@ -86,6 +108,9 @@ macro_rules! impl_join{
                 $(
                    mut $opt_name: $opt_ty::Iter<'a>,
                 )*
+                $(
+                   mut $not_name: $not_ty::Iter<'a>,
+                )*
                 )
                     -> Self{
                 $(
@@ -93,6 +118,9 @@ macro_rules! impl_join{
                 )+
                 $(
                     let $peek_opt = $opt_name.next();
+                )*
+                $(
+                    let $peek_not = $not_name.next();
                 )*
                 Self {
                 $(
@@ -103,17 +131,24 @@ macro_rules! impl_join{
                    $peek_opt,
                    $opt_name,
                 )*
+                $(
+                   $peek_not,
+                   $not_name,
+                )*
                 }
                 }
 
             }
-        impl <'a, $($ty),+, $($opt_ty),*> Iterator for $iter<'a, $($ty),+, $($opt_ty),*>
+        impl <'a, $($ty,)+ $($opt_ty,)* $($not_ty),*> Iterator for $iter<'a, $($ty),+, $($opt_ty,)* $($not_ty),*>
         where
         $(
         $ty: Joinable,
         )+
         $(
         $opt_ty: Joinable,
+        )*
+        $(
+        $not_ty: Joinable,
         )*
         {
             type Item = (EntityId,
@@ -131,12 +166,26 @@ macro_rules! impl_join{
                 let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
                 self.$peek = self.$name.next();
                 )+
+
+                $(
+                let (mut $not_name, mut $peek_not) = Option::take(&mut self.$peek_not)?;
+                self.$peek_not = self.$not_name.next();
+                )*
                 let mut max_rq_id;
+                let mut id_blocked = false;
                 // bring anything required up to the current required index early return none if any
                 // run out
                 loop {
-                    max_rq_id = get_first!($($name)+)$(.max($name))+;
+                    if id_blocked {
+                        $(
+                        ($name, $peek) = Option::take(&mut self.$peek)?;
+                        self.$peek = self.$name.next();
+                        )+
+                        id_blocked = false;
+                    }
+
                     let mut all_max = true;
+                    max_rq_id = get_first!($($name)+)$(.max($name))+;
                     $(
                     if $name < max_rq_id {
                         ($name, $peek) = Option::take(&mut self.$peek)?;
@@ -144,7 +193,26 @@ macro_rules! impl_join{
                         all_max = false;
                     }
                     )+
+
+                    $(
+                    if $not_name < max_rq_id {
+                        if self.$peek_not.is_some() {
+                            ($not_name, $peek_not) = Option::take(&mut self.$peek_not)?;
+                            self.$peek_not = self.$not_name.next();
+                            all_max = false;
+                        }
+                    }
+                    )*
+
                     if all_max {
+
+                        $(
+                        if $not_name == max_rq_id {
+                            id_blocked = true;
+                            continue;
+                        }
+                        )*
+
                         break;
                     }
                 }
@@ -181,16 +249,19 @@ macro_rules! impl_join{
     };
 }
 macro_rules! impl_join_mut {
-    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),*) => {
-        struct $struct<$($ty),+, $($opt_ty),*>{
+    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),* [not] $(($not_name:ident,$peek_not:ident: $not_ty:ident)),*) => {
+        struct $struct<$($ty,)+ $($opt_ty),* $(,$not_ty)*>{
             $(
                 $name: $ty,
             )+
             $(
-                $opt_name: $opt_ty
+                $opt_name: $opt_ty,
+            )*
+            $(
+                $not_name: $not_ty
             ),*
         }
-        impl <$($ty),+, $($opt_ty),*> JoinableMut for $struct<$($ty),+, $($opt_ty),*>
+        impl <$($ty,)+ $($opt_ty),* $(,$not_ty)*> JoinableMut for $struct<$($ty,)+ $($opt_ty),* $(,$not_ty)*>
         where
             $(
                 $ty: JoinableMut,
@@ -198,28 +269,38 @@ macro_rules! impl_join_mut {
             $(
                 $opt_ty: JoinableMut,
             )*
+            $(
+                $not_ty: JoinableMut,
+            )*
             {
-                type Mut<'a> = ($($ty::Mut<'a>,)+ $(Option<$opt_ty::Mut<'a>>,)*) where Self: 'a;
-                type Component<'a> = ($($ty::Component<'a>,)+$($opt_ty::Component<'a>,)*)
+                type Mut<'a> = ($($ty::Mut<'a>,)+ $(Option<$opt_ty::Mut<'a>>),*) where Self: 'a;
+                type Component<'a> = ($($ty::Component<'a>,)+$ ($opt_ty::Component<'a>),* $(,$not_ty::Component<'a>)*)
                 where
                     $($ty: 'a,)+
-                    $($opt_ty: 'a,)*;
-                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty),*>
+                    $($opt_ty: 'a,)*
+                    $($not_ty: 'a,)*;
+                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
                 where
                     $($ty: 'a,)+
-                    $($opt_ty: 'a,)*;
+                    $($opt_ty: 'a,)*
+                    $($not_ty: 'a,)*;
                 unsafe fn join<'a>(self) -> Self::Iter<'a> {
-                    unsafe {$iter::new($(self.$name.join(),)+ $(self.$opt_name.join()),*)}
+                    unsafe {
+                        $iter::new($(self.$name.join(),)+ $(self.$opt_name.join(),)* $(self.$not_name.join()),*)
+                    }
                 }
             }
 
-        pub struct $iter<'a, $($ty),+, $($opt_ty),*>
+        pub struct $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
         where
         $(
         $ty: JoinableMut + 'a,
         )+
         $(
         $opt_ty: JoinableMut + 'a,
+        )*
+        $(
+        $not_ty: JoinableMut + 'a,
         )*
         {
             $(
@@ -230,14 +311,21 @@ macro_rules! impl_join_mut {
                 $opt_name: <$opt_ty as JoinableMut>::Iter<'a>,
                 $peek_opt: Option<(EntityId, <$opt_ty as JoinableMut>::Mut<'a>)>,
             )*
+            $(
+                $not_name: <$not_ty as JoinableMut>::Iter<'a>,
+                $peek_not: Option<(EntityId, <$not_ty as JoinableMut>::Mut<'a>)>,
+            )*
         }
-        impl<'a, $($ty),+, $($opt_ty),*> $iter<'a, $($ty),+, $($opt_ty),*>
+        impl<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*> $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
         where
             $(
                 $ty: JoinableMut,
             )+
             $(
                 $opt_ty: JoinableMut,
+            )*
+            $(
+                $not_ty: JoinableMut,
             )*
             {
                 unsafe fn new(
@@ -247,6 +335,9 @@ macro_rules! impl_join_mut {
                 $(
                    mut $opt_name: $opt_ty::Iter<'a>,
                 )*
+                $(
+                   mut $not_name: $not_ty::Iter<'a>,
+                )*
                 )
                     -> Self{
                 $(
@@ -254,6 +345,9 @@ macro_rules! impl_join_mut {
                 )+
                 $(
                     let $peek_opt = $opt_name.next();
+                )*
+                $(
+                    let $peek_not = $not_name.next();
                 )*
                 Self {
                 $(
@@ -264,17 +358,25 @@ macro_rules! impl_join_mut {
                    $peek_opt,
                    $opt_name,
                 )*
+                $(
+                   $peek_not,
+                   $not_name,
+                )*
                 }
                 }
 
             }
-        impl <'a, $($ty),+, $($opt_ty),*> Iterator for $iter<'a, $($ty),+, $($opt_ty),*>
+
+        impl <'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*> Iterator for $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
         where
         $(
         $ty: JoinableMut,
         )+
         $(
         $opt_ty: JoinableMut,
+        )*
+        $(
+        $not_ty: JoinableMut,
         )*
         {
             type Item = (EntityId,
@@ -292,12 +394,26 @@ macro_rules! impl_join_mut {
                 let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
                 self.$peek = self.$name.next();
                 )+
+
+                $(
+                let (mut $not_name, mut $peek_not) = Option::take(&mut self.$peek_not)?;
+                self.$peek_not = self.$not_name.next();
+                )*
                 let mut max_rq_id;
+                let mut id_blocked = false;
                 // bring anything required up to the current required index early return none if any
                 // run out
                 loop {
-                    max_rq_id = get_first!($($name)+)$(.max($name))+;
+                    if id_blocked {
+                        $(
+                        ($name, $peek) = Option::take(&mut self.$peek)?;
+                        self.$peek = self.$name.next();
+                        )+
+                        id_blocked = false;
+                    }
+
                     let mut all_max = true;
+                    max_rq_id = get_first!($($name)+)$(.max($name))+;
                     $(
                     if $name < max_rq_id {
                         ($name, $peek) = Option::take(&mut self.$peek)?;
@@ -305,7 +421,24 @@ macro_rules! impl_join_mut {
                         all_max = false;
                     }
                     )+
+
+                    $(
+                    if $not_name == max_rq_id {
+                        ($not_name, $peek_not) = Option::take(&mut self.$peek_not)?;
+                        self.$peek_not= self.$not_name.next();
+                        id_blocked = true;
+                    }
+                    )*
+
                     if all_max {
+
+                        $(
+                        if $not_name == max_rq_id {
+                            id_blocked = true;
+                            continue;
+                        }
+                        )*
+
                         break;
                     }
                 }
@@ -341,16 +474,16 @@ macro_rules! impl_join_mut {
     }
 }
 macro_rules! impl_fetch{
-    ($iter:ident, $struct:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* ) => {
-impl< $($ty: 'static,)+ $($opt: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>),*) {
-    type Iter<'w> = $iter<'w, $(&'w [(EntityId, $ty)],)+ $(&'w [(EntityId, $opt)]),*>;
+    ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
+impl< $($ty: 'static,)+ $($opt: 'static,)* $($not: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>,)* $(Not<$not>),*) {
+    type Iter<'w> = $iter<'w, $(&'w [(EntityId, $ty)],)+ $(&'w [(EntityId, $opt)]),* $(,&'w [(EntityId, $not)])*>;
     type Item<'w> = ($(&'w $ty,)+ $(Option<&'w $opt>),*);
 
     type OptionalItems<'w> = Result<($(&'w $ty,)+ $(Option<&'w $opt>),*), WorldError>;
 
     fn get<'w>(entity: EntityId, world: &'w World) -> Self::OptionalItems<'w> {
         let ptr_world: &World = world;
-        assert_unique_types!($($ty)+ $($opt)*);
+        assert_unique_types!($($ty)+ $($opt)* $($not)*);
         $(
         let $name = {
             (*ptr_world)
@@ -367,10 +500,17 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>
                 .and_then(|x| x.get(entity))
         };
         )*
+        $(
+            if (*ptr_world)
+                .get_storage::<$not>()
+                .and_then(|x| x.get(entity)).is_some() {
+                    return Err(WorldError::EntityHasComponent);
+            }
+        )*
         Ok(($($name,)+ $($optname),*))
     }
     fn fetch<'w>(world: &'w World) -> Self::Iter<'w> {
-        assert_unique_types!($($ty)+ $($opt)*);
+        assert_unique_types!($($ty)+ $($opt)* $($not)*);
         let ptr_world: &World = world;
         $(
         let $name: &[(EntityId, $ty)] = {
@@ -386,12 +526,22 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>
                 .map_or(&[], |x| x.data.as_slice())
         };
         )*
+        $(
+        let $notname: &[(EntityId, $not)] = {
+            ptr_world
+                .get_storage::<$not>()
+                .map_or(&[], |x| x.data.as_slice())
+        };
+        )*
         let join = $struct {
             $(
             $name,
             )+
             $(
             $optname,
+            )*
+            $(
+            $notname,
             )*
         };
         //Safety: Panics of any types are the same
@@ -401,16 +551,16 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>
 };
 }
 macro_rules! impl_fetch_mut{
-    ($iter:ident, $struct:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* ) => {
-impl< $($ty: 'static,)+ $($opt: 'static),*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<$opt>),*) {
-    type Iter<'w> = $iter<'w, $(&'w mut [(EntityId, $ty)],)+ $(&'w mut [(EntityId, $opt)]),*>;
+    ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
+impl<$($ty: 'static,)+ $($opt:'static),* $(,$not:'static)*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<$opt>),* $(,NotM<$not>)*) {
+    type Iter<'w> = $iter<'w, $(&'w mut [(EntityId, $ty)],)+ $(&'w mut [(EntityId, $opt)]),* $(,&'w mut [(EntityId, $not)])*>;
     type Item<'w> = ($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*);
 
     type OptionalItems<'w> = Result<($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*), WorldError>;
 
     fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::OptionalItems<'w> {
         let ptr_world: *mut World = world;
-        assert_unique_types!($($ty)+ $($opt)*);
+        assert_unique_types!($($ty)+ $($opt)* $($not)*);
         $(
         let $name = unsafe {
             (*ptr_world)
@@ -426,6 +576,13 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<
                 .get_storage_mut::<$opt>()
                 .and_then(|x| x.get_mut(entity))
         };
+        )*
+        $(
+            if unsafe {(*ptr_world)
+                .get_storage_mut::<$not>()
+                .and_then(|x| x.get_mut(entity)).is_some()} {
+                    return Err(WorldError::EntityHasComponent);
+            }
         )*
         Ok(($($name,)+ $($optname),*))
     }
@@ -446,12 +603,22 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<
                 .map_or(&mut [], |x| x.data.as_mut_slice())
         };
         )*
+        $(
+        let $notname: &mut [(EntityId, $not)] = unsafe {
+            (*ptr_world)
+                .get_storage_mut::<$not>()
+                .map_or(&mut [], |x| x.data.as_mut_slice())
+        };
+        )*
         let join = $struct {
             $(
             $name,
             )+
             $(
             $optname,
+            )*
+            $(
+            $notname,
             )*
         };
         //Safety: Panics of any types are the same
@@ -461,96 +628,76 @@ impl< $($ty: 'static,)+ $($opt: 'static),*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<
 };
 }
 
-// N = 2
-impl_fetch_mut!(JoinMut2Opt0Iter, JoinMut2Opt0, (a, T), (b, U)[opt]);
-impl_fetch_mut!(JoinMut2Opt1Iter, JoinMut2Opt1, (a, T)[opt](b, U));
+// 2
+impl_fetch!(Join2, Join2Iter, (a, T), (c, U)[opt][not]);
+impl_fetch_mut!(JoinMut2, JoinMut2Iter, (a, T), (c, U)[opt][not]);
+impl_join!(Join2, Join2Iter, (a, peek_a: T), (c, peek_c: U)[opt][not]);
+impl_join_mut!(JoinMut2, JoinMut2Iter, (a, peek_a: T),(c, peek_c: U)[opt][not]);
 
-// N = 3
-impl_fetch_mut!(JoinMut3Opt0Iter, JoinMut3Opt0, (a, T), (b, U), (c, V)[opt]);
-impl_fetch_mut!(JoinMut3Opt1Iter, JoinMut3Opt1, (a, T), (b, U)[opt](c, V));
-impl_fetch_mut!(JoinMut3Opt2Iter, JoinMut3Opt2, (a, T)[opt](b, U), (c, V));
+impl_fetch!(Join1opt1, Join1opt1Iter, (a, T)[opt](c, U)[not]);
+impl_fetch_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, T)[opt](c, U)[not]);
+impl_join!(Join1opt1, Join1opt1Iter, (a, peek_a: T)[opt] (c, peek_c: U)[not]);
+impl_join_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, peek_a: T)[opt](c, peek_c: U)[not]);
 
-// N = 4
+// 3
+impl_fetch!(Join3, Join3Iter, (a, T), (b, U), (c, V)[opt][not]);
+impl_fetch_mut!(JoinMut3, JoinMut3Iter, (a, T), (b, U), (c, V)[opt][not]);
+impl_join!(Join3, Join3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
+impl_join_mut!(JoinMut3, JoinMut3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
+
+impl_fetch!(Join2opt1, Join2opt1Iter, (a, T), (b, U)[opt](c, V)[not]);
 impl_fetch_mut!(
-    JoinMut4Opt0Iter,
-    JoinMut4Opt0,
+    JoinMut2opt1,
+    JoinMut2opt1Iter,
+    (a, T),
+    (b, U)[opt](c, V)[not]
+);
+impl_join!(Join2opt1, Join2opt1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not]);
+impl_join_mut!(JoinMut2opt1, JoinMut2opt1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not]);
+
+impl_fetch!(
+    Join1opt1Not1,
+    Join1opt1Not1Iter,
+    (a, T)[opt](c, V)[not](e, X)
+);
+impl_fetch_mut!(
+    JoinMut1opt1Not1,
+    JoinMut1opt1Not1Iter,
+    (a, T)[opt](c, V)[not](e, X)
+);
+impl_join!(Join1opt1Not1, Join1opt1Not1Iter, (a, peek_a: T)[opt] (c, peek_c: V)[not](e, _peek_e: X));
+impl_join_mut!(JoinMut1opt1Not1, JoinMut1opt1Not1Iter, (a, peek_a: T)[opt] (c, peek_c: V)[not](e, _peek_e: X));
+
+//4
+
+impl_fetch!(Join4, Join4Iter, (a, T), (b, U), (c, V), (d, W)[opt][not]);
+impl_fetch_mut!(
+    JoinMut4,
+    JoinMut4Iter,
     (a, T),
     (b, U),
     (c, V),
-    (d, W)[opt]
+    (d, W)[opt][not]
 );
-impl_fetch_mut!(
-    JoinMut4Opt1Iter,
-    JoinMut4Opt1,
-    (a, T),
-    (b, U),
-    (c, V)[opt](d, W)
-);
-impl_fetch_mut!(
-    JoinMut4Opt2Iter,
-    JoinMut4Opt2,
-    (a, T),
-    (b, U)[opt](c, V),
-    (d, W)
-);
-impl_fetch_mut!(
-    JoinMut4Opt3Iter,
-    JoinMut4Opt3,
+impl_join!(Join4, Join4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[opt][not]);
+impl_join_mut!(JoinMut4, JoinMut4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[opt][not]);
+
+impl_fetch!(
+    Join1opt3,
+    Join1opt3Iter,
     (a, T)[opt](b, U),
     (c, V),
-    (d, W)
+    (d, W)[not]
 );
-// N = 2
-impl_join_mut!(JoinMut2Opt0, JoinMut2Opt0Iter, (a, peek_a: T), (b, peek_b: U) [opt]);
-impl_join_mut!(JoinMut2Opt1, JoinMut2Opt1Iter, (a, peek_a: T) [opt] (b, peek_b: U));
-
-// N = 3
-impl_join_mut!(JoinMut3Opt0, JoinMut3Opt0Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V) [opt]);
-impl_join_mut!(JoinMut3Opt1, JoinMut3Opt1Iter, (a, peek_a: T), (b, peek_b: U) [opt] (c, peek_c: V));
-impl_join_mut!(JoinMut3Opt2, JoinMut3Opt2Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, peek_c: V));
-
-// N = 4
-impl_join_mut!(JoinMut4Opt0, JoinMut4Opt0Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V), (d, peek_d: W) [opt]);
-impl_join_mut!(JoinMut4Opt1, JoinMut4Opt1Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V) [opt] (d, peek_d: W) );
-impl_join_mut!(JoinMut4Opt2, JoinMut4Opt2Iter, (a, peek_a: T), (b, peek_b: U) [opt] (c, peek_c: V), (d, peek_d: W));
-impl_join_mut!(JoinMut4Opt3, JoinMut4Opt3Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, peek_c: V), (d, peek_d: W));
-
-// N = 2
-impl_fetch!(Join2Opt0Iter, Join2Opt0, (a, T), (b, U)[opt]);
-impl_fetch!(Join2Opt1Iter, Join2Opt1, (a, T)[opt](b, U));
-
-// N = 3
-impl_fetch!(Join3Opt0Iter, Join3Opt0, (a, T), (b, U), (c, V)[opt]);
-impl_fetch!(Join3Opt1Iter, Join3Opt1, (a, T), (b, U)[opt](c, V));
-impl_fetch!(Join3Opt2Iter, Join3Opt2, (a, T)[opt](b, U), (c, V));
-
-// N = 4
-impl_fetch!(
-    Join4Opt0Iter,
-    Join4Opt0,
+impl_fetch_mut!(
+    JoinMut1opt3,
+    JoinMut1opt3Iter,
     (a, T),
-    (b, U),
-    (c, V),
-    (d, W)[opt]
+    (b, U)[opt](c, V),
+    (d, W)[not]
 );
-impl_fetch!(Join4Opt1Iter, Join4Opt1, (a, T), (b, U), (c, V)[opt](d, W));
-impl_fetch!(Join4Opt2Iter, Join4Opt2, (a, T), (b, U)[opt](c, V), (d, W));
-impl_fetch!(Join4Opt3Iter, Join4Opt3, (a, T)[opt](b, U), (c, V), (d, W));
-
-// N = 2
-impl_join!(Join2Opt0, Join2Opt0Iter, (a, peek_a: T), (b, peek_b: U) [opt]);
-impl_join!(Join2Opt1, Join2Opt1Iter, (a, peek_a: T) [opt] (b, peek_b: U));
-
-// N = 3
-impl_join!(Join3Opt0, Join3Opt0Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V) [opt]);
-impl_join!(Join3Opt1, Join3Opt1Iter, (a, peek_a: T), (b, peek_b: U) [opt] (c, peek_c: V) );
-impl_join!(Join3Opt2, Join3Opt2Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, peek_c: V));
-
-// N = 4
-impl_join!(Join4Opt0, Join4Opt0Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V), (d, peek_d: W) [opt]);
-impl_join!(Join4Opt1, Join4Opt1Iter, (a, peek_a: T), (b, peek_b: U), (c, peek_c: V) [opt] (d, peek_d: W));
-impl_join!(Join4Opt2, Join4Opt2Iter, (a, peek_a: T), (b, peek_b: U) [opt] (c, peek_c: V), (d, peek_d: W));
-impl_join!(Join4Opt3, Join4Opt3Iter, (a, peek_a: T) [opt] (b, peek_b: U), (c, peek_c: V), (d, peek_d: W));
+impl_join!(Join1opt3, Join1opt3Iter, (a, peek_a: T)[opt](b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[not]);
+impl_join_mut!(JoinMut1opt3, JoinMut1opt3Iter, (a, peek_a: T)[opt](b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[not]);
 
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
@@ -567,6 +714,9 @@ pub enum WorldError {
     ComponentTypeMissing,
     // #[error("a resource of this type has already been added")]
     ResourceAlreadyAdded,
+
+    // for a Not<T> query
+    EntityHasComponent,
 }
 
 pub struct World {
@@ -783,11 +933,15 @@ impl<'s, T: 'static> JoinableMut for &'s mut [(EntityId, T)] {
 pub struct Opt<C>(pub C);
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Req<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Not<C>(pub C);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OptM<C>(pub C);
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReqM<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NotM<C>(pub C);
 
 #[derive(Debug)]
 pub struct ComponentStorage<T: 'static> {
