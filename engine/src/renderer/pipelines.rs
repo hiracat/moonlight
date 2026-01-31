@@ -7,7 +7,7 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
+use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 
 use crate::ecs::{Opt, World};
 use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
@@ -925,8 +925,8 @@ impl DescriptorWriteBuilder<'_> {
         data: &T,
     ) -> vk::DescriptorSet {
         let size = size_of::<T>();
-        let (buffer, offset) = resource_manager.ring_buffer.allocate(size);
-        resource_manager.ring_buffer.write(data, offset);
+        let (buffer, offset) = resource_manager.ubo_ring_buffer.allocate(size);
+        resource_manager.ubo_ring_buffer.write(data, offset);
 
         let descriptor_set =
             resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);

@@ -1,9 +1,10 @@
+#![allow(unused)]
 /// This is for engine side components, anything that interacts with the engine in some special way
 /// is kept here, such as lights, meshes, textures and animations,
 use std::{collections::HashMap, io::Write, path::Path};
 
 use ash::vk;
-use bytemuck::{bytes_of, Pod, Zeroable};
+use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
@@ -12,6 +13,8 @@ use crate::renderer::draw::{
     alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, Renderer, SharedAllocator,
 };
 
+const MAX_SCENE_BONES: usize = 2048;
+
 pub struct ResourceManager {
     device: ash::Device,
     allocator: SharedAllocator,
@@ -19,9 +22,12 @@ pub struct ResourceManager {
     meshes: Vec<Option<GpuMesh>>,
     textures: Vec<Option<GpuTexture>>,
 
+    animation_resources: AnimationResources,
+
     default_texture: GpuTexture,
 
-    pub(crate) ring_buffer: UniformRingBuffer,
+    // is a ring buffer for all
+    pub(crate) ubo_ring_buffer: UniformRingBuffer,
 
     //NOTE: unowned resources, just handles for reference/creating without requiring renderer to be
     //passed in
@@ -31,18 +37,87 @@ pub struct ResourceManager {
     one_time_submit_pool: vk::CommandPool,
 }
 
-// marks a entity as having animations, and stores the animations
+#[derive(Debug)]
+pub struct Skeleton {
+    // TODO:just the index into the skeletons array(need to find a way to remove, but might just have to
+    // waste some memory, or use option and waste some indices
+    id: usize,
+}
+#[derive(Debug)]
+pub struct Animation {
+    // the index of the inner vec, so accessing an animation requires a skeleton and an animation
+    id: usize,
+    name: String,
+}
+struct AnimationResources {
+    // store all skeletons and bones, then flatten to upload to the gpu.
+    skeletons: Vec<SkeletonImpl>,
+    // use the same indices as the skeletons, with multiple animations per skeleton possible
+    animations: Vec<Vec<AnimationImpl>>,
+
+    skeleton_transform_megabuffer: vk::Buffer,
+    skeleton_transform_megaallocation: Allocation,
+
+    skeleton_normal_megabuffer: vk::Buffer,
+    skeleton_normal_megaallocation: Allocation,
+}
+impl AnimationResources {
+    fn create(device: &ash::Device, memory_allocator: SharedAllocator) -> Self {
+        let transform_size = (size_of::<uv::Mat4>() * MAX_SCENE_BONES) as u64;
+        let normal_size = (size_of::<uv::Mat3>() * MAX_SCENE_BONES) as u64;
+        let (mut transform_buffer, mut transform_allocation) = alloc_buffers(
+            memory_allocator.clone(),
+            1,
+            transform_size,
+            &device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            // leave data uninitialized, we update it later
+            &[],
+            "transform memory",
+        );
+        let (mut normal_buffer, mut normal_allocation) = alloc_buffers(
+            memory_allocator.clone(),
+            1,
+            normal_size,
+            &device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            // leave data uninitialized, we update it later
+            &[],
+            "normal memory",
+        );
+
+        Self {
+            skeleton_transform_megabuffer: transform_buffer.pop().unwrap(),
+            skeleton_transform_megaallocation: transform_allocation.pop().unwrap(),
+            skeleton_normal_megabuffer: normal_buffer.pop().unwrap(),
+            skeleton_normal_megaallocation: normal_allocation.pop().unwrap(),
+            skeletons: Vec::new(),
+            animations: Vec::new(),
+        }
+    }
+}
+
+// marks a entity as having animations, and stores references to the animations(should be
+// reconstructable from a file path, but thats deferred til serialization)
 // referenced https://www.youtube.com/watch?v=da6d28IylL8 to make this, and https://whoisryosuke.com/blog/2022/importing-gltf-with-wgpu-and-rust
 #[derive(Debug)]
 pub struct Animated {
     //PERF: this could possible be put into the resource manager since it can be large, but not
     //necesary for now
-    animations: Vec<AnimationClip>,
-    skeleton: Skeleton,
+    pub time: f32,
+    pub animations: Vec<Animation>,
+    pub current_playing: Animation,
+    pub skeleton: Skeleton,
 }
 
 #[derive(Debug)]
-pub struct Skeleton {
+pub struct SkeletonImpl {
     joints: Vec<Joint>,
 }
 
@@ -81,89 +156,17 @@ pub enum Keyframes {
 }
 
 #[derive(Debug)]
-pub struct AnimationClip {
-    pub name: String,
-    pub channels: Vec<AnimationChannel>,
+struct AnimationImpl {
+    name: String,
+
+    channels: Vec<AnimationChannel>,
 }
 
 #[derive(Debug)]
-pub struct AnimationChannel {
-    pub keyframes: Keyframes,
-    pub timestamps: Vec<f32>,
+struct AnimationChannel {
+    keyframes: Keyframes,
+    timestamps: Vec<f32>,
     target_node_index: usize,
-}
-
-pub fn create_animations(path: &'static str) -> Animated {
-    let (document, buffers, _images) = gltf::import(path).unwrap();
-    assert_eq!(document.skins().len(), 1);
-
-    let skin = document.skins().next().unwrap();
-    let (joints, node_to_real) = load_joints(&skin, &buffers);
-
-    let skeleton = Skeleton { joints };
-
-    let mut animation_clips = Vec::new();
-    for animation in document.animations() {
-        let mut animation_channels = Vec::new();
-        for channel in animation.channels() {
-            let reader = channel.reader(|buffer| Some(&buffers[buffer.index()]));
-            let timestamps = if let Some(inputs) = reader.read_inputs() {
-                match inputs {
-                    gltf::accessor::Iter::Standard(times) => {
-                        let times: Vec<f32> = times.collect();
-                        times
-                    }
-                    gltf::accessor::Iter::Sparse(_) => {
-                        todo!()
-                    }
-                }
-            } else {
-                panic!("animation has no keyframes");
-            };
-
-            let keyframes = if let Some(outputs) = reader.read_outputs() {
-                match outputs {
-                    gltf::animation::util::ReadOutputs::Translations(translations) => {
-                        let translations_vec = translations.map(|x| uv::Vec3::from(x)).collect();
-                        Keyframes::Translation(translations_vec)
-                    }
-                    gltf::animation::util::ReadOutputs::Rotations(rotations) => {
-                        let rotations_vec = rotations
-                            .into_f32()
-                            .map(|x| uv::Rotor3::from_quaternion_array(x))
-                            .collect();
-                        Keyframes::Rotation(rotations_vec)
-                    }
-                    gltf::animation::util::ReadOutputs::Scales(scales) => {
-                        let scales_vec = scales.map(|x| uv::Vec3::from(x)).collect();
-                        Keyframes::Scale(scales_vec)
-                    }
-                    gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
-                        unimplemented!()
-                    }
-                }
-            } else {
-                panic!("unexpected reader output")
-            };
-
-            animation_channels.push(AnimationChannel {
-                target_node_index: *node_to_real
-                    .get(&channel.target().node().index())
-                    .expect("should have value for all nodes accessed"),
-                keyframes: keyframes,
-                timestamps: timestamps,
-            })
-        }
-        animation_clips.push(AnimationClip {
-            name: animation.name().unwrap_or("no name").to_string(),
-            channels: animation_channels,
-        });
-    }
-
-    Animated {
-        animations: animation_clips,
-        skeleton,
-    }
 }
 
 fn load_joints(
@@ -457,18 +460,134 @@ impl ResourceManager {
         );
 
         ResourceManager {
-            ring_buffer,
+            ubo_ring_buffer: ring_buffer,
             default_texture: default,
             device: device.clone(),
-            allocator,
+            allocator: allocator.clone(),
             meshes: Vec::new(),
             textures: Vec::new(),
+            animation_resources: AnimationResources::create(device, allocator),
             one_time_submit_buffer,
             queue,
             queue_family_index,
             one_time_submit_pool,
         }
     }
+    pub fn load_animations(&mut self, path: &'static str) -> (Skeleton, Vec<Animation>) {
+        let (document, buffers, _images) = gltf::import(path).unwrap();
+        assert_eq!(document.skins().len(), 1);
+
+        let skin = document.skins().next().unwrap();
+        let (joints, node_to_real) = load_joints(&skin, &buffers);
+
+        let skeleton = SkeletonImpl { joints };
+
+        let mut animation_clips = Vec::new();
+        for animation in document.animations() {
+            let mut animation_channels = Vec::new();
+            for channel in animation.channels() {
+                let reader = channel.reader(|buffer| Some(&buffers[buffer.index()]));
+                let timestamps = if let Some(inputs) = reader.read_inputs() {
+                    match inputs {
+                        gltf::accessor::Iter::Standard(times) => {
+                            let times: Vec<f32> = times.collect();
+                            times
+                        }
+                        gltf::accessor::Iter::Sparse(_) => {
+                            todo!()
+                        }
+                    }
+                } else {
+                    panic!("animation has no keyframes");
+                };
+
+                let keyframes = if let Some(outputs) = reader.read_outputs() {
+                    match outputs {
+                        gltf::animation::util::ReadOutputs::Translations(translations) => {
+                            let translations_vec =
+                                translations.map(|x| uv::Vec3::from(x)).collect();
+                            Keyframes::Translation(translations_vec)
+                        }
+                        gltf::animation::util::ReadOutputs::Rotations(rotations) => {
+                            let rotations_vec = rotations
+                                .into_f32()
+                                .map(|x| uv::Rotor3::from_quaternion_array(x))
+                                .collect();
+                            Keyframes::Rotation(rotations_vec)
+                        }
+                        gltf::animation::util::ReadOutputs::Scales(scales) => {
+                            let scales_vec = scales.map(|x| uv::Vec3::from(x)).collect();
+                            Keyframes::Scale(scales_vec)
+                        }
+                        gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
+                            unimplemented!()
+                        }
+                    }
+                } else {
+                    panic!("unexpected reader output")
+                };
+
+                animation_channels.push(AnimationChannel {
+                    target_node_index: *node_to_real
+                        .get(&channel.target().node().index())
+                        .expect("should have value for all nodes accessed"),
+                    keyframes: keyframes,
+                    timestamps: timestamps,
+                })
+            }
+            animation_clips.push(AnimationImpl {
+                name: animation.name().unwrap_or("no name").to_string(),
+                channels: animation_channels,
+            });
+        }
+
+        let skeleton_id = Skeleton {
+            id: self.animation_resources.skeletons.len(),
+        };
+        let animation_ids = animation_clips
+            .iter()
+            .enumerate()
+            .map(|(idx, animation)| Animation {
+                name: animation.name.clone(),
+                id: idx,
+            })
+            .collect();
+
+        self.animation_resources.skeletons.push(skeleton);
+        self.animation_resources.animations.push(animation_clips);
+
+        let transform_matrices: Vec<uv::Mat4> = self
+            .animation_resources
+            .skeletons
+            .iter()
+            .flat_map(|x| &x.joints)
+            .map(|x| x.get_deformed_bind_matrix())
+            .collect();
+
+        let normal_matrices: Vec<uv::Mat3> = transform_matrices
+            .iter()
+            .map(|x| {
+                uv::Mat3::new(x.cols[0].xyz(), x.cols[1].xyz(), x.cols[2].xyz())
+                    .inversed()
+                    .transposed()
+            })
+            .collect();
+
+        self.animation_resources
+            .skeleton_transform_megaallocation
+            .mapped_slice_mut()
+            .unwrap()
+            .write_all(cast_slice(&transform_matrices));
+
+        self.animation_resources
+            .skeleton_normal_megaallocation
+            .mapped_slice_mut()
+            .unwrap()
+            .write(cast_slice(&normal_matrices));
+
+        (skeleton_id, animation_ids)
+    }
+
     pub(crate) fn default_texture(&mut self) -> &GpuTexture {
         &self.default_texture
     }
