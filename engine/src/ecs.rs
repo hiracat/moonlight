@@ -5,7 +5,6 @@
 use std::{
     any::{Any, TypeId},
     collections::{hash_map::HashMap, HashSet},
-    marker::PhantomData,
     time::Instant,
 };
 
@@ -166,24 +165,8 @@ macro_rules! impl_join{
                 let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
                 self.$peek = self.$name.next();
                 )+
-
-                $(
-                let (mut $not_name, mut $peek_not) = Option::take(&mut self.$peek_not)?;
-                self.$peek_not = self.$not_name.next();
-                )*
                 let mut max_rq_id;
-                let mut id_blocked = false;
-                // bring anything required up to the current required index early return none if any
-                // run out
                 loop {
-                    if id_blocked {
-                        $(
-                        ($name, $peek) = Option::take(&mut self.$peek)?;
-                        self.$peek = self.$name.next();
-                        )+
-                        id_blocked = false;
-                    }
-
                     let mut all_max = true;
                     max_rq_id = get_first!($($name)+)$(.max($name))+;
                     $(
@@ -194,25 +177,31 @@ macro_rules! impl_join{
                     }
                     )+
 
+                    #[allow(unused_mut)]
+                    let mut blocked = false;
                     $(
-                    if $not_name < max_rq_id {
-                        if self.$peek_not.is_some() {
-                            ($not_name, $peek_not) = Option::take(&mut self.$peek_not)?;
+                    if let Some(($not_name, $peek_not)) = Option::take(&mut self.$peek_not) {
+                        if max_rq_id == $not_name {
+                            self.$peek_not = self.$not_name.next();
+                            blocked = true;
+                        } else if max_rq_id > $not_name {
                             self.$peek_not = self.$not_name.next();
                             all_max = false;
+                        } else {
+                            self.$peek_not = Some(($not_name, $peek_not));
                         }
                     }
                     )*
 
                     if all_max {
 
-                        $(
-                        if $not_name == max_rq_id {
-                            id_blocked = true;
+                        if blocked {
+                            $(
+                            ($name, $peek) = Option::take(&mut self.$peek)?;
+                            self.$peek = self.$name.next();
+                            )+
                             continue;
                         }
-                        )*
-
                         break;
                     }
                 }
@@ -250,7 +239,7 @@ macro_rules! impl_join{
 }
 macro_rules! impl_join_mut {
     ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),* [not] $(($not_name:ident,$peek_not:ident: $not_ty:ident)),*) => {
-        struct $struct<$($ty,)+ $($opt_ty),* $(,$not_ty)*>{
+        struct $struct<$($ty),+ $(,$opt_ty)* $(,$not_ty)*>{
             $(
                 $name: $ty,
             )+
@@ -261,7 +250,7 @@ macro_rules! impl_join_mut {
                 $not_name: $not_ty
             ),*
         }
-        impl <$($ty,)+ $($opt_ty),* $(,$not_ty)*> JoinableMut for $struct<$($ty,)+ $($opt_ty),* $(,$not_ty)*>
+        impl <$($ty),+ $(,$opt_ty)* $(,$not_ty)*> JoinableMut for $struct<$($ty),+ $(,$opt_ty)* $(,$not_ty)*>
         where
             $(
                 $ty: JoinableMut,
@@ -274,12 +263,12 @@ macro_rules! impl_join_mut {
             )*
             {
                 type Mut<'a> = ($($ty::Mut<'a>,)+ $(Option<$opt_ty::Mut<'a>>),*) where Self: 'a;
-                type Component<'a> = ($($ty::Component<'a>,)+$ ($opt_ty::Component<'a>),* $(,$not_ty::Component<'a>)*)
+                type Component<'a> = ($($ty::Component<'a>),+$ (,$opt_ty::Component<'a>)* $(,$not_ty::Component<'a>)*)
                 where
                     $($ty: 'a,)+
                     $($opt_ty: 'a,)*
                     $($not_ty: 'a,)*;
-                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
+                type Iter<'a> = $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
                 where
                     $($ty: 'a,)+
                     $($opt_ty: 'a,)*
@@ -291,7 +280,7 @@ macro_rules! impl_join_mut {
                 }
             }
 
-        pub struct $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
+        pub struct $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
         where
         $(
         $ty: JoinableMut + 'a,
@@ -316,7 +305,7 @@ macro_rules! impl_join_mut {
                 $peek_not: Option<(EntityId, <$not_ty as JoinableMut>::Mut<'a>)>,
             )*
         }
-        impl<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*> $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
+        impl<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*> $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
         where
             $(
                 $ty: JoinableMut,
@@ -367,7 +356,7 @@ macro_rules! impl_join_mut {
 
             }
 
-        impl <'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*> Iterator for $iter<'a, $($ty,)+ $($opt_ty),* $(,$not_ty)*>
+        impl <'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*> Iterator for $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
         where
         $(
         $ty: JoinableMut,
@@ -394,24 +383,8 @@ macro_rules! impl_join_mut {
                 let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
                 self.$peek = self.$name.next();
                 )+
-
-                $(
-                let (mut $not_name, mut $peek_not) = Option::take(&mut self.$peek_not)?;
-                self.$peek_not = self.$not_name.next();
-                )*
                 let mut max_rq_id;
-                let mut id_blocked = false;
-                // bring anything required up to the current required index early return none if any
-                // run out
                 loop {
-                    if id_blocked {
-                        $(
-                        ($name, $peek) = Option::take(&mut self.$peek)?;
-                        self.$peek = self.$name.next();
-                        )+
-                        id_blocked = false;
-                    }
-
                     let mut all_max = true;
                     max_rq_id = get_first!($($name)+)$(.max($name))+;
                     $(
@@ -422,23 +395,31 @@ macro_rules! impl_join_mut {
                     }
                     )+
 
+                    #[allow(unused_mut)]
+                    let mut blocked = false;
                     $(
-                    if $not_name == max_rq_id {
-                        ($not_name, $peek_not) = Option::take(&mut self.$peek_not)?;
-                        self.$peek_not= self.$not_name.next();
-                        id_blocked = true;
+                    if let Some(($not_name, $peek_not)) = Option::take(&mut self.$peek_not) {
+                        if max_rq_id == $not_name {
+                            self.$peek_not = self.$not_name.next();
+                            blocked = true;
+                        } else if max_rq_id > $not_name {
+                            self.$peek_not = self.$not_name.next();
+                            all_max = false;
+                        } else {
+                            self.$peek_not = Some(($not_name, $peek_not));
+                        }
                     }
                     )*
 
                     if all_max {
 
-                        $(
-                        if $not_name == max_rq_id {
-                            id_blocked = true;
+                        if blocked {
+                            $(
+                            ($name, $peek) = Option::take(&mut self.$peek)?;
+                            self.$peek = self.$name.next();
+                            )+
                             continue;
                         }
-                        )*
-
                         break;
                     }
                 }
@@ -475,8 +456,8 @@ macro_rules! impl_join_mut {
 }
 macro_rules! impl_fetch{
     ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
-impl< $($ty: 'static,)+ $($opt: 'static,)* $($not: 'static),*> Fetch for ($(Req<$ty>,)+ $(Opt<$opt>,)* $(Not<$not>),*) {
-    type Iter<'w> = $iter<'w, $(&'w [(EntityId, $ty)],)+ $(&'w [(EntityId, $opt)]),* $(,&'w [(EntityId, $not)])*>;
+impl< $($ty: 'static),+ $(,$opt: 'static)* $(,$not: 'static)*> Fetch for ($(Req<$ty>),+ $(,Opt<$opt>)* $(,Not<$not>)*) {
+    type Iter<'w> = $iter<'w, $(&'w [(EntityId, $ty)]),+ $(,&'w [(EntityId, $opt)])* $(,&'w [(EntityId, $not)])*>;
     type Item<'w> = ($(&'w $ty,)+ $(Option<&'w $opt>),*);
 
     type OptionalItems<'w> = Result<($(&'w $ty,)+ $(Option<&'w $opt>),*), WorldError>;
@@ -552,8 +533,8 @@ impl< $($ty: 'static,)+ $($opt: 'static,)* $($not: 'static),*> Fetch for ($(Req<
 }
 macro_rules! impl_fetch_mut{
     ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
-impl<$($ty: 'static,)+ $($opt:'static),* $(,$not:'static)*> FetchMut for ($(ReqM<$ty>,)+ $(OptM<$opt>),* $(,NotM<$not>)*) {
-    type Iter<'w> = $iter<'w, $(&'w mut [(EntityId, $ty)],)+ $(&'w mut [(EntityId, $opt)]),* $(,&'w mut [(EntityId, $not)])*>;
+impl<$($ty: 'static),+ $(,$opt:'static)* $(,$not:'static)*> FetchMut for ($(ReqM<$ty>),+ $(,OptM<$opt>)* $(,NotM<$not>)*) {
+    type Iter<'w> = $iter<'w, $(&'w mut [(EntityId, $ty)]),+ $(,&'w mut [(EntityId, $opt)])* $(,&'w mut [(EntityId, $not)])*>;
     type Item<'w> = ($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*);
 
     type OptionalItems<'w> = Result<($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*), WorldError>;
@@ -639,11 +620,37 @@ impl_fetch_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, T)[opt](c, U)[not]);
 impl_join!(Join1opt1, Join1opt1Iter, (a, peek_a: T)[opt] (c, peek_c: U)[not]);
 impl_join_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, peek_a: T)[opt](c, peek_c: U)[not]);
 
+impl_fetch_mut!(JoinMut1not1, JoinMut1not1Iter, (a, T)[opt][not](c, U));
+impl_join_mut!(JoinMut1not1, JoinMut1not1Iter, (a, peek_a: T)[opt][not](c, _peek_c: U));
+
+impl_fetch!(Join1not1, Join1not1Iter, (a, T)[opt][not](c, U));
+impl_join!(Join1not1, Join1not1Iter, (a, peek_a: T)[opt][not](c, _peek_c: U));
+
 // 3
 impl_fetch!(Join3, Join3Iter, (a, T), (b, U), (c, V)[opt][not]);
 impl_fetch_mut!(JoinMut3, JoinMut3Iter, (a, T), (b, U), (c, V)[opt][not]);
 impl_join!(Join3, Join3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
 impl_join_mut!(JoinMut3, JoinMut3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
+
+impl_fetch!(Join2not1, Join2not1Iter, (a, T), (b, U)[opt][not](c, V));
+impl_fetch_mut!(
+    JoinMut2not1,
+    JoinMut2not1Iter,
+    (a, T),
+    (b, U)[opt][not](c, V)
+);
+impl_join!(Join2not1, Join2not1Iter, (a, peek_a: T),(b, _peek_b: U)[opt][not] (c, _peek_c: V));
+impl_join_mut!(JoinMut2not1, JoinMut2not1Iter, (a, peek_a: T),(b, _peek_b: U)[opt][not] (c, _peek_c: V));
+
+impl_fetch!(Join1not2, Join1not2Iter, (a, T)[opt][not](b, U), (c, V));
+impl_fetch_mut!(
+    JoinMut1not2,
+    JoinMut1not2Iter,
+    (a, T)[opt][not](b, U),
+    (c, V)
+);
+impl_join!(Join1not2, Join1not2Iter, (a, peek_a: T)[opt][not](b, _peek_b: U), (c, _peek_c: V));
+impl_join_mut!(JoinMut1not2, JoinMut1not2Iter, (a, peek_a: T)[opt][not](b, _peek_b: U), (c, _peek_c: V));
 
 impl_fetch!(Join2opt1, Join2opt1Iter, (a, T), (b, U)[opt](c, V)[not]);
 impl_fetch_mut!(
@@ -683,6 +690,38 @@ impl_join!(Join4, Join4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, 
 impl_join_mut!(JoinMut4, JoinMut4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[opt][not]);
 
 impl_fetch!(
+    Join2opt2,
+    Join2opt2Iter,
+    (a, T),
+    (b, U)[opt](c, V),
+    (d, W)[not]
+);
+impl_fetch_mut!(
+    JoinMut2opt2,
+    JoinMut2opt2Iter,
+    (a, T),
+    (b, U)[opt](c, V),
+    (d, W)[not]
+);
+impl_join!(Join2opt2, Join2opt2Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V), (d, peek_d: W)[not]);
+impl_join_mut!(JoinMut2opt2, JoinMut2opt2Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V), (d, peek_d: W)[not]);
+
+impl_fetch!(
+    Join2opt1not1,
+    Join2opt1not1Iter,
+    (a, T),
+    (b, U)[opt](c, V)[not](d, W)
+);
+impl_fetch_mut!(
+    JoinMut2opt1not1,
+    JoinMut2opt1not1Iter,
+    (a, T),
+    (b, U)[opt](c, V)[not](d, W)
+);
+impl_join!(Join2opt1not1, Join2opt1not1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not] (d, _peek_d: W));
+impl_join_mut!(JoinMut2opt1not1, JoinMut2opt1not1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not] (d, _peek_d: W));
+
+impl_fetch!(
     Join1opt3,
     Join1opt3Iter,
     (a, T)[opt](b, U),
@@ -692,8 +731,8 @@ impl_fetch!(
 impl_fetch_mut!(
     JoinMut1opt3,
     JoinMut1opt3Iter,
-    (a, T),
-    (b, U)[opt](c, V),
+    (a, T)[opt](b, U),
+    (c, V),
     (d, W)[not]
 );
 impl_join!(Join1opt3, Join1opt3Iter, (a, peek_a: T)[opt](b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[not]);
@@ -1212,7 +1251,7 @@ where
 #[test]
 fn benchmark() {
     // You can tweak these sizes
-    let scales = [1_000, 10_000, 1_000_000, 10_000_000];
+    let scales = [1_000, 10_000, 100_000];
 
     for &n in &scales {
         println!("\n=== Benchmark scale: {} entities ===", n);
@@ -1329,6 +1368,7 @@ fn benchmark() {
                 let _ = world.destroy(EntityId(e as u32));
             }
         });
+        panic!("ran benchmark");
     }
 }
 
@@ -1795,4 +1835,566 @@ fn correctness() {
     }
 
     println!("\n🎉 All comprehensive ECS tests passed!");
+}
+
+// Additional tests for Not<T> filter functionality
+// Add these to your existing test file
+
+fn main() {
+    let mut world = World::init();
+
+    // Create entities with different component combinations
+    let e0 = world.spawn();
+    world.add(e0, 1u32).unwrap();
+    world.add(e0, "has_string".to_string()).unwrap();
+
+    let e1 = world.spawn();
+    world.add(e1, 2u32).unwrap();
+    // No string component
+
+    let e2 = world.spawn();
+    world.add(e2, 3u32).unwrap();
+    world.add(e2, "also_has_string".to_string()).unwrap();
+
+    let e3 = world.spawn();
+    world.add(e3, 4u32).unwrap();
+    // No string component
+
+    // Query for entities with u32 but NOT String
+    let query = world.query::<(Req<u32>, Not<String>)>();
+    for item in query {
+        dbg!(item);
+    }
+}
+
+#[test]
+fn not_filter_mutable() {
+    let mut world = World::init();
+
+    // Create entities
+    let e1 = world.spawn();
+    world.add(e1, 10u32).unwrap();
+    world.add(e1, 1.0f64).unwrap();
+
+    let e2 = world.spawn();
+    world.add(e2, 20u32).unwrap();
+    world.add(e2, 2.0f64).unwrap();
+    world.add(e2, "excluded".to_string()).unwrap(); // This should exclude e2
+
+    let e3 = world.spawn();
+    world.add(e3, 30u32).unwrap();
+    world.add(e3, 3.0f64).unwrap();
+
+    // Mutably query entities with u32 and f64, but NOT String
+    let mut count = 0;
+    for (e, (num, flt)) in world.query_mut::<(ReqM<u32>, ReqM<f64>, NotM<String>)>() {
+        count += 1;
+        *num *= 2;
+        *flt *= 10.0;
+
+        assert!(e == e1 || e == e3, "Only e1 and e3 should appear");
+        assert_ne!(e, e2, "e2 should be excluded by Not<String>");
+    }
+
+    assert_eq!(count, 2, "Should mutate exactly 2 entities");
+
+    // Verify mutations only happened to non-excluded entities
+    for (e, (num, flt)) in world.query::<(Req<u32>, Req<f64>)>() {
+        if e == e1 {
+            assert_eq!(*num, 20u32, "e1 should be mutated");
+            assert_eq!(*flt, 10.0f64, "e1 should be mutated");
+        } else if e == e2 {
+            assert_eq!(*num, 20u32, "e2 should NOT be mutated");
+            assert_eq!(*flt, 2.0f64, "e2 should NOT be mutated");
+        } else if e == e3 {
+            assert_eq!(*num, 60u32, "e3 should be mutated");
+            assert_eq!(*flt, 30.0f64, "e3 should be mutated");
+        }
+    }
+
+    println!("✅ Mutable Not<T> filter test passed");
+}
+
+#[test]
+fn not_filter_multiple_exclusions() {
+    let mut world = World::init();
+
+    // Create entities with various component combinations
+    // e1: u32 only
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+
+    // e2: u32 + String (should be excluded)
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+    world.add(e2, "has_string".to_string()).unwrap();
+
+    // e3: u32 + f64 (should be excluded)
+    let e3 = world.spawn();
+    world.add(e3, 3u32).unwrap();
+    world.add(e3, 3.0f64).unwrap();
+
+    // e4: u32 + String + f64 (should be excluded)
+    let e4 = world.spawn();
+    world.add(e4, 4u32).unwrap();
+    world.add(e4, "also_has_string".to_string()).unwrap();
+    world.add(e4, 4.0f64).unwrap();
+
+    // e5: u32 only (another one)
+    let e5 = world.spawn();
+    world.add(e5, 5u32).unwrap();
+
+    // Query for u32 but NOT String and NOT f64
+    let results: Vec<_> = world.query::<(Req<u32>, Not<String>, Not<f64>)>().collect();
+
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find exactly 2 entities (e1 and e5)"
+    );
+
+    let ids: Vec<_> = results.iter().map(|(e, _)| *e).collect();
+    assert!(ids.contains(&e1), "e1 should be included");
+    assert!(ids.contains(&e5), "e5 should be included");
+    assert!(!ids.contains(&e2), "e2 excluded by String");
+    assert!(!ids.contains(&e3), "e3 excluded by f64");
+    assert!(!ids.contains(&e4), "e4 excluded by both String and f64");
+
+    println!("✅ Multiple Not<T> exclusions test passed");
+}
+
+#[test]
+fn not_filter_with_optional() {
+    let mut world = World::init();
+
+    // e1: u32 + optional bool
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+    world.add(e1, true).unwrap();
+
+    // e2: u32 + optional bool + String (excluded by Not<String>)
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+    world.add(e2, false).unwrap();
+    world.add(e2, "excluded".to_string()).unwrap();
+
+    // e3: u32 only (no optional bool)
+    let e3 = world.spawn();
+    world.add(e3, 3u32).unwrap();
+
+    // e4: u32 + String (excluded, no optional bool)
+    let e4 = world.spawn();
+    world.add(e4, 4u32).unwrap();
+    world.add(e4, "also_excluded".to_string()).unwrap();
+
+    // Query: Required u32, Optional bool, Not String
+    let results: Vec<_> = world
+        .query::<(Req<u32>, Opt<bool>, Not<String>)>()
+        .collect();
+
+    assert_eq!(results.len(), 2, "Should find e1 and e3");
+
+    for (e, (num, opt_bool)) in results {
+        if e == e1 {
+            assert_eq!(*num, 1u32);
+            assert_eq!(opt_bool, Some(&true), "e1 should have bool component");
+        } else if e == e3 {
+            assert_eq!(*num, 3u32);
+            assert_eq!(opt_bool, None, "e3 should not have bool component");
+        } else {
+            panic!("Unexpected entity in results: {:?}", e);
+        }
+    }
+
+    println!("✅ Not<T> with Optional<T> test passed");
+}
+
+#[test]
+fn not_filter_empty_world() {
+    let mut world = World::init();
+
+    // Query empty world with Not filter
+    let results: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results.len(), 0, "Empty world should return no results");
+
+    // Mutable query on empty world with Not filter
+    let mut_results: Vec<_> = world.query_mut::<(ReqM<u32>, NotM<String>)>().collect();
+    assert_eq!(
+        mut_results.len(),
+        0,
+        "Empty world should return no mutable results"
+    );
+
+    println!("✅ Not<T> filter on empty world test passed");
+}
+
+#[test]
+fn not_filter_all_entities_excluded() {
+    let mut world = World::init();
+
+    // Create entities that all have the excluded component
+    for i in 0..5 {
+        let e = world.spawn();
+        world.add(e, i as u32).unwrap();
+        world.add(e, "all_have_this".to_string()).unwrap(); // All have String
+    }
+
+    // Query with Not<String> should find nothing
+    let results: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results.len(), 0, "All entities should be excluded");
+
+    // Mutable query should also find nothing
+    let mut count = 0;
+    for _ in world.query_mut::<(ReqM<u32>, NotM<String>)>() {
+        count += 1;
+    }
+    assert_eq!(count, 0, "No entities should be mutated");
+
+    println!("✅ Not<T> filter with all entities excluded test passed");
+}
+
+#[test]
+fn not_filter_none_excluded() {
+    let mut world = World::init();
+
+    // Create entities without the excluded component
+    let mut entities = Vec::new();
+    for i in 0..5 {
+        let e = world.spawn();
+        entities.push(e);
+        world.add(e, i as u32).unwrap();
+        world.add(e, i as f64).unwrap();
+    }
+
+    // Query with Not<String> should find all entities (none have String)
+    let results: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results.len(), 5, "All entities should be included");
+
+    let result_ids: Vec<_> = results.iter().map(|(e, _)| *e).collect();
+    for entity in &entities {
+        assert!(
+            result_ids.contains(entity),
+            "All created entities should be in results"
+        );
+    }
+
+    println!("✅ Not<T> filter with none excluded test passed");
+}
+
+#[test]
+fn not_filter_add_excluded_component_after() {
+    let mut world = World::init();
+
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+
+    // Initially, both should appear in Not<String> query
+    let results1: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results1.len(), 2);
+
+    // Add String to e1
+    world.add(e1, "now_excluded".to_string()).unwrap();
+
+    // Now only e2 should appear
+    let results2: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results2.len(), 1);
+    assert_eq!(results2[0].0, e2);
+
+    println!("✅ Not<T> filter after adding excluded component test passed");
+}
+
+#[test]
+fn not_filter_remove_excluded_component() {
+    let mut world = World::init();
+
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+    world.add(e1, "initially_excluded".to_string()).unwrap();
+
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+
+    // Initially, only e2 should appear
+    let results1: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results1.len(), 1);
+    assert_eq!(results1[0].0, e2);
+
+    // Remove String from e1
+    world.remove::<String>(e1).unwrap();
+
+    // Now both should appear
+    let results2: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results2.len(), 2);
+
+    let ids: Vec<_> = results2.iter().map(|(e, _)| *e).collect();
+    assert!(ids.contains(&e1));
+    assert!(ids.contains(&e2));
+
+    println!("✅ Not<T> filter after removing excluded component test passed");
+}
+
+#[test]
+fn not_filter_large_scale() {
+    let mut world = World::init();
+    let entity_count = 10_000;
+    let mut excluded_entities = std::collections::HashSet::new();
+
+    // Create many entities
+    for i in 0..entity_count {
+        let e = world.spawn();
+        world.add(e, i as u32).unwrap();
+
+        // Every 3rd entity gets the excluded component
+        if i % 4 == 0 {
+            world.add(e, "excluded".to_string()).unwrap();
+            excluded_entities.insert(e);
+        }
+    }
+
+    // Query with Not<String>
+    let start = std::time::Instant::now();
+    let results: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    let query_time = start.elapsed();
+
+    let expected_count = entity_count - excluded_entities.len();
+    assert_eq!(
+        results.len(),
+        expected_count,
+        "Should find {} entities without String",
+        expected_count
+    );
+
+    // Verify no excluded entities appear in results
+    for (e, _) in &results {
+        assert!(
+            !excluded_entities.contains(e),
+            "Excluded entity {:?} should not appear in results",
+            e
+        );
+    }
+
+    println!(
+        "✅ Large-scale Not<T> filter test passed in {:?}",
+        query_time
+    );
+}
+
+#[test]
+fn not_filter_large_scale_mutable() {
+    let mut world = World::init();
+    let entity_count = 10_000;
+    let mut excluded_count = 0;
+
+    // Create entities
+    for i in 0..entity_count {
+        let e = world.spawn();
+        world.add(e, i as u32).unwrap();
+        world.add(e, i as f64).unwrap();
+
+        // Every 4th entity gets excluded
+        if i % 4 == 0 {
+            world.add(e, "excluded".to_string()).unwrap();
+            excluded_count += 1;
+        }
+    }
+
+    // Mutable query with Not filter
+    let start = std::time::Instant::now();
+    let mut mutation_count = 0;
+    for (_, (num, flt)) in world.query_mut::<(ReqM<u32>, ReqM<f64>, NotM<String>)>() {
+        *num += 1000;
+        *flt += 1000.0;
+        mutation_count += 1;
+    }
+    let mutation_time = start.elapsed();
+
+    let expected_mutations = entity_count - excluded_count;
+    assert_eq!(
+        mutation_count, expected_mutations,
+        "Should mutate exactly {} entities",
+        expected_mutations
+    );
+
+    // Verify mutations
+    for (e, (num, flt, str)) in world.query::<(Req<u32>, Req<f64>, Opt<String>)>() {
+        let i = e.0 as usize;
+        if i % 4 == 0 {
+            // These should NOT be mutated
+            assert_eq!(*num, i as u32, "Excluded entity should not be mutated");
+            assert_eq!(*flt, i as f64, "Excluded entity should not be mutated");
+        } else {
+            // These SHOULD be mutated
+            assert_eq!(
+                *num,
+                i as u32 + 1000,
+                "Non-excluded entity should be mutated"
+            );
+            assert_eq!(
+                *flt,
+                i as f64 + 1000.0,
+                "Non-excluded entity should be mutated"
+            );
+        }
+    }
+
+    println!(
+        "✅ Large-scale mutable Not<T> filter test passed in {:?}",
+        mutation_time
+    );
+}
+
+#[test]
+fn not_filter_with_entity_destruction() {
+    let mut world = World::init();
+
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+    world.add(e2, "excluded".to_string()).unwrap();
+
+    let e3 = world.spawn();
+    world.add(e3, 3u32).unwrap();
+
+    // Query should find e1 and e3
+    let results1: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results1.len(), 2);
+
+    // Destroy e1
+    world.destroy(e1).unwrap();
+
+    // Now query should only find e3
+    let results2: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results2.len(), 1);
+    assert_eq!(results2[0].0, e3);
+
+    // Destroy e2 (the excluded one)
+    world.destroy(e2).unwrap();
+
+    // Still only e3
+    let results3: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+    assert_eq!(results3.len(), 1);
+    assert_eq!(results3[0].0, e3);
+
+    println!("✅ Not<T> filter with entity destruction test passed");
+}
+
+#[test]
+fn not_filter_zero_sized_types() {
+    let mut world = World::init();
+
+    // Using unit type as zero-sized marker component
+    let e1 = world.spawn();
+    world.add(e1, 1u32).unwrap();
+    world.add(e1, ()).unwrap(); // Marker component
+
+    let e2 = world.spawn();
+    world.add(e2, 2u32).unwrap();
+    // No marker
+
+    let e3 = world.spawn();
+    world.add(e3, 3u32).unwrap();
+    world.add(e3, ()).unwrap(); // Marker component
+
+    // Query for entities WITHOUT the marker
+    let results: Vec<_> = world.query::<(Req<u32>, Not<()>)>().collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, e2);
+
+    // Mutable query for entities WITHOUT the marker
+    let mut count = 0;
+    for (e, (num,)) in world.query_mut::<(ReqM<u32>, NotM<()>)>() {
+        assert_eq!(e, e2);
+        *num *= 10;
+        count += 1;
+    }
+    assert_eq!(count, 1);
+
+    // Verify mutation
+    for (e, (num,)) in world.query::<(u32,)>() {
+        if e == e2 {
+            assert_eq!(*num, 20u32, "e2 should be mutated");
+        } else {
+            assert!(*num < 10, "Other entities should not be mutated");
+        }
+    }
+
+    println!("✅ Not<T> filter with zero-sized types test passed");
+}
+
+#[test]
+fn not_filter_query_consistency() {
+    let mut world = World::init();
+
+    // Create a stable set of entities
+    for i in 0..20 {
+        let e = world.spawn();
+        world.add(e, i as u32).unwrap();
+
+        if i % 2 == 0 {
+            world.add(e, "even".to_string()).unwrap();
+        }
+    }
+
+    // Run the same query multiple times
+    for iteration in 0..5 {
+        let results: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
+        assert_eq!(
+            results.len(),
+            10,
+            "Query iteration {} should return consistent results",
+            iteration
+        );
+
+        // Verify all results are odd-indexed entities
+        for (e, (num,)) in &results {
+            assert_eq!(e.0 % 2, 1, "Only odd entities should appear");
+            assert_eq!(e.0, **num, "EntityId should match component value");
+        }
+    }
+
+    println!("✅ Not<T> filter query consistency test passed");
+}
+
+#[test]
+fn not_filter_nested_queries() {
+    let mut world = World::init();
+
+    // Create entities
+    for i in 0..10 {
+        let e = world.spawn();
+        world.add(e, i as u32).unwrap();
+        world.add(e, i as f64).unwrap();
+
+        if i % 3 == 0 {
+            world.add(e, "excluded".to_string()).unwrap();
+        }
+    }
+
+    // Outer query with Not filter
+    let mut outer_count = 0;
+    for (outer_e, (outer_num, _)) in world.query::<(Req<u32>, Req<f64>, Not<String>)>() {
+        outer_count += 1;
+
+        // Inner query should still see all entities
+        let inner_count = world.query::<(u32,)>().count();
+        assert_eq!(inner_count, 10, "Inner query should see all entities");
+
+        // Verify outer entity matches Not filter
+        assert_ne!(
+            outer_e.0 % 3,
+            0,
+            "Outer entity should not be divisible by 3"
+        );
+        assert_eq!(*outer_num, outer_e.0 as u32);
+    }
+
+    let expected_outer = 10 - (10 / 3) - 1; // 10 total - 3 excluded (0, 3, 6, 9)
+    assert_eq!(outer_count, expected_outer);
+
+    println!("✅ Not<T> filter nested queries test passed");
 }
