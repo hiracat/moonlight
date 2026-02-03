@@ -8,15 +8,15 @@ layout(location = 3) out vec2 out_uv;
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_uv;
-layout (location = 3) in ivec4 in_boneIDs;
+layout (location = 3) in uvec4 in_boneIDs;
 layout (location = 4) in  vec4 in_weights;
 
 // the std430 is a identifier that tells the shader how the input is padded/alligned in memory, 430 means tightly packed, 140 means 16 byte alignment
-layout(std430,set = 2, binding = 0) readonly buffer globalBoneTransform{
+layout(std430,set = 3, binding = 0) readonly buffer globalBoneTransform{
     mat4 transforms[];
 } bone_transforms;
 
-layout(std430,set = 2, binding = 1) readonly buffer globalBoneNormalTransform{
+layout(std430,set = 3, binding = 1) readonly buffer globalBoneNormalTransform{
     mat3 transforms[];
 } bone_normal_transforms;
 
@@ -61,5 +61,10 @@ void main() {
     vp_uniforms.view *
     model.model *
     vec4(position, 1.0);
+
+    out_uv = in_uv;
+    out_normal = normalize((model.normals * vec4(normal, 0.0)).xyz);
+    out_position = model.model * vec4(position, 1.0);
+    out_color = vec3(1.0);
 
 }

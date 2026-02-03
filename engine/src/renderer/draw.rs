@@ -39,7 +39,7 @@ use winit::{
     window::Window,
 };
 
-pub const VALIDATION_ENABLE: bool = false;
+pub const VALIDATION_ENABLE: bool = true;
 pub const GEOMETRY_SUBPASS: u32 = 0;
 pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -168,6 +168,10 @@ impl PerFrame {
         .unwrap();
         // One pool with multiple descriptor types
         let transient_pool_sizes = vec![
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 50,
+            },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1000,
@@ -434,6 +438,8 @@ impl Renderer {
                 }
                 if let Some(mesh) = job.mesh {
                     let mesh = self.resource_manager.get_mesh(mesh).unwrap();
+                    let key: PipelineKey = unsafe { std::mem::transmute(pipeline_index as u32) };
+
                     unsafe {
                         self.device.cmd_bind_vertex_buffers(
                             frame.command_buffer,
@@ -462,7 +468,7 @@ impl Renderer {
                     }
                 }
             }
-            if pipeline_index == PipelineKey::Geometry as usize {
+            if pipeline_index == PipelineKey::AnimatedGeometry as usize {
                 unsafe {
                     self.device
                         .cmd_next_subpass(frame.command_buffer, vk::SubpassContents::INLINE);
@@ -603,9 +609,7 @@ impl Renderer {
     pub fn init(event_loop: &ActiveEventLoop, window: &Arc<Window>) -> Self {
         let start_time = Instant::now();
         let entry = unsafe { ash::Entry::load().unwrap() };
-        eprintln!("created entry");
         let instance = create_instance(&entry, event_loop);
-        eprintln!("created instance");
         let surface = unsafe {
             let surface = ash_window::create_surface(
                 &entry,
@@ -621,7 +625,6 @@ impl Renderer {
             surface
         };
 
-        eprintln!("created surface");
         //need to make this optional to put stuff inside
         let debug_utils_loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
         let mut debug_messenger = vk::DebugUtilsMessengerEXT::null();
@@ -710,14 +713,11 @@ impl Renderer {
             &[queue_family_index],
         );
 
-        eprintln!("creating sync objects");
-
         let mut per_frame = vec![];
         for _ in 0..FRAMES_IN_FLIGHT {
             per_frame.push(PerFrame::create(&device, queue_family_index));
         }
 
-        dbg!("problem here?");
         let ui = UI::init(
             &device,
             window.clone(),
@@ -1151,7 +1151,6 @@ fn create_framebuffers(
 ) -> Vec<vk::Framebuffer> {
     let mut framebuffers = Vec::new();
 
-    dbg!(&swapchain_image_views);
     for i in 0..swapchain_image_views.len() {
         let attachments = vec![swapchain_image_views[i]];
         let framebuffer = unsafe {
@@ -1326,7 +1325,6 @@ fn create_ui_render_pipeline(
         renderpass: renderpass,
         subpass_index: 0,
     };
-    dbg!("problem here?");
     (
         create_graphics_pipeline(device, desc).unwrap(),
         shaders.1,

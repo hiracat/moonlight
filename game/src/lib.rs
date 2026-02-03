@@ -10,7 +10,7 @@ use moonlight::physics::Collider;
 use moonlight::physics::RigidBody;
 use moonlight::renderer::draw::Renderer;
 use moonlight::renderer::init::create_window;
-use moonlight::renderer::resources::{Material, create_animations};
+use moonlight::renderer::resources::Material;
 use moonlight::renderer::resources::Skybox;
 use std::{
     collections::HashSet,
@@ -69,7 +69,6 @@ impl ApplicationHandler for App {
             return;
         }
 
-
         let window = create_window(event_loop);
         //HACK: magic number, i dont care right now
 
@@ -95,7 +94,6 @@ impl ApplicationHandler for App {
         let mouse_movement = MouseState::default();
 
         let renderer = self.renderer.as_mut().unwrap();
-
 
         // Register resources into the world
         self.world.add_resource(camera).unwrap();
@@ -136,8 +134,8 @@ impl ApplicationHandler for App {
             .add(
                 fox,
                 Transform::from(
-                    Some(Vec3::new(0.0, 3.0, 0.0)),            // Elevated at center
-                    Some(Rotor3::identity()), // Slight rotation for dramatic pose
+                    Some(Vec3::new(0.0, 3.0, 0.0)), // Elevated at center
+                    Some(Rotor3::identity()),       // Slight rotation for dramatic pose
                     Some(Vec3::new(1.0, 1.0, 1.0)),
                 ),
             )
@@ -154,20 +152,19 @@ impl ApplicationHandler for App {
             )
             .unwrap();
         self.world.add(fox, RigidBody::new()).unwrap();
-        self.world
-            .add(
-                fox,
-                renderer
-                    .resource_manager
-                    .create_mesh("data/models/animated_fox.glb"),
-            )
-            .unwrap();
-        let animations = create_animations("data/models/animated_fox.glb");
-        dbg!(animations);
-        panic!();
+        let (fox_model, fox_animations) = renderer
+            .resource_manager
+            .load_gltf_asset("data/models/animated_fox.glb");
+        let mut fox_animations = fox_animations.unwrap();
+        fox_animations.current_playing = Some(fox_animations.animations[0].clone());
+
+        self.world.add(fox, fox_model).unwrap();
+        self.world.add(fox, fox_animations).unwrap();
+
         let albedo = renderer
             .resource_manager
             .create_texture("data/models/textures/animated_fox_texture.png");
+
         self.world.add(fox, Material::create(albedo)).unwrap();
 
         let albedo = renderer
@@ -195,7 +192,7 @@ impl ApplicationHandler for App {
                 ground,
                 renderer
                     .resource_manager
-                    .create_mesh("data/models/ground_plane.glb"),
+                    .load_gltf_asset("data/models/ground_plane.glb").0,
             )
             .unwrap();
 
@@ -259,37 +256,30 @@ impl ApplicationHandler for App {
         self.world.add(z_axis, cube_collider).unwrap();
         self.world.add(standing_block, cube_collider).unwrap();
 
+        let cube = renderer.resource_manager.load_gltf_asset("data/models/large_cube.glb").0;
         // Attach models to monuments
         self.world
             .add(
                 x_axis,
-                renderer
-                    .resource_manager
-                    .create_mesh("data/models/large_cube.glb"),
+               cube,
             )
             .unwrap();
         self.world
             .add(
                 y_axis,
-                renderer
-                    .resource_manager
-                    .create_mesh("data/models/large_cube.glb"),
+                cube,
             )
             .unwrap();
         self.world
             .add(
                 z_axis,
-                renderer
-                    .resource_manager
-                    .create_mesh("data/models/large_cube.glb"),
+                cube,
             )
             .unwrap();
         self.world
             .add(
                 standing_block,
-                renderer
-                    .resource_manager
-                    .create_mesh("data/models/large_cube.glb"),
+                cube,
             )
             .unwrap();
 
@@ -371,7 +361,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => self.renderer.as_mut().unwrap().framebuffer_resized = true,
             WindowEvent::RedrawRequested => {
-                println!("frame {} starts here", self.current_frame);
+                // println!("frame {} starts here", self.current_frame);
                 let window = self.renderer.as_ref().unwrap().window.clone();
                 let mut offset_x = unsafe { OFFSET_X };
                 let mut offset_y = unsafe { OFFSET_Y };
@@ -426,11 +416,11 @@ impl ApplicationHandler for App {
                 self.renderer.as_mut().unwrap().draw2(&mut self.world);
                 self.delta_time = self.prev_frame_end.elapsed();
                 // println!("\x1b[H\x1b[J");
-                eprintln!(
-                    "fps for frame {} is {}",
-                    self.current_frame,
-                    1.0 / self.delta_time.as_secs_f32()
-                );
+                // eprintln!(
+                //     "fps for frame {} is {}",
+                //     self.current_frame,
+                //     1.0 / self.delta_time.as_secs_f32()
+                // );
 
                 self.current_frame += 1;
                 self.prev_frame_end = Instant::now();
@@ -502,7 +492,6 @@ impl ApplicationHandler for App {
         #[allow(clippy::cast_possible_truncation)]
         if let DeviceEvent::MouseMotion { delta } = event {
             let state = self.world.get_mut_resource::<MouseState>().unwrap();
-            dbg!(&state);
             if state.locked {
                 state.x = delta.0 as f32;
                 state.y = delta.1 as f32;
@@ -585,7 +574,6 @@ fn physics_update(world: &mut World, delta_time: f32) {
             restitution = 0.0;
         }
         rigidbody.velocity = set_axis_component(rigidbody.velocity, pen_vec, restitution);
-        dbg!(rigidbody.velocity);
     }
 }
 
@@ -605,14 +593,12 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let sensativity = 0.002;
     camera.pitch += mouse.y * sensativity;
     camera.yaw -= mouse.x * sensativity;
-    dbg!(camera.pitch / PI);
     if camera.pitch / PI < -0.499999 {
         camera.pitch = -(PI / 2.0) + 0.000001;
     }
     if camera.pitch / PI > 0.500001 {
         camera.pitch = (PI / 2.0) - 0.000001;
     }
-    dbg!(camera.pitch / PI);
     camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
 
     let target_distance = 10.0;
@@ -700,6 +686,5 @@ fn player_update(world: &mut World, delta_time: f32) {
     if transform.position.y < -50.0 {
         transform.position.y = 20.0;
     }
-    dbg!(transform.position.y);
     rigidbody.velocity.y += jump;
 }

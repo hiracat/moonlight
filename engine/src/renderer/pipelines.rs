@@ -7,11 +7,13 @@ use std::{
 };
 
 use ash::vk;
+use gpu_allocator::vulkan::Allocation;
 use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
+use ultraviolet::Slerp;
 
-use crate::ecs::{Opt, World};
+use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
+use crate::renderer::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Texture, Vertex};
 use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
-use crate::renderer::resources::{Texture, Vertex};
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     ecs::Req,
@@ -43,6 +45,7 @@ pub struct PipelineBundle {
 #[derive(Debug)]
 pub enum PipelineKey {
     Geometry = 0,
+    AnimatedGeometry,
     Directional,
     Ambient,
     Point,
@@ -58,9 +61,14 @@ pub fn create_builtin_graphics_pipelines(
     device: &ash::Device,
     render_pass: vk::RenderPass,
 ) -> Vec<PipelineBundle> {
-    let geometry = create_pipeline_layout_from_vert_frag(
+    let static_geometry = create_pipeline_layout_from_vert_frag(
         device,
-        Path::new("shaders/geometry_vert.spv"),
+        Path::new("shaders/static_geometry_vert.spv"),
+        Path::new("shaders/geometry_frag.spv"),
+    );
+    let animated_geometry = create_pipeline_layout_from_vert_frag(
+        device,
+        Path::new("shaders/animated_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
 
@@ -87,10 +95,10 @@ pub fn create_builtin_graphics_pipelines(
         Path::new("shaders/skybox_frag.spv"),
     );
 
-    let geometry_desc = GraphicsPipelineDesc {
+    let static_geometry_desc = GraphicsPipelineDesc {
         renderpass: render_pass,
-        pipeline_layout: geometry.1,
-        shaders: &geometry.0,
+        pipeline_layout: static_geometry.1,
+        shaders: &static_geometry.0,
         subpass_index: GEOMETRY_SUBPASS,
         tesselation_state: None,
         dynamic_state: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
@@ -151,10 +159,25 @@ pub fn create_builtin_graphics_pipelines(
         },
         viewport_state: None,
     };
+    let static_geometry_pipeline = create_graphics_pipeline(device, &static_geometry_desc).unwrap();
 
-    let geometry_pipeline = create_graphics_pipeline(device, &geometry_desc).unwrap();
+    let mut animated_geometry_desc = static_geometry_desc;
+    animated_geometry_desc
+        .vertex_input_state
+        .vertex_attribute_descriptions = AnimatedVertex::get_vertex_attributes();
+    animated_geometry_desc
+        .vertex_input_state
+        .vertex_binding_descriptions = vec![vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: std::mem::size_of::<AnimatedVertex>() as u32,
+        input_rate: vk::VertexInputRate::VERTEX,
+    }];
+    animated_geometry_desc.pipeline_layout = animated_geometry.1;
+    animated_geometry_desc.shaders = &animated_geometry.0;
+    let animated_geometry_pipeline =
+        create_graphics_pipeline(device, &animated_geometry_desc).unwrap();
 
-    let mut ambient_desc = geometry_desc;
+    let mut ambient_desc = animated_geometry_desc;
     ambient_desc.subpass_index = LIGHTING_SUBPASS;
     ambient_desc.depth_stencil_state.depth_write_enable = false;
     ambient_desc.color_blend_state = ColorBlendState {
@@ -175,6 +198,15 @@ pub fn create_builtin_graphics_pipelines(
             1
         ],
     };
+    ambient_desc
+        .vertex_input_state
+        .vertex_attribute_descriptions = Vertex::get_vertex_attributes();
+    ambient_desc.vertex_input_state.vertex_binding_descriptions =
+        vec![vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
     ambient_desc.pipeline_layout = ambient.1;
     ambient_desc.shaders = &ambient.0;
     let ambient_pipeline = create_graphics_pipeline(device, &ambient_desc).unwrap();
@@ -184,7 +216,6 @@ pub fn create_builtin_graphics_pipelines(
     directional_desc.pipeline_layout = directional_layouts.1;
     directional_desc.shaders = &directional_layouts.0;
     let directional_pipeline = create_graphics_pipeline(device, &directional_desc).unwrap();
-    dbg!("here");
 
     let mut point_desc = directional_desc;
 
@@ -212,14 +243,13 @@ pub fn create_builtin_graphics_pipelines(
         blend_constants: [0.0; 4],
     };
 
-    dbg!("here");
     let skybox_pipeline = create_graphics_pipeline(device, &skybox_desc).unwrap();
 
     let mut pipelines = Vec::new();
     pipelines.push(PipelineBundle {
-        pipeline: geometry_pipeline,
-        layout: geometry.1,
-        descriptor_set_layouts: geometry.2,
+        pipeline: static_geometry_pipeline,
+        layout: static_geometry.1,
+        descriptor_set_layouts: static_geometry.2,
         write_data_and_build_draw_jobs: Box::new(
             |device,
              resource_manager,
@@ -240,8 +270,13 @@ pub fn create_builtin_graphics_pipelines(
                 );
 
                 //NOTE: defined in shader, 1 is the index of the camera set
-                for entity in world.query::<(Req<Mesh>, Req<Transform>, Opt<Material>)>() {
+                for entity in
+                    world.query::<(Req<Mesh>, Req<Transform>, Opt<Material>, Not<Animated>)>()
+                {
                     let (_entityid, (mesh, transform, material)) = entity;
+                    if mesh.animated {
+                        continue;
+                    }
                     let model_set = builder.add_uniform_buffer(
                         resource_manager,
                         descriptor_pool,
@@ -262,6 +297,189 @@ pub fn create_builtin_graphics_pipelines(
                     // Set 1: Per-object data (model matrix)
                     // Set 2: Material data (textures)
                     let descriptor_sets = vec![model_set, camera_set, image_set];
+                    jobs.push(DrawJob {
+                        mesh: Some(*mesh),
+                        descriptor_sets,
+                    });
+                }
+
+                builder.submit(device);
+                jobs
+            },
+        ),
+    });
+
+    pipelines.push(PipelineBundle {
+        pipeline: animated_geometry_pipeline,
+        layout: animated_geometry.1,
+        descriptor_set_layouts: animated_geometry.2,
+        write_data_and_build_draw_jobs: Box::new(
+            |device,
+             resource_manager,
+             descriptor_pool,
+             world,
+             descriptor_set_layouts,
+             _swapchain_descriptor_set| {
+                let mut jobs = Vec::new();
+                let camera = world.get_resource::<Camera>().unwrap();
+                let mut builder = DescriptorWriteBuilder::new();
+
+                let camera_set = builder.add_uniform_buffer(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[1],
+                    0,
+                    &camera.as_ubo(),
+                );
+                // this stuff is lazy, it wont write any data til the .submit
+                let bones_set = builder.add_ssbo(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[3],
+                    0,
+                    resource_manager
+                        .animation_resources
+                        .skeleton_transform_buffer,
+                    vk::WHOLE_SIZE,
+                    0,
+                );
+                builder.add_ssbo_binding(
+                    bones_set,
+                    1,
+                    resource_manager.animation_resources.skeleton_normal_buffer,
+                    vk::WHOLE_SIZE,
+                    0,
+                );
+
+                //NOTE: defined in shader, 1 is the index of the camera set
+                for entity in world
+                    .query_mut::<(ReqM<Mesh>, ReqM<Transform>, OptM<Material>, OptM<Animated>)>()
+                {
+                    let (_entityid, (mesh, transform, material, animation)) = entity;
+                    dbg!(_entityid);
+                    dbg!(mesh.animated);
+                    if !mesh.animated {
+                        continue;
+                    }
+                    if let Some(animation) = animation {
+                        dbg!("hello, is animated");
+                        animation.time += 0.01;
+                        if animation.time > 1.0 {
+                            animation.time = 0.0;
+                        }
+                        if let Some(current) = &animation.current_playing {
+                            let animation_impl = &resource_manager.animation_resources.animations
+                                [animation.skeleton.id][current.id];
+                            let skeleton_impl = &mut resource_manager.animation_resources.skeletons
+                                [animation.skeleton.id];
+                            for channel in &animation_impl.channels {
+                                let next_timestamp_idx = channel
+                                    .timestamps
+                                    .iter()
+                                    .position(|x| *x > animation.time)
+                                    .unwrap_or(channel.timestamps.len() - 1);
+                                let current_timestamp_idx = next_timestamp_idx.saturating_sub(1);
+
+                                match &channel.keyframes {
+                                    Keyframes::Translation(translation_frames) => {
+                                        assert_eq!(
+                                            translation_frames.len(),
+                                            channel.timestamps.len()
+                                        );
+
+                                        // less than current_time
+                                        let t1 = channel.timestamps[current_timestamp_idx];
+                                        // more than current_time
+                                        let t2 = channel.timestamps[next_timestamp_idx];
+                                        let frame_1 = translation_frames[current_timestamp_idx];
+                                        let frame_2 = translation_frames[next_timestamp_idx];
+
+                                        let time_between = t2 - t1;
+                                        let time_since_t1 = animation.time - t1;
+
+                                        let percent = time_since_t1 / time_between;
+
+                                        // standard lerp(i am ignoring cubic bezier or step options
+                                        // for now)
+                                        let interpolated =
+                                            frame_1 * (1.0 - percent) + frame_2 * percent;
+
+                                        skeleton_impl.joints[channel.target_joint_index].position =
+                                            interpolated;
+                                    }
+                                    Keyframes::Rotation(rotation_frames) => {
+                                        assert_eq!(rotation_frames.len(), channel.timestamps.len());
+
+                                        // less than current_time
+                                        let t1 = channel.timestamps[current_timestamp_idx];
+                                        // more than current_time
+                                        let t2 = channel.timestamps[next_timestamp_idx];
+                                        let frame_1 = rotation_frames[current_timestamp_idx];
+                                        let frame_2 = rotation_frames[next_timestamp_idx];
+
+                                        let time_between = t2 - t1;
+                                        let time_since_t1 = animation.time - t1;
+
+                                        let percent = time_since_t1 / time_between;
+
+                                        // standard lerp(i am ignoring cubic bezier or step options
+                                        // for now)
+                                        let interpolated = frame_1.slerp(frame_2, percent);
+
+                                        skeleton_impl.joints[channel.target_joint_index].rotation =
+                                            interpolated;
+                                    }
+                                    Keyframes::Scale(scale_frames) => {
+                                        assert_eq!(scale_frames.len(), channel.timestamps.len());
+
+                                        // less than current_time
+                                        let t1 = channel.timestamps[current_timestamp_idx];
+                                        // more than current_time
+                                        let t2 = channel.timestamps[next_timestamp_idx];
+                                        let frame_1 = scale_frames[current_timestamp_idx];
+                                        let frame_2 = scale_frames[next_timestamp_idx];
+
+                                        let time_between = t2 - t1;
+                                        let time_since_t1 = animation.time - t1;
+
+                                        let percent = time_since_t1 / time_between;
+
+                                        // standard lerp(i am ignoring cubic bezier or step options
+                                        // for now)
+                                        let interpolated =
+                                            frame_1 * (1.0 - percent) + frame_2 * percent;
+
+                                        skeleton_impl.joints[channel.target_joint_index].scale =
+                                            interpolated;
+                                    }
+                                }
+                            }
+                            skeleton_impl.update_global_transforms();
+
+                            resource_manager.animation_resources.write_bones();
+                        }
+                    };
+
+                    let model_set = builder.add_uniform_buffer(
+                        resource_manager,
+                        descriptor_pool,
+                        descriptor_set_layouts[0],
+                        0,
+                        &transform.as_model_ubo(),
+                    );
+                    let image_set = builder.add_texture(
+                        resource_manager,
+                        descriptor_pool,
+                        descriptor_set_layouts[2],
+                        0,
+                        material.copied(),
+                    );
+
+                    // Allocate/update descriptor set for this draw call
+                    // Set 0: Per-frame data (camera matrices)
+                    // Set 1: Per-object data (model matrix)
+                    // Set 2: Material data (textures)
+                    let descriptor_sets = vec![model_set, camera_set, image_set, bones_set];
                     jobs.push(DrawJob {
                         mesh: Some(*mesh),
                         descriptor_sets,
@@ -881,7 +1099,6 @@ pub fn create_pipeline_layout_from_vert_frag(
 fn load_path_data(path: &path::Path) -> Reflection {
     let out_dir = PathBuf::from(env!("OUT_DIR"));
     let full_path: PathBuf = out_dir.join(&path);
-    dbg!(&full_path);
     let code = fs::read(full_path).expect("failed to read file");
     rr::Reflection::new_from_spirv(&code).unwrap()
 }
@@ -981,6 +1198,65 @@ impl DescriptorWriteBuilder<'_> {
             dst_binding: binding,
             p_image_info: self.image_infos.last().unwrap().as_ref(),
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            dst_array_element: 0,
+            ..Default::default()
+        });
+
+        descriptor_set
+    }
+
+    fn add_ssbo(
+        &mut self,
+        resource_manager: &mut ResourceManager,
+        descriptor_pool: vk::DescriptorPool,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        binding: u32,
+        buffer: vk::Buffer,
+        range: u64,
+        offset: u64,
+    ) -> vk::DescriptorSet {
+        let descriptor_set =
+            resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
+
+        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
+            buffer: buffer,
+            range: range,
+            offset: offset,
+        }));
+
+        self.writes.push(vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: binding,
+            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 1,
+            dst_array_element: 0,
+            ..Default::default()
+        });
+
+        descriptor_set
+    }
+
+    fn add_ssbo_binding(
+        &mut self,
+        descriptor_set: vk::DescriptorSet,
+        binding: u32,
+        buffer: vk::Buffer,
+        range: u64,
+        offset: u64,
+    ) -> vk::DescriptorSet {
+        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
+            buffer: buffer,
+            range: range,
+            offset: offset,
+        }));
+
+        self.writes.push(vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: binding,
+            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             dst_array_element: 0,
             ..Default::default()

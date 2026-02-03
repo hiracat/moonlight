@@ -51,7 +51,6 @@ pub struct CameraInverseUBO {
     inverse_proj: uv::Mat4,
 }
 
-
 pub struct AmbientLight {
     pub color: [f32; 3],
     pub intensity: f32,

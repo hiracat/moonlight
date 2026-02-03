@@ -3,7 +3,7 @@ use winit::dpi::PhysicalSize;
 
 use crate::renderer::{
     draw::{QueueFamilyIndex, SharedAllocator},
-    swapchain::framebuffers::{Framebuffers, Image, create_framebuffers},
+    swapchain::framebuffers::{create_framebuffers, Framebuffers, Image},
 };
 pub mod framebuffers;
 pub mod renderpass;
@@ -156,8 +156,6 @@ impl SwapchainResources {
         );
 
         let render_finished = create_semaphores(device, image_count as usize);
-
-        eprintln!("swapchain created successfully");
 
         Self {
             swapchain,

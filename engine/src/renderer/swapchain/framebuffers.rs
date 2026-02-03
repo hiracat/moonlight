@@ -143,7 +143,6 @@ pub fn create_framebuffers(
         normals.push(normal);
         positions.push(position);
     }
-    dbg!(&swapchain_image_views);
     Framebuffers {
         framebuffers,
         swapchain_image_views,

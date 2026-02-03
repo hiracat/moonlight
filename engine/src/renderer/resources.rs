@@ -1,7 +1,6 @@
-#![allow(unused)]
 /// This is for engine side components, anything that interacts with the engine in some special way
 /// is kept here, such as lights, meshes, textures and animations,
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, io::Write, iter, path::Path};
 
 use ash::vk;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
@@ -22,7 +21,7 @@ pub struct ResourceManager {
     meshes: Vec<Option<GpuMesh>>,
     textures: Vec<Option<GpuTexture>>,
 
-    animation_resources: AnimationResources,
+    pub(crate) animation_resources: AnimationResources,
 
     default_texture: GpuTexture,
 
@@ -41,27 +40,60 @@ pub struct ResourceManager {
 pub struct Skeleton {
     // TODO:just the index into the skeletons array(need to find a way to remove, but might just have to
     // waste some memory, or use option and waste some indices
-    id: usize,
+    pub(crate) id: usize,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Animation {
     // the index of the inner vec, so accessing an animation requires a skeleton and an animation
-    id: usize,
+    pub(crate) id: usize,
     name: String,
 }
-struct AnimationResources {
+pub(crate) struct AnimationResources {
     // store all skeletons and bones, then flatten to upload to the gpu.
-    skeletons: Vec<SkeletonImpl>,
+    pub(crate) skeletons: Vec<SkeletonImpl>,
     // use the same indices as the skeletons, with multiple animations per skeleton possible
-    animations: Vec<Vec<AnimationImpl>>,
+    pub(crate) animations: Vec<Vec<AnimationImpl>>,
 
-    skeleton_transform_megabuffer: vk::Buffer,
-    skeleton_transform_megaallocation: Allocation,
+    pub(crate) skeleton_transform_buffer: vk::Buffer,
+    pub(crate) skeleton_transform_allocation: Allocation,
 
-    skeleton_normal_megabuffer: vk::Buffer,
-    skeleton_normal_megaallocation: Allocation,
+    pub(crate) skeleton_normal_buffer: vk::Buffer,
+    pub(crate) skeleton_normal_allocation: Allocation,
 }
 impl AnimationResources {
+    pub(crate) fn write_bones(&mut self) {
+        // INDEX 0 is always the identity matrix
+        let transform_matrices: Vec<uv::Mat4> = iter::once(uv::Mat4::identity())
+            .chain(
+                self.skeletons
+                    .iter()
+                    .flat_map(|x| &x.joints)
+                    .map(|x| x.global_transform * x.inverse_bind_matrix),
+            )
+            .collect();
+
+        let normal_matrices: Vec<uv::Mat3> = transform_matrices
+            .iter()
+            .map(|x| {
+                uv::Mat3::new(x.cols[0].xyz(), x.cols[1].xyz(), x.cols[2].xyz())
+                    .inversed()
+                    .transposed()
+            })
+            .collect();
+        write(
+            &transform_matrices,
+            self.skeleton_transform_allocation
+                .mapped_slice_mut()
+                .unwrap(),
+            0,
+        );
+
+        write(
+            &normal_matrices,
+            self.skeleton_normal_allocation.mapped_slice_mut().unwrap(),
+            0,
+        );
+    }
     fn create(device: &ash::Device, memory_allocator: SharedAllocator) -> Self {
         let transform_size = (size_of::<uv::Mat4>() * MAX_SCENE_BONES) as u64;
         let normal_size = (size_of::<uv::Mat3>() * MAX_SCENE_BONES) as u64;
@@ -75,7 +107,7 @@ impl AnimationResources {
             gpu_allocator::MemoryLocation::CpuToGpu,
             true,
             // leave data uninitialized, we update it later
-            &[],
+            cast_slice(&[uv::Mat4::identity()]),
             "transform memory",
         );
         let (mut normal_buffer, mut normal_allocation) = alloc_buffers(
@@ -88,15 +120,16 @@ impl AnimationResources {
             gpu_allocator::MemoryLocation::CpuToGpu,
             true,
             // leave data uninitialized, we update it later
-            &[],
+            cast_slice(&[uv::Mat3::identity()]),
             "normal memory",
         );
 
         Self {
-            skeleton_transform_megabuffer: transform_buffer.pop().unwrap(),
-            skeleton_transform_megaallocation: transform_allocation.pop().unwrap(),
-            skeleton_normal_megabuffer: normal_buffer.pop().unwrap(),
-            skeleton_normal_megaallocation: normal_allocation.pop().unwrap(),
+            skeleton_transform_buffer: transform_buffer.pop().unwrap(),
+            skeleton_transform_allocation: transform_allocation.pop().unwrap(),
+            skeleton_normal_buffer: normal_buffer.pop().unwrap(),
+            skeleton_normal_allocation: normal_allocation.pop().unwrap(),
+            // always one for the identity matrix at the beginning
             skeletons: Vec::new(),
             animations: Vec::new(),
         }
@@ -112,74 +145,90 @@ pub struct Animated {
     //necesary for now
     pub time: f32,
     pub animations: Vec<Animation>,
-    pub current_playing: Animation,
+    pub current_playing: Option<Animation>,
     pub skeleton: Skeleton,
 }
 
 #[derive(Debug)]
-pub struct SkeletonImpl {
-    joints: Vec<Joint>,
+pub(crate) struct SkeletonImpl {
+    pub(crate) joints: Vec<Joint>,
 }
 
-#[derive(Debug)]
-pub struct Joint {
-    // set to usize::MAX for the root, but is really undefined
-    parent_index: usize,
-    children_indices: Vec<usize>,
-
-    bind_local_transform: uv::Mat4,
-    // comes from the gltf, from bone to world space
-    inverse_bind_matrix: uv::Mat4,
-
-    // edited by the animation channels
-    position: uv::Vec3,
-    rotation: uv::Rotor3,
-    scale: uv::Vec3,
-}
-
-impl Joint {
-    fn get_deformed_bind_matrix(&self) -> uv::Mat4 {
-        uv::Mat4::from_translation(self.position)
-            * self.rotation.into_matrix().into_homogeneous()
-            * uv::Mat4::from_nonuniform_scale(self.scale)
-            * self.bind_local_transform
-        //BUG: this is weird to multiply here again, perhaps the tutorial is wrong(thanks
-        //claude)
+impl SkeletonImpl {
+    pub(crate) fn update_global_transforms(&mut self) {
+        // joints is built recusrively so that parents are always before children
+        for joint_idx in 0..self.joints.len() {
+            if self.joints[joint_idx].parent_index == usize::MAX {
+                self.joints[joint_idx].global_transform =
+                    self.joints[joint_idx].get_current_local_transform();
+            } else {
+                self.joints[joint_idx].global_transform =
+                    self.joints[self.joints[joint_idx].parent_index].global_transform
+                        * self.joints[joint_idx].get_current_local_transform();
+            }
+        }
     }
 }
 
 #[derive(Debug)]
-pub enum Keyframes {
+pub(crate) struct Joint {
+    // set to usize::MAX for the root, but is really undefined
+    parent_index: usize,
+    children_indices: Vec<usize>,
+
+    // converts from world/model space to bone/joint space
+    pub(crate) inverse_bind_matrix: uv::Mat4,
+
+    // the position relative to the parent, edited by the animation channels
+    pub(crate) position: uv::Vec3,
+    pub(crate) rotation: uv::Rotor3,
+    pub(crate) scale: uv::Vec3,
+
+    // the transform of this joint in world space, accounting for animations
+    pub(crate) global_transform: uv::Mat4,
+}
+
+impl Joint {
+    fn get_current_local_transform(&self) -> uv::Mat4 {
+        uv::Mat4::from_translation(self.position)
+            * self.rotation.into_matrix().into_homogeneous()
+            * uv::Mat4::from_nonuniform_scale(self.scale)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Keyframes {
     Translation(Vec<uv::Vec3>),
     Rotation(Vec<uv::Rotor3>),
     Scale(Vec<uv::Vec3>),
 }
 
 #[derive(Debug)]
-struct AnimationImpl {
+pub(crate) struct AnimationImpl {
     name: String,
 
-    channels: Vec<AnimationChannel>,
+    pub(crate) channels: Vec<AnimationChannel>,
 }
 
 #[derive(Debug)]
-struct AnimationChannel {
-    keyframes: Keyframes,
-    timestamps: Vec<f32>,
-    target_node_index: usize,
+pub(crate) struct AnimationChannel {
+    pub(crate) keyframes: Keyframes,
+    pub(crate) timestamps: Vec<f32>,
+    pub(crate) target_joint_index: usize,
 }
 
 fn load_joints(
     skin: &gltf::Skin,
     buffers: &Vec<gltf::buffer::Data>,
-) -> (Vec<Joint>, HashMap<usize, usize>) {
+) -> (Vec<Joint>, HashMap<usize, usize>, HashMap<usize, usize>) {
     let inverse_bind_accessor = skin.inverse_bind_matrices().unwrap();
     let mut node_to_real = HashMap::new();
+    let mut joint_to_real = HashMap::new();
 
-    let mut node_to_joint_index: HashMap<usize, usize> = HashMap::new();
+    let mut node_to_joint: HashMap<usize, usize> = HashMap::new();
 
     for (idx, joint) in skin.joints().enumerate() {
-        node_to_joint_index.insert(joint.index(), idx);
+        node_to_joint.insert(joint.index(), idx);
     }
 
     let inverse_bind_matrices: Vec<uv::Mat4> = if let Some(iter) =
@@ -203,7 +252,8 @@ fn load_joints(
             &inverse_bind_matrices,
             &mut joint_hierarchy,
             &mut node_to_real,
-            &node_to_joint_index,
+            &mut joint_to_real,
+            &node_to_joint,
         );
     } else {
         let mut child_indices = std::collections::HashSet::new();
@@ -223,7 +273,8 @@ fn load_joints(
                         &inverse_bind_matrices,
                         &mut joint_hierarchy,
                         &mut node_to_real,
-                        &node_to_joint_index,
+                        &mut joint_to_real,
+                        &node_to_joint,
                     );
                     only_one_root = false;
                 } else {
@@ -233,7 +284,7 @@ fn load_joints(
         }
     };
 
-    (joint_hierarchy, node_to_real)
+    (joint_hierarchy, node_to_real, node_to_joint)
 }
 
 fn build_hierarchy(
@@ -242,8 +293,10 @@ fn build_hierarchy(
     inverse_bind_matrices: &Vec<uv::Mat4>,
     joints: &mut Vec<Joint>,
     node_to_real: &mut HashMap<usize, usize>,
-    node_to_joint_index: &HashMap<usize, usize>,
+    joint_to_real: &mut HashMap<usize, usize>,
+    node_to_joint: &HashMap<usize, usize>,
 ) {
+    // index 0 is reserved for the identity matrix
     let current_joint_index = joints.len();
 
     // Add parent's child index
@@ -253,19 +306,27 @@ fn build_hierarchy(
             .push(current_joint_index);
     }
     node_to_real.insert(node.index(), current_joint_index);
+    node_to_real.insert(
+        *node_to_joint
+            .get(&node.index())
+            .expect("should have all nodes"),
+        current_joint_index,
+    );
 
+    let (position, rotation, scale) = node.transform().decomposed();
     joints.push(Joint {
-        bind_local_transform: node.transform().matrix().into(),
-        position: node.transform().decomposed().0.into(),
-        rotation: uv::Rotor3::from_quaternion_array(node.transform().decomposed().1),
-        scale: node.transform().decomposed().2.into(),
+        position: position.into(),
+        rotation: uv::Rotor3::from_quaternion_array(rotation),
+        scale: scale.into(),
         // needs to be filled later
         children_indices: Vec::new(),
-        inverse_bind_matrix: inverse_bind_matrices[*node_to_joint_index
+        inverse_bind_matrix: inverse_bind_matrices[*node_to_joint
             .get(&node.index())
             .expect("all joints should have an entry")],
         // needs to be set later
         parent_index: parent_index,
+        // this will be updated by update_global_transforms
+        global_transform: uv::Mat4::identity(),
     });
 
     for child in node.children() {
@@ -275,7 +336,8 @@ fn build_hierarchy(
             inverse_bind_matrices,
             joints,
             node_to_real,
-            node_to_joint_index,
+            joint_to_real,
+            node_to_joint,
         );
     }
 }
@@ -309,15 +371,113 @@ impl Material {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Mesh {
     id: usize,
+    pub(crate) animated: bool,
     path: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub enum VertexType {
+    Static,
+    Animated,
+}
+
+pub trait IsVertex {
+    fn get_type() -> VertexType;
+    fn get_vertex_attributes() -> Vec<vk::VertexInputAttributeDescription>;
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Default)]
 pub struct Vertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
+    pub position: uv::Vec3,
+    pub normal: uv::Vec3,
+    pub uv: uv::Vec2,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Default)]
+pub struct AnimatedVertex {
+    pub position: uv::Vec3,
+    pub normal: uv::Vec3,
+    pub uv: uv::Vec2,
+    pub bone_indices: [u32; 4],
+    pub bone_weights: uv::Vec4,
+}
+
+impl IsVertex for AnimatedVertex {
+    fn get_type() -> VertexType {
+        VertexType::Animated
+    }
+    fn get_vertex_attributes() -> Vec<vk::VertexInputAttributeDescription> {
+        vec![
+            // position
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0x0,
+            },
+            // normal
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0xC,
+            },
+            // uv
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 0x18,
+            },
+            // indices
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_UINT,
+                offset: 0x20,
+            },
+            // weights
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 0x30,
+            },
+        ]
+    }
+}
+
+impl IsVertex for Vertex {
+    fn get_vertex_attributes() -> Vec<vk::VertexInputAttributeDescription> {
+        vec![
+            // position
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0x0,
+            },
+            // normal
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 0xC,
+            },
+            // uv
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 0x18,
+            },
+        ]
+    }
+    fn get_type() -> VertexType {
+        VertexType::Static
+    }
 }
 
 pub(crate) struct GpuTexture {
@@ -326,12 +486,14 @@ pub(crate) struct GpuTexture {
     pub(crate) sampler: vk::Sampler,
     pub(crate) memory: Allocation,
 }
+#[derive(Debug)]
 pub(crate) struct GpuMesh {
     pub(crate) vertex_buffer: vk::Buffer,
     pub(crate) index_buffer: vk::Buffer,
     pub(crate) index_alloc: Allocation,
     pub(crate) vertex_alloc: Allocation,
     pub(crate) index_count: u32,
+    pub(crate) vertex_type: VertexType,
 }
 
 pub struct UniformRingBuffer {
@@ -401,38 +563,44 @@ impl UniformRingBuffer {
     }
 }
 
+/// offset is in number of T
+pub fn write<T: Pod + Zeroable>(from: &[T], to: &mut [u8], offset: usize) {
+    let offset_bytes = offset * size_of::<T>();
+    let data: &[u8] = cast_slice(from);
+
+    assert!(
+        offset_bytes + data.len() <= to.len(),
+        "write failed because of a buffer overflow"
+    );
+
+    let target_slice = &mut to[offset_bytes..offset_bytes + data.len()];
+    target_slice.copy_from_slice(data);
+}
+
+impl AnimatedVertex {
+    pub fn new(
+        postion: uv::Vec3,
+        normal: uv::Vec3,
+        uv: uv::Vec2,
+        bone_weights: uv::Vec4,
+        bone_indices: [u32; 4],
+    ) -> Self {
+        Self {
+            position: postion,
+            normal: normal,
+            uv: uv,
+            bone_weights: bone_weights,
+            bone_indices: bone_indices,
+        }
+    }
+}
 impl Vertex {
     pub fn new(postion: uv::Vec3, normal: uv::Vec3, uv: uv::Vec2) -> Self {
         Self {
-            position: *postion.as_array(),
-            normal: *normal.as_array(),
-            uv: *uv.as_array(),
+            position: postion,
+            normal: normal,
+            uv: uv,
         }
-    }
-    pub fn get_vertex_attributes() -> Vec<vk::VertexInputAttributeDescription> {
-        vec![
-            // position
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 0x0,
-            },
-            // normal
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 0xC,
-            },
-            // uv
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: 0x18,
-            },
-        ]
     }
 }
 
@@ -473,14 +641,18 @@ impl ResourceManager {
             one_time_submit_pool,
         }
     }
-    pub fn load_animations(&mut self, path: &'static str) -> (Skeleton, Vec<Animation>) {
-        let (document, buffers, _images) = gltf::import(path).unwrap();
+    pub fn load_animations(
+        &mut self,
+        document: &gltf::Document,
+        buffers: &Vec<gltf::buffer::Data>,
+    ) -> (Animated, HashMap<usize, usize>) {
         assert_eq!(document.skins().len(), 1);
 
         let skin = document.skins().next().unwrap();
-        let (joints, node_to_real) = load_joints(&skin, &buffers);
+        let (joints, node_to_real, joint_to_real) = load_joints(&skin, &buffers);
 
-        let skeleton = SkeletonImpl { joints };
+        let mut skeleton = SkeletonImpl { joints };
+        skeleton.update_global_transforms();
 
         let mut animation_clips = Vec::new();
         for animation in document.animations() {
@@ -493,8 +665,9 @@ impl ResourceManager {
                             let times: Vec<f32> = times.collect();
                             times
                         }
-                        gltf::accessor::Iter::Sparse(_) => {
-                            todo!()
+                        gltf::accessor::Iter::Sparse(times) => {
+                            let times: Vec<f32> = times.collect();
+                            times
                         }
                     }
                 } else {
@@ -504,8 +677,9 @@ impl ResourceManager {
                 let keyframes = if let Some(outputs) = reader.read_outputs() {
                     match outputs {
                         gltf::animation::util::ReadOutputs::Translations(translations) => {
-                            let translations_vec =
+                            let translations_vec: Vec<_> =
                                 translations.map(|x| uv::Vec3::from(x)).collect();
+                            assert_eq!(translations_vec.len(), timestamps.len());
                             Keyframes::Translation(translations_vec)
                         }
                         gltf::animation::util::ReadOutputs::Rotations(rotations) => {
@@ -528,7 +702,7 @@ impl ResourceManager {
                 };
 
                 animation_channels.push(AnimationChannel {
-                    target_node_index: *node_to_real
+                    target_joint_index: *node_to_real
                         .get(&channel.target().node().index())
                         .expect("should have value for all nodes accessed"),
                     keyframes: keyframes,
@@ -544,6 +718,7 @@ impl ResourceManager {
         let skeleton_id = Skeleton {
             id: self.animation_resources.skeletons.len(),
         };
+
         let animation_ids = animation_clips
             .iter()
             .enumerate()
@@ -556,12 +731,15 @@ impl ResourceManager {
         self.animation_resources.skeletons.push(skeleton);
         self.animation_resources.animations.push(animation_clips);
 
-        let transform_matrices: Vec<uv::Mat4> = self
-            .animation_resources
-            .skeletons
-            .iter()
-            .flat_map(|x| &x.joints)
-            .map(|x| x.get_deformed_bind_matrix())
+        // INDEX 0 is always the identity matrix
+        let transform_matrices: Vec<uv::Mat4> = iter::once(uv::Mat4::identity())
+            .chain(
+                self.animation_resources
+                    .skeletons
+                    .iter()
+                    .flat_map(|x| &x.joints)
+                    .map(|x| x.global_transform * x.inverse_bind_matrix),
+            )
             .collect();
 
         let normal_matrices: Vec<uv::Mat3> = transform_matrices
@@ -573,19 +751,33 @@ impl ResourceManager {
             })
             .collect();
 
-        self.animation_resources
-            .skeleton_transform_megaallocation
-            .mapped_slice_mut()
-            .unwrap()
-            .write_all(cast_slice(&transform_matrices));
+        write(
+            &transform_matrices,
+            self.animation_resources
+                .skeleton_transform_allocation
+                .mapped_slice_mut()
+                .unwrap(),
+            0,
+        );
 
-        self.animation_resources
-            .skeleton_normal_megaallocation
-            .mapped_slice_mut()
-            .unwrap()
-            .write(cast_slice(&normal_matrices));
+        write(
+            &normal_matrices,
+            self.animation_resources
+                .skeleton_normal_allocation
+                .mapped_slice_mut()
+                .unwrap(),
+            0,
+        );
 
-        (skeleton_id, animation_ids)
+        (
+            Animated {
+                time: 0.0,
+                animations: animation_ids,
+                current_playing: None,
+                skeleton: skeleton_id,
+            },
+            joint_to_real,
+        )
     }
 
     pub(crate) fn default_texture(&mut self) -> &GpuTexture {
@@ -633,12 +825,56 @@ impl ResourceManager {
             path: None,
         }
     }
-    pub fn create_mesh(&mut self, path: &'static str) -> Mesh {
+    pub fn load_gltf_asset(&mut self, path: &'static str) -> (Mesh, Option<Animated>) {
         let (document, buffers, _images) = gltf::import(path).unwrap();
         assert_eq!(document.meshes().len(), 1);
         let mesh = &document.meshes().next().unwrap();
         let primative: &gltf::Primitive = &mesh.primitives().next().unwrap();
 
+        let gpu_mesh;
+        let animated;
+        let is_animated;
+        if document.skins().len() > 0 {
+            let (animations, joints_to_real) = self.load_animations(&document, &buffers);
+
+            gpu_mesh = Self::load_animated_mesh(
+                primative,
+                &buffers,
+                self.allocator.clone(),
+                &self.device,
+                &joints_to_real,
+            );
+            animated = Some(Animated {
+                current_playing: None,
+                animations: animations.animations,
+                skeleton: animations.skeleton,
+                time: 0.0,
+            });
+            is_animated = true;
+        } else {
+            gpu_mesh =
+                Self::load_static_mesh(primative, &buffers, self.allocator.clone(), &self.device);
+            animated = None;
+            is_animated = false;
+        }
+        self.meshes.push(Some(gpu_mesh));
+
+        (
+            Mesh {
+                id: self.meshes.len() - 1,
+                path: Some(path),
+                animated: is_animated,
+            },
+            animated,
+        )
+    }
+
+    fn load_static_mesh(
+        primative: &gltf::Primitive,
+        buffers: &Vec<gltf::buffer::Data>,
+        allocator: SharedAllocator,
+        device: &ash::Device,
+    ) -> GpuMesh {
         let reader = primative.reader(|buffer| Some(&buffers[buffer.index()]));
 
         let indices: Vec<_> = reader.read_indices().unwrap().into_u32().collect();
@@ -650,17 +886,17 @@ impl ResourceManager {
             .zip(normals)
             .zip(tex_coords)
             .map(|((position, normal), uv)| Vertex {
-                position,
-                normal,
-                uv,
+                position: position.into(),
+                normal: normal.into(),
+                uv: uv.into(),
             })
             .collect();
 
         let (vertex_buffer, mut vertex_alloc) = alloc_buffers(
-            self.allocator.clone(),
+            allocator.clone(),
             1,
-            vertices.len() as u64 * size_of::<Vertex>() as u64,
-            &self.device,
+            (vertices.len() * size_of::<Vertex>()) as u64,
+            &device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
@@ -670,10 +906,10 @@ impl ResourceManager {
         );
 
         let (index_buffer, mut index_alloc) = alloc_buffers(
-            self.allocator.clone(),
+            allocator.clone(),
             1,
             indices.len() as u64 * 4,
-            &self.device,
+            &device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::INDEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
@@ -688,13 +924,85 @@ impl ResourceManager {
             index_count: indices.len() as u32,
             index_buffer: index_buffer[0],
             vertex_buffer: vertex_buffer[0],
+            vertex_type: VertexType::Static,
         };
-        self.meshes.push(Some(mesh));
-        Mesh {
-            id: self.meshes.len() - 1,
-            path: Some(path),
-        }
+        mesh
     }
+
+    fn load_animated_mesh(
+        primative: &gltf::Primitive,
+        buffers: &Vec<gltf::buffer::Data>,
+        allocator: SharedAllocator,
+        device: &ash::Device,
+        joint_to_real: &HashMap<usize, usize>,
+    ) -> GpuMesh {
+        let reader = primative.reader(|buffer| Some(&buffers[buffer.index()]));
+
+        let indices: Vec<_> = reader.read_indices().unwrap().into_u32().collect();
+        let positions = reader.read_positions().unwrap();
+        let normals = reader.read_normals().unwrap();
+        let tex_coords = reader.read_tex_coords(0).unwrap().into_f32();
+
+        let bone_weights = reader.read_weights(0).unwrap().into_f32();
+        let raw_bone_indices = reader.read_joints(0).unwrap().into_u16();
+
+        let translated_bone_indices: Vec<[u32; 4]> = raw_bone_indices
+            .map(|x| x.map(|x| *joint_to_real.get(&(x as usize)).unwrap() as u32))
+            .collect();
+
+        let vertices: Vec<_> = positions
+            .zip(normals)
+            .zip(tex_coords)
+            .zip(bone_weights)
+            .zip(translated_bone_indices)
+            .map(
+                |((((position, normal), uv), bone_weights), bone_indices)| AnimatedVertex {
+                    position: position.into(),
+                    normal: normal.into(),
+                    uv: uv.into(),
+                    bone_weights: bone_weights.into(),
+                    bone_indices: bone_indices,
+                },
+            )
+            .collect();
+
+        let (vertex_buffer, mut vertex_alloc) = alloc_buffers(
+            allocator.clone(),
+            1,
+            (vertices.len() * size_of::<AnimatedVertex>()) as u64,
+            &device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::cast_slice(vertices.as_ref()),
+            "vertex buffer",
+        );
+
+        let (index_buffer, mut index_alloc) = alloc_buffers(
+            allocator.clone(),
+            1,
+            indices.len() as u64 * 4,
+            &device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            bytemuck::cast_slice(indices.as_ref()),
+            "index buffer",
+        );
+
+        let mesh = GpuMesh {
+            index_alloc: index_alloc.remove(0),
+            vertex_alloc: vertex_alloc.remove(0),
+            index_count: indices.len() as u32,
+            index_buffer: index_buffer[0],
+            vertex_buffer: vertex_buffer[0],
+            vertex_type: VertexType::Animated,
+        };
+        mesh
+    }
+
     pub(crate) fn get_mesh(&mut self, mesh: Mesh) -> Option<&GpuMesh> {
         self.meshes.get(mesh.id).and_then(|m| m.as_ref())
     }
@@ -1358,7 +1666,11 @@ impl GpuTexture {
 }
 
 impl GpuMesh {
-    pub fn create(renderer: &mut Renderer, vertices: &[Vertex], indices: &[u32]) -> Self {
+    pub fn create<V: IsVertex + Pod>(
+        renderer: &mut Renderer,
+        vertices: &[V],
+        indices: &[u32],
+    ) -> Self {
         let (mut vertex_buffers, mut vertex_allocs) = alloc_buffers(
             renderer.allocator.clone(),
             1,
@@ -1391,6 +1703,7 @@ impl GpuMesh {
             index_buffer: index_buffers.pop().unwrap(),
             vertex_alloc: vertex_allocs.pop().unwrap(),
             vertex_buffer: vertex_buffers.pop().unwrap(),
+            vertex_type: V::get_type(),
         }
     }
 }
