@@ -356,28 +356,26 @@ pub fn create_builtin_graphics_pipelines(
                     .query_mut::<(ReqM<Mesh>, ReqM<Transform>, OptM<Material>, OptM<Animated>)>()
                 {
                     let (_entityid, (mesh, transform, material, animation)) = entity;
-                    dbg!(_entityid);
-                    dbg!(mesh.animated);
                     if !mesh.animated {
                         continue;
                     }
                     if let Some(animation) = animation {
-                        dbg!("hello, is animated");
-                        animation.time += 0.01;
-                        if animation.time > 1.0 {
-                            animation.time = 0.0;
-                        }
                         if let Some(current) = &animation.current_playing {
                             let animation_impl = &resource_manager.animation_resources.animations
                                 [animation.skeleton.id][current.id];
                             let skeleton_impl = &mut resource_manager.animation_resources.skeletons
                                 [animation.skeleton.id];
+                            animation.time += 0.013333;
                             for channel in &animation_impl.channels {
+                                if animation.time > *channel.timestamps.last().unwrap() {
+                                    animation.time = 0.0;
+                                }
                                 let next_timestamp_idx = channel
                                     .timestamps
                                     .iter()
                                     .position(|x| *x > animation.time)
                                     .unwrap_or(channel.timestamps.len() - 1);
+
                                 let current_timestamp_idx = next_timestamp_idx.saturating_sub(1);
 
                                 match &channel.keyframes {
@@ -386,6 +384,9 @@ pub fn create_builtin_graphics_pipelines(
                                             translation_frames.len(),
                                             channel.timestamps.len()
                                         );
+
+                                        dbg!(&channel.timestamps);
+                                        dbg!(animation.time);
 
                                         // less than current_time
                                         let t1 = channel.timestamps[current_timestamp_idx];
@@ -397,7 +398,10 @@ pub fn create_builtin_graphics_pipelines(
                                         let time_between = t2 - t1;
                                         let time_since_t1 = animation.time - t1;
 
-                                        let percent = time_since_t1 / time_between;
+                                        let mut percent = (time_since_t1 / time_between);
+                                        if time_between < 1e-6 {
+                                            percent = 0.0;
+                                        }
 
                                         // standard lerp(i am ignoring cubic bezier or step options
                                         // for now)
@@ -420,7 +424,10 @@ pub fn create_builtin_graphics_pipelines(
                                         let time_between = t2 - t1;
                                         let time_since_t1 = animation.time - t1;
 
-                                        let percent = time_since_t1 / time_between;
+                                        let mut percent = time_since_t1 / time_between;
+                                        if time_between < 1e-6 {
+                                            percent = 0.0;
+                                        }
 
                                         // standard lerp(i am ignoring cubic bezier or step options
                                         // for now)
@@ -442,7 +449,10 @@ pub fn create_builtin_graphics_pipelines(
                                         let time_between = t2 - t1;
                                         let time_since_t1 = animation.time - t1;
 
-                                        let percent = time_since_t1 / time_between;
+                                        let mut percent = time_since_t1 / time_between;
+                                        if time_between < 1e-6 {
+                                            percent = 0.0;
+                                        }
 
                                         // standard lerp(i am ignoring cubic bezier or step options
                                         // for now)

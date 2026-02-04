@@ -125,7 +125,7 @@ pub struct PointLightUBO {
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 pub struct ModelUBO {
-    model: uv::Mat4,
+    pub(crate) model: uv::Mat4,
     normal: uv::Mat4,
 }
 impl ModelUBO {

@@ -1,6 +1,6 @@
 /// This is for engine side components, anything that interacts with the engine in some special way
 /// is kept here, such as lights, meshes, textures and animations,
-use std::{collections::HashMap, io::Write, iter, path::Path};
+use std::{collections::HashMap, io::Write, path::Path};
 
 use ash::vk;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
@@ -62,14 +62,11 @@ pub(crate) struct AnimationResources {
 }
 impl AnimationResources {
     pub(crate) fn write_bones(&mut self) {
-        // INDEX 0 is always the identity matrix
-        let transform_matrices: Vec<uv::Mat4> = iter::once(uv::Mat4::identity())
-            .chain(
-                self.skeletons
-                    .iter()
-                    .flat_map(|x| &x.joints)
-                    .map(|x| x.global_transform * x.inverse_bind_matrix),
-            )
+        let transform_matrices: Vec<uv::Mat4> = self
+            .skeletons
+            .iter()
+            .flat_map(|x| &x.joints)
+            .map(|x| x.global_transform * x.inverse_bind_matrix)
             .collect();
 
         let normal_matrices: Vec<uv::Mat3> = transform_matrices
@@ -80,6 +77,7 @@ impl AnimationResources {
                     .transposed()
             })
             .collect();
+
         write(
             &transform_matrices,
             self.skeleton_transform_allocation
@@ -129,7 +127,6 @@ impl AnimationResources {
             skeleton_transform_allocation: transform_allocation.pop().unwrap(),
             skeleton_normal_buffer: normal_buffer.pop().unwrap(),
             skeleton_normal_allocation: normal_allocation.pop().unwrap(),
-            // always one for the identity matrix at the beginning
             skeletons: Vec::new(),
             animations: Vec::new(),
         }
@@ -156,15 +153,15 @@ pub(crate) struct SkeletonImpl {
 
 impl SkeletonImpl {
     pub(crate) fn update_global_transforms(&mut self) {
-        // joints is built recusrively so that parents are always before children
-        for joint_idx in 0..self.joints.len() {
-            if self.joints[joint_idx].parent_index == usize::MAX {
-                self.joints[joint_idx].global_transform =
-                    self.joints[joint_idx].get_current_local_transform();
+        // joints is built so that parents are always before children
+        for current_index in 0..self.joints.len() {
+            if self.joints[current_index].parent_index == usize::MAX {
+                self.joints[current_index].global_transform =
+                    self.joints[current_index].get_current_local_transform();
             } else {
-                self.joints[joint_idx].global_transform =
-                    self.joints[self.joints[joint_idx].parent_index].global_transform
-                        * self.joints[joint_idx].get_current_local_transform();
+                self.joints[current_index].global_transform =
+                    self.joints[self.joints[current_index].parent_index].global_transform
+                        * self.joints[current_index].get_current_local_transform();
             }
         }
     }
@@ -222,13 +219,13 @@ fn load_joints(
     buffers: &Vec<gltf::buffer::Data>,
 ) -> (Vec<Joint>, HashMap<usize, usize>, HashMap<usize, usize>) {
     let inverse_bind_accessor = skin.inverse_bind_matrices().unwrap();
-    let mut node_to_real = HashMap::new();
-    let mut joint_to_real = HashMap::new();
+    let mut gltf_node_to_engine = HashMap::new();
+    let mut gltf_joint_to_engine = HashMap::new();
 
-    let mut node_to_joint: HashMap<usize, usize> = HashMap::new();
+    let mut gltf_node_to_gltf_joint: HashMap<usize, usize> = HashMap::new();
 
     for (idx, joint) in skin.joints().enumerate() {
-        node_to_joint.insert(joint.index(), idx);
+        gltf_node_to_gltf_joint.insert(joint.index(), idx);
     }
 
     let inverse_bind_matrices: Vec<uv::Mat4> = if let Some(iter) =
@@ -251,15 +248,17 @@ fn load_joints(
             usize::MAX,
             &inverse_bind_matrices,
             &mut joint_hierarchy,
-            &mut node_to_real,
-            &mut joint_to_real,
-            &node_to_joint,
+            &mut gltf_node_to_engine,
+            &mut gltf_joint_to_engine,
+            &gltf_node_to_gltf_joint,
         );
     } else {
         let mut child_indices = std::collections::HashSet::new();
         for joint in skin.joints() {
             for child in joint.children() {
-                child_indices.insert(child.index());
+                if gltf_node_to_gltf_joint.contains_key(&child.index()) {
+                    child_indices.insert(child.index());
+                }
             }
         }
 
@@ -272,9 +271,9 @@ fn load_joints(
                         usize::MAX,
                         &inverse_bind_matrices,
                         &mut joint_hierarchy,
-                        &mut node_to_real,
-                        &mut joint_to_real,
-                        &node_to_joint,
+                        &mut gltf_node_to_engine,
+                        &mut gltf_joint_to_engine,
+                        &gltf_node_to_gltf_joint,
                     );
                     only_one_root = false;
                 } else {
@@ -284,7 +283,7 @@ fn load_joints(
         }
     };
 
-    (joint_hierarchy, node_to_real, node_to_joint)
+    (joint_hierarchy, gltf_node_to_engine, gltf_joint_to_engine)
 }
 
 fn build_hierarchy(
@@ -292,11 +291,10 @@ fn build_hierarchy(
     parent_index: usize,
     inverse_bind_matrices: &Vec<uv::Mat4>,
     joints: &mut Vec<Joint>,
-    node_to_real: &mut HashMap<usize, usize>,
-    joint_to_real: &mut HashMap<usize, usize>,
+    node_to_array: &mut HashMap<usize, usize>,
+    joint_to_array: &mut HashMap<usize, usize>,
     node_to_joint: &HashMap<usize, usize>,
 ) {
-    // index 0 is reserved for the identity matrix
     let current_joint_index = joints.len();
 
     // Add parent's child index
@@ -305,8 +303,8 @@ fn build_hierarchy(
             .children_indices
             .push(current_joint_index);
     }
-    node_to_real.insert(node.index(), current_joint_index);
-    node_to_real.insert(
+    node_to_array.insert(node.index(), current_joint_index);
+    joint_to_array.insert(
         *node_to_joint
             .get(&node.index())
             .expect("should have all nodes"),
@@ -335,8 +333,8 @@ fn build_hierarchy(
             current_joint_index,
             inverse_bind_matrices,
             joints,
-            node_to_real,
-            joint_to_real,
+            node_to_array,
+            joint_to_array,
             node_to_joint,
         );
     }
@@ -649,7 +647,7 @@ impl ResourceManager {
         assert_eq!(document.skins().len(), 1);
 
         let skin = document.skins().next().unwrap();
-        let (joints, node_to_real, joint_to_real) = load_joints(&skin, &buffers);
+        let (joints, gltf_node_to_engine, gltf_joint_to_engine) = load_joints(&skin, &buffers);
 
         let mut skeleton = SkeletonImpl { joints };
         skeleton.update_global_transforms();
@@ -702,7 +700,7 @@ impl ResourceManager {
                 };
 
                 animation_channels.push(AnimationChannel {
-                    target_joint_index: *node_to_real
+                    target_joint_index: *gltf_node_to_engine
                         .get(&channel.target().node().index())
                         .expect("should have value for all nodes accessed"),
                     keyframes: keyframes,
@@ -731,15 +729,12 @@ impl ResourceManager {
         self.animation_resources.skeletons.push(skeleton);
         self.animation_resources.animations.push(animation_clips);
 
-        // INDEX 0 is always the identity matrix
-        let transform_matrices: Vec<uv::Mat4> = iter::once(uv::Mat4::identity())
-            .chain(
-                self.animation_resources
-                    .skeletons
-                    .iter()
-                    .flat_map(|x| &x.joints)
-                    .map(|x| x.global_transform * x.inverse_bind_matrix),
-            )
+        let transform_matrices: Vec<uv::Mat4> = self
+            .animation_resources
+            .skeletons
+            .iter()
+            .flat_map(|x| &x.joints)
+            .map(|x| x.global_transform * x.inverse_bind_matrix)
             .collect();
 
         let normal_matrices: Vec<uv::Mat3> = transform_matrices
@@ -776,7 +771,7 @@ impl ResourceManager {
                 current_playing: None,
                 skeleton: skeleton_id,
             },
-            joint_to_real,
+            gltf_joint_to_engine,
         )
     }
 
@@ -835,14 +830,22 @@ impl ResourceManager {
         let animated;
         let is_animated;
         if document.skins().len() > 0 {
-            let (animations, joints_to_real) = self.load_animations(&document, &buffers);
+            let offset = self
+                .animation_resources
+                .skeletons
+                .iter()
+                .map(|x| x.joints.len())
+                .sum();
+            // this adds to self.animation_resources.skeletons, so do it after computing offset
+            let (animations, gltf_joints_to_engine) = self.load_animations(&document, &buffers);
 
             gpu_mesh = Self::load_animated_mesh(
                 primative,
                 &buffers,
                 self.allocator.clone(),
                 &self.device,
-                &joints_to_real,
+                &gltf_joints_to_engine,
+                offset,
             );
             animated = Some(Animated {
                 current_playing: None,
@@ -934,7 +937,8 @@ impl ResourceManager {
         buffers: &Vec<gltf::buffer::Data>,
         allocator: SharedAllocator,
         device: &ash::Device,
-        joint_to_real: &HashMap<usize, usize>,
+        gltf_joint_to_engine: &HashMap<usize, usize>,
+        offset_for_prev_arrays: usize,
     ) -> GpuMesh {
         let reader = primative.reader(|buffer| Some(&buffers[buffer.index()]));
 
@@ -946,8 +950,14 @@ impl ResourceManager {
         let bone_weights = reader.read_weights(0).unwrap().into_f32();
         let raw_bone_indices = reader.read_joints(0).unwrap().into_u16();
 
+        dbg!(gltf_joint_to_engine);
         let translated_bone_indices: Vec<[u32; 4]> = raw_bone_indices
-            .map(|x| x.map(|x| *joint_to_real.get(&(x as usize)).unwrap() as u32))
+            .map(|x| {
+                x.map(|x| {
+                    *gltf_joint_to_engine.get(&(x as usize)).unwrap() as u32
+                        + offset_for_prev_arrays as u32
+                })
+            })
             .collect();
 
         let vertices: Vec<_> = positions
