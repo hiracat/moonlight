@@ -291,9 +291,9 @@ fn build_hierarchy(
     parent_index: usize,
     inverse_bind_matrices: &Vec<uv::Mat4>,
     joints: &mut Vec<Joint>,
-    node_to_array: &mut HashMap<usize, usize>,
-    joint_to_array: &mut HashMap<usize, usize>,
-    node_to_joint: &HashMap<usize, usize>,
+    gltf_node_to_engine: &mut HashMap<usize, usize>,
+    gltf_joint_to_engine: &mut HashMap<usize, usize>,
+    gltf_node_to_gltf_joint: &HashMap<usize, usize>,
 ) {
     let current_joint_index = joints.len();
 
@@ -303,9 +303,10 @@ fn build_hierarchy(
             .children_indices
             .push(current_joint_index);
     }
-    node_to_array.insert(node.index(), current_joint_index);
-    joint_to_array.insert(
-        *node_to_joint
+    gltf_node_to_engine.insert(node.index(), current_joint_index);
+
+    gltf_joint_to_engine.insert(
+        *gltf_node_to_gltf_joint
             .get(&node.index())
             .expect("should have all nodes"),
         current_joint_index,
@@ -318,7 +319,7 @@ fn build_hierarchy(
         scale: scale.into(),
         // needs to be filled later
         children_indices: Vec::new(),
-        inverse_bind_matrix: inverse_bind_matrices[*node_to_joint
+        inverse_bind_matrix: inverse_bind_matrices[*gltf_node_to_gltf_joint
             .get(&node.index())
             .expect("all joints should have an entry")],
         // needs to be set later
@@ -333,9 +334,9 @@ fn build_hierarchy(
             current_joint_index,
             inverse_bind_matrices,
             joints,
-            node_to_array,
-            joint_to_array,
-            node_to_joint,
+            gltf_node_to_engine,
+            gltf_joint_to_engine,
+            gltf_node_to_gltf_joint,
         );
     }
 }
