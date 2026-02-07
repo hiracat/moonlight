@@ -17,7 +17,7 @@ use std::{
     f32::consts::PI,
     time::{Duration, Instant},
 };
-use ultraviolet::{Rotor3, Slerp, Vec3};
+use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, WindowEvent},
@@ -86,8 +86,8 @@ impl ApplicationHandler for App {
             window.inner_size().height as f32 / window.inner_size().width as f32,
         );
         // Sun (directional) and ambient light
-        let directional = DirectionalLight::create([200.0, 10.0, 0.0, 1.0], [0.2, 0.2, 0.2]);
-        let ambient = AmbientLight::create([1.0, 1.0, 1.0], 0.05);
+        let directional = DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.2, 0.2, 0.2));
+        let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 1.0), 0.05);
 
         // Keyboard + mouse input resources
         let keyboard = Keyboard::new();

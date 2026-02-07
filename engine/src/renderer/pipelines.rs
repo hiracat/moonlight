@@ -7,13 +7,15 @@ use std::{
 };
 
 use ash::vk;
-use gpu_allocator::vulkan::Allocation;
 use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 use ultraviolet::Slerp;
 
-use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
-use crate::renderer::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Texture, Vertex};
+use crate::ecs::{Not, Opt, OptM, ReqM, World};
+use crate::renderer::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Vertex};
 use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
+use crate::ubo::{
+    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, ModelUBO, PointLightUBO,
+};
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     ecs::Req,
@@ -261,12 +263,13 @@ pub fn create_builtin_graphics_pipelines(
                 let camera = world.get_resource::<Camera>().unwrap();
                 let mut builder = DescriptorWriteBuilder::new();
 
+                let camera_ubo: CameraUBO = camera.into();
                 let camera_set = builder.add_uniform_buffer(
                     resource_manager,
                     descriptor_pool,
                     descriptor_set_layouts[1],
                     0,
-                    &camera.as_ubo(),
+                    &camera_ubo,
                 );
 
                 //NOTE: defined in shader, 1 is the index of the camera set
@@ -277,12 +280,13 @@ pub fn create_builtin_graphics_pipelines(
                     if mesh.animated {
                         continue;
                     }
+                    let model_ubo: ModelUBO = transform.into();
                     let model_set = builder.add_uniform_buffer(
                         resource_manager,
                         descriptor_pool,
                         descriptor_set_layouts[0],
                         0,
-                        &transform.as_model_ubo(),
+                        &model_ubo,
                     );
                     let image_set = builder.add_texture(
                         resource_manager,
@@ -324,12 +328,13 @@ pub fn create_builtin_graphics_pipelines(
                 let camera = world.get_resource::<Camera>().unwrap();
                 let mut builder = DescriptorWriteBuilder::new();
 
+                let camera_ubo: CameraUBO = camera.into();
                 let camera_set = builder.add_uniform_buffer(
                     resource_manager,
                     descriptor_pool,
                     descriptor_set_layouts[1],
                     0,
-                    &camera.as_ubo(),
+                    &camera_ubo,
                 );
                 // this stuff is lazy, it wont write any data til the .submit
                 let bones_set = builder.add_ssbo(
@@ -398,7 +403,7 @@ pub fn create_builtin_graphics_pipelines(
                                         let time_between = t2 - t1;
                                         let time_since_t1 = animation.time - t1;
 
-                                        let mut percent = (time_since_t1 / time_between);
+                                        let mut percent = time_since_t1 / time_between;
                                         if time_between < 1e-6 {
                                             percent = 0.0;
                                         }
@@ -470,12 +475,13 @@ pub fn create_builtin_graphics_pipelines(
                         }
                     };
 
-                    let model_set = builder.add_uniform_buffer(
+                    let model_set = builder.add_uniform_buffer::<ModelUBO>(
                         resource_manager,
                         descriptor_pool,
                         descriptor_set_layouts[0],
                         0,
-                        &transform.as_model_ubo(),
+                        // it cant implicity cast to imutable, so manually cast
+                        &(&*transform).into(),
                     );
                     let image_set = builder.add_texture(
                         resource_manager,
@@ -515,12 +521,12 @@ pub fn create_builtin_graphics_pipelines(
              swapchain_descriptor_set| {
                 let mut builder = DescriptorWriteBuilder::new();
                 let ambient = world.get_resource::<AmbientLight>().unwrap();
-                let ambient_set = builder.add_uniform_buffer(
+                let ambient_set = builder.add_uniform_buffer::<AmbientLightUBO>(
                     resource_manager,
                     descriptor_pool,
                     descriptor_set_layouts[1],
                     0,
-                    &ambient.as_ubo(),
+                    &ambient.into(),
                 );
                 builder.submit(device);
 
@@ -544,12 +550,12 @@ pub fn create_builtin_graphics_pipelines(
              swapchain_descriptor_set| {
                 let mut builder = DescriptorWriteBuilder::new();
                 let directional = world.get_resource::<DirectionalLight>().unwrap();
-                let directional_set = builder.add_uniform_buffer(
+                let directional_set = builder.add_uniform_buffer::<DirectionalLightUBO>(
                     resource_manager,
                     descriptor_pool,
                     descriptor_set_layouts[1],
                     0,
-                    &directional.as_ubo(),
+                    &directional.into(),
                 );
                 builder.submit(device);
 
@@ -576,12 +582,12 @@ pub fn create_builtin_graphics_pipelines(
 
                 for entity in world.query::<(Req<PointLight>, Req<Transform>)>() {
                     let (_entityid, (point, transform)) = entity;
-                    let point_set = builder.add_uniform_buffer(
+                    let point_set = builder.add_uniform_buffer::<PointLightUBO>(
                         resource_manager,
                         descriptor_pool,
                         descriptor_set_layouts[1],
                         0,
-                        &point.as_ubo(transform),
+                        &(point, transform).into(),
                     );
 
                     let descriptor_sets = vec![*swapchain_descriptor_set, point_set];
@@ -610,12 +616,12 @@ pub fn create_builtin_graphics_pipelines(
                 let mut builder = DescriptorWriteBuilder::new();
                 let cubemap = *world.get_resource::<Skybox>().unwrap();
                 let camera = world.get_resource::<Camera>().unwrap();
-                let camera_set = builder.add_uniform_buffer(
+                let camera_set = builder.add_uniform_buffer::<CameraInverseUBO>(
                     resource_manager,
                     descriptor_pool,
                     descriptor_set_layouts[0],
                     0,
-                    &camera.as_inverse_ubo(),
+                    &camera.into(),
                 );
                 let cubemap_set = builder.add_texture(
                     resource_manager,
