@@ -1,10 +1,7 @@
 use ash::vk;
 use winit::dpi::PhysicalSize;
 
-use crate::renderer::{
-    draw::{QueueFamilyIndex, SharedAllocator},
-    swapchain::framebuffers::{create_framebuffers, Framebuffers, Image},
-};
+use crate::renderer::swapchain::framebuffers::{create_framebuffers, Image};
 pub mod framebuffers;
 pub mod renderpass;
 

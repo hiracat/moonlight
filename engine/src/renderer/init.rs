@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, c_void},
+    ffi::{c_void, CStr},
     marker::PhantomData,
     ptr,
     sync::Arc,
@@ -9,7 +9,7 @@ use winit::{event_loop::ActiveEventLoop, raw_window_handle::HasRawDisplayHandle,
 
 use ash::vk;
 
-use crate::renderer::draw::{QueueFamilyIndex, VALIDATION_ENABLE};
+use crate::{renderer::draw::VALIDATION_ENABLE, vulkan::QueueFamilyIndex};
 
 pub fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
     Arc::new(
@@ -18,73 +18,7 @@ pub fn create_window(event_loop: &ActiveEventLoop) -> Arc<Window> {
             .expect("failed to create window"),
     )
 }
-pub fn setup_debug_utils(
-    debug_utils_loader: &ash::ext::debug_utils::Instance,
-) -> vk::DebugUtilsMessengerEXT {
-    let messenger_ci = populate_debug_messenger_create_info();
 
-    let utils_messenger = unsafe {
-        debug_utils_loader
-            .create_debug_utils_messenger(&messenger_ci, None)
-            .expect("Debug Utils Callback")
-    };
-
-    utils_messenger
-}
-
-pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Instance {
-    let engine_name = CStr::from_bytes_with_nul(b"moonlight\0").unwrap();
-    let app_info = vk::ApplicationInfo {
-        api_version: vk::make_api_version(0, 1, 3, 0),
-        p_engine_name: engine_name.as_ptr(),
-        ..Default::default()
-    };
-
-    #[allow(deprecated)]
-    let required_instance_extensions =
-        ash_window::enumerate_required_extensions(event_loop.raw_display_handle().unwrap())
-            .unwrap();
-
-    let mut instance_extensions: Vec<_> = required_instance_extensions.iter().copied().collect();
-    instance_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
-
-    let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
-    let validation_features = [
-        vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
-        // vk::ValidationFeatureEnableEXT::GPU_ASSISTED,
-        // vk::ValidationFeatureEnableEXT::GPU_ASSISTED_RESERVE_BINDING_SLOT,
-        vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
-        // vk::ValidationFeatureEnableEXT::DEBUG_PRINTF,
-    ];
-    let validation_features_info = vk::ValidationFeaturesEXT {
-        enabled_validation_feature_count: validation_features.len() as u32,
-        p_enabled_validation_features: validation_features.as_ptr(),
-        disabled_validation_feature_count: 0,
-        p_disabled_validation_features: std::ptr::null(),
-        ..Default::default()
-    };
-
-    let validation_layers = if VALIDATION_ENABLE {
-        vec![validation_layer.as_ptr()]
-    } else {
-        vec![]
-    };
-
-    let create_info = vk::InstanceCreateInfo {
-        p_next: &validation_features_info as *const _ as *const std::ffi::c_void,
-        p_application_info: &app_info,
-
-        enabled_layer_count: validation_layers.len() as u32,
-        pp_enabled_layer_names: validation_layers.as_ptr(),
-
-        pp_enabled_extension_names: instance_extensions.as_ptr(),
-        enabled_extension_count: instance_extensions.len() as u32,
-        ..Default::default()
-    };
-
-    let instance = unsafe { entry.create_instance(&create_info, None).unwrap() };
-    instance
-}
 pub fn create_physical_device(
     instance: &ash::Instance,
     // TODO: should use this to test surface support but dont feel like it

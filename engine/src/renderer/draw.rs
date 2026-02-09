@@ -14,7 +14,7 @@ use crate::renderer::{
     resources::{GpuTexture, Mesh, ResourceManager},
     swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass},
 };
-use crate::vulkan::{QueueFamilyIndex, SharedAllocator};
+use crate::vulkan::{QueueFamilyIndex, SharedAllocator, VulkanContext};
 use crate::{components::Camera, renderer::swapchain::SwapchainResources};
 use ash::vk::{
     self, DynamicState, PipelineColorBlendAttachmentState, VertexInputAttributeDescription,
@@ -42,7 +42,6 @@ use winit::{
     window::Window,
 };
 
-pub const VALIDATION_ENABLE: bool = true;
 pub const GEOMETRY_SUBPASS: u32 = 0;
 pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -580,57 +579,6 @@ impl WorldRenderer {
 
     #[allow(clippy::too_many_lines)]
     pub fn init(event_loop: &ActiveEventLoop, window: &Arc<Window>) -> Self {
-        let start_time = Instant::now();
-        let entry = unsafe { ash::Entry::load().unwrap() };
-        let instance = create_instance(&entry, event_loop);
-        let surface = unsafe {
-            let surface = ash_window::create_surface(
-                &entry,
-                &instance,
-                // idk what to do about this, i need the raw handle
-                #[allow(deprecated)]
-                event_loop.raw_display_handle().unwrap(),
-                #[allow(deprecated)]
-                window.raw_window_handle().unwrap(),
-                None,
-            )
-            .unwrap();
-            surface
-        };
-
-        //need to make this optional to put stuff inside
-        let debug_utils_loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
-        let mut debug_messenger = vk::DebugUtilsMessengerEXT::null();
-        if VALIDATION_ENABLE {
-            debug_messenger = setup_debug_utils(&debug_utils_loader);
-            eprintln!("set up debug utility");
-        }
-
-        let required_extensions = [
-            ash::vk::KHR_SWAPCHAIN_NAME,
-            // ash::vk::KHR_SHADER_NON_SEMANTIC_INFO_NAME,
-        ];
-        let (physical_device, queue_family_index) =
-            create_physical_device(&instance, surface, &required_extensions);
-        let (device, queue) = create_device(
-            &instance,
-            physical_device,
-            queue_family_index,
-            &required_extensions,
-        );
-
-        let window_size = window.inner_size();
-
-        let memory_allocator = Allocator::new(&AllocatorCreateDesc {
-            instance: instance.clone(),
-            device: device.clone(),
-            physical_device,
-            debug_settings: Default::default(),
-            buffer_device_address: false, // Ideally, check the BufferDeviceAddressFeatures struct.
-            allocation_sizes: Default::default(),
-        })
-        .unwrap();
-
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
 
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
@@ -972,18 +920,7 @@ impl UIRenderer {
         );
     }
 
-    fn init(
-        device: &ash::Device,
-        window: Arc<Window>,
-        one_time_pool: vk::CommandPool,
-        one_time_command_buffer: vk::CommandBuffer,
-        queue: vk::Queue,
-        allocator: SharedAllocator,
-        queue_family_index: QueueFamilyIndex,
-        swapchain_image_views: &[vk::ImageView],
-        swapchain_format: vk::Format,
-        swapchain_image_extent: vk::Extent2D,
-    ) -> UIRenderer {
+    pub fn init(context: &VulkanContext) -> UIRenderer {
         let ui_ctx = egui::Context::default();
         let winit_egui_state = egui_winit::State::new(
             ui_ctx.clone(),

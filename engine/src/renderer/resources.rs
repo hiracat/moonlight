@@ -8,8 +8,12 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
 
-use crate::renderer::draw::{
-    alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, Renderer, SharedAllocator,
+use crate::{
+    renderer::draw::{
+        alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, SharedAllocator,
+        WorldRenderer,
+    },
+    vulkan::VulkanContext,
 };
 
 const MAX_SCENE_BONES: usize = 2048;
@@ -604,14 +608,7 @@ impl Vertex {
 }
 
 impl ResourceManager {
-    pub(crate) fn init(
-        device: &ash::Device,
-        allocator: SharedAllocator,
-        one_time_submit_pool: vk::CommandPool,
-        one_time_submit_buffer: vk::CommandBuffer,
-        queue: vk::Queue,
-        queue_family_index: QueueFamilyIndex,
-    ) -> Self {
+    pub(crate) fn init(context: &VulkanContext) -> Self {
         let ring_buffer = UniformRingBuffer::create(allocator.clone(), device, 0xFFFFF);
         let pixel = Rgba::from([255, 255, 255, 0]);
         let mut image = DynamicImage::new_rgb8(1, 1);
@@ -1678,7 +1675,7 @@ impl GpuTexture {
 
 impl GpuMesh {
     pub fn create<V: IsVertex + Pod>(
-        renderer: &mut Renderer,
+        renderer: &mut WorldRenderer,
         vertices: &[V],
         indices: &[u32],
     ) -> Self {
