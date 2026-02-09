@@ -1,9 +1,6 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::ecs::World;
-use crate::renderer::init::{
-    create_device, create_instance, create_physical_device, setup_debug_utils,
-};
 use crate::renderer::pipelines::{
     create_builtin_graphics_pipelines, create_graphics_pipeline,
     create_pipeline_layout_from_vert_frag, ColorBlendState, DepthStencilState,
@@ -50,8 +47,10 @@ pub struct UIRenderer {
     pub ui_ctx: egui::Context,
     pub winit_egui_state: egui_winit::State,
     pub full_output: Option<egui::FullOutput>,
+
     renderpass: vk::RenderPass,
     pipeline: vk::Pipeline,
+
     pipeline_layout: vk::PipelineLayout,
     vertex_buffer: vk::Buffer,
     index_buffer: vk::Buffer,
@@ -74,16 +73,9 @@ pub struct UIRenderer {
 
 pub struct WorldRenderer {
     // indexed by pipelineHandle
+    render_pass: vk::RenderPass,
     pipelines: Vec<PipelineBundle>,
 
-    swapchain_image_index: u32,
-    frame_counter: u64,
-    current_frame: usize,
-
-    pub swapchain: SwapchainResources,
-    per_frame: Vec<PerFrame>,
-
-    render_pass: vk::RenderPass,
     pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
     per_swapchain_image_set_layout: vk::DescriptorSetLayout,
     pub render_finished: Vec<vk::Semaphore>,
@@ -97,100 +89,6 @@ pub struct DrawJob {
     // shaders set indices are required to be contiguous
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 }
-struct PerFrame {
-    pub(crate) command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    image_available: vk::Semaphore,
-    // wait for the frame that was FRAMES_IN_FLIGHT frames ago, but has the same current_frame
-    // since modulo
-    in_flight: vk::Fence,
-
-    transient_pool: vk::DescriptorPool,
-}
-
-impl PerFrame {
-    fn create(device: &ash::Device, queue_family_index: QueueFamilyIndex) -> Self {
-        let command_pool_create_info = vk::CommandPoolCreateInfo {
-            queue_family_index,
-            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            ..Default::default()
-        };
-        let command_pool = unsafe {
-            device
-                .create_command_pool(&command_pool_create_info, None)
-                .unwrap()
-        };
-        let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
-            command_pool,
-            command_buffer_count: 1,
-            level: vk::CommandBufferLevel::PRIMARY,
-            ..Default::default()
-        };
-        let command_buffer = unsafe {
-            device
-                .allocate_command_buffers(&command_buffer_alloc_info)
-                .unwrap()
-                .first()
-                .copied()
-                .unwrap()
-        };
-        let in_flight = unsafe {
-            device.create_fence(
-                &vk::FenceCreateInfo {
-                    flags: vk::FenceCreateFlags::SIGNALED,
-                    ..Default::default()
-                },
-                None,
-            )
-        }
-        .unwrap();
-        // One pool with multiple descriptor types
-        let transient_pool_sizes = vec![
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 50,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1000,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 500,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::INPUT_ATTACHMENT,
-                descriptor_count: 100,
-            },
-        ];
-
-        let transient_pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo {
-                        max_sets: 1000,
-                        p_pool_sizes: transient_pool_sizes.as_ptr(),
-                        pool_size_count: transient_pool_sizes.len() as u32,
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .unwrap()
-        };
-        let image_available = unsafe {
-            device
-                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                .unwrap()
-        };
-        Self {
-            command_pool,
-            command_buffer,
-            in_flight,
-            transient_pool,
-            image_available,
-        }
-    }
-}
 
 impl Drop for WorldRenderer {
     fn drop(&mut self) {
@@ -200,113 +98,28 @@ impl Drop for WorldRenderer {
 
 impl WorldRenderer {
     #[allow(clippy::too_many_lines)]
-    pub fn draw2(&mut self, world: &mut World) {
-        self.window.request_redraw();
-
-        let full_output = self.ui.full_output.take().unwrap();
-        self.ui
-            .winit_egui_state
-            .handle_platform_output(&self.window, full_output.platform_output);
-        self.ui
-            .handle_new_textures(&self.device, &full_output.textures_delta);
-        let geometry = self
-            .ui
-            .ui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        let window_size = self.window.inner_size();
-
-        if window_size.width == 0 || window_size.height == 0 {
-            return;
-        }
-
-        let frame = &self.per_frame[self.current_frame];
-        unsafe {
-            self.device
-                .wait_for_fences(&[frame.in_flight], true, u64::MAX)
-                .unwrap();
-        };
-
-        self.frame_counter += 1;
-
-        if self.framebuffer_resized {
-            // Use the new dimensions of the window.
-            self.swapchain.recreate(window_size);
-            self.ui.recreate_framebuffers(
-                &self.device,
-                &self.swapchain.framebuffers.swapchain_image_views,
-                vk::Extent2D {
-                    width: window_size.width,
-                    height: window_size.height,
-                },
-            );
-            world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
-                window_size.width as f32 / window_size.height as f32;
-        }
-
-        let is_suboptimal;
-        (self.swapchain_image_index, is_suboptimal) = unsafe {
-            match self.swapchain_loader.acquire_next_image(
-                self.swapchain.swapchain,
-                u64::MAX,
-                frame.image_available,
-                vk::Fence::null(),
-            ) {
-                Ok((index, suboptimal)) => (index, suboptimal),
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.framebuffer_resized = true;
-                    return;
-                }
-                Err(e) => panic!("failed to acquire next image: {e}"),
-            }
-        };
-        if is_suboptimal {
-            self.framebuffer_resized = true;
-        }
-
-        // NOTE: RENDERING START
-
-        let frame = &self.per_frame[self.current_frame];
-
-        unsafe { self.device.reset_fences(&[frame.in_flight]).unwrap() };
-        unsafe {
-            self.device
-                .reset_descriptor_pool(frame.transient_pool, vk::DescriptorPoolResetFlags::empty())
-                .unwrap();
-        }
-
-        unsafe {
-            self.device
-                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
-                .unwrap();
-        }
-
+    pub fn record_commands(
+        &mut self,
+        world: &mut World,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        window_size: vk::Extent2D,
+        resource_manager: &mut ResourceManager,
+        swapchain_image_index: usize,
+    ) {
         let jobs = Self::setup_gpu_build_draw_jobs(self, world);
-
-        let frame = &self.per_frame[self.current_frame];
-
-        unsafe {
-            self.device
-                .begin_command_buffer(
-                    frame.command_buffer,
-                    &vk::CommandBufferBeginInfo {
-                        p_inheritance_info: &vk::CommandBufferInheritanceInfo {
-                            pipeline_statistics: vk::QueryPipelineStatisticFlags::empty(),
-                            subpass: 0, // ingored
-                            render_pass: self.render_pass,
-                            framebuffer: self.swapchain.framebuffers.framebuffers
-                                [self.swapchain_image_index as usize],
-                            query_flags: vk::QueryControlFlags::empty(),
-                            occlusion_query_enable: vk::FALSE,
-                            ..Default::default()
-                        },
-                        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: window_size,
         };
-
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: window_size.width as f32,
+            height: window_size.height as f32,
+            max_depth: 1.0,
+            min_depth: 0.0,
+        };
         let clear_values = vec![
             vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -335,31 +148,17 @@ impl WorldRenderer {
                 },
             },
         ];
-        let gui_clear_values = vec![];
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: window_size.width as f32,
-            height: window_size.height as f32,
-            max_depth: 1.0,
-            min_depth: 0.0,
-        };
         unsafe {
-            self.device.cmd_begin_render_pass2(
-                frame.command_buffer,
+            device.cmd_begin_render_pass2(
+                command_buffer,
                 &vk::RenderPassBeginInfo {
                     render_pass: self.render_pass,
-                    framebuffer: self.swapchain.framebuffers.framebuffers
-                        [self.swapchain_image_index as usize],
+                    framebuffer: self.framebuffers[swapchain_image_index],
                     p_clear_values: clear_values.as_ptr(),
                     clear_value_count: clear_values.len() as u32,
                     render_area: vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: vk::Extent2D {
-                            width: window_size.width,
-                            height: window_size.height,
-                        },
+                        extent: window_size,
                     },
                     ..Default::default()
                 },
@@ -368,23 +167,14 @@ impl WorldRenderer {
                     ..Default::default()
                 },
             );
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D {
-                    width: window_size.width,
-                    height: window_size.height,
-                },
-            };
-            self.device
-                .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
-            self.device
-                .cmd_set_scissor(frame.command_buffer, 0, &[scissor]);
+            device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
         };
 
         for (pipeline_index, job_list) in jobs.iter().enumerate() {
             unsafe {
-                self.device.cmd_bind_pipeline(
-                    frame.command_buffer,
+                device.cmd_bind_pipeline(
+                    command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipelines[pipeline_index].pipeline,
                 );
@@ -399,8 +189,8 @@ impl WorldRenderer {
                 );
 
                 unsafe {
-                    self.device.cmd_bind_descriptor_sets(
-                        frame.command_buffer,
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         self.pipelines[pipeline_index].layout,
                         0,
@@ -409,152 +199,43 @@ impl WorldRenderer {
                     );
                 }
                 if let Some(mesh) = job.mesh {
-                    let mesh = self.resource_manager.get_mesh(mesh).unwrap();
-                    let key: PipelineKey = unsafe { std::mem::transmute(pipeline_index as u32) };
+                    let mesh = resource_manager.get_mesh(mesh).unwrap();
 
                     unsafe {
-                        self.device.cmd_bind_vertex_buffers(
-                            frame.command_buffer,
+                        device.cmd_bind_vertex_buffers(
+                            command_buffer,
                             0,
                             &[mesh.vertex_buffer],
                             &[0],
                         );
-                        self.device.cmd_bind_index_buffer(
-                            frame.command_buffer,
+                        device.cmd_bind_index_buffer(
+                            command_buffer,
                             mesh.index_buffer,
                             0,
                             vk::IndexType::UINT32,
                         );
-                        self.device.cmd_draw_indexed(
-                            frame.command_buffer,
-                            mesh.index_count,
-                            1,
-                            0,
-                            0,
-                            0,
-                        );
+                        device.cmd_draw_indexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
                     }
                 } else {
                     unsafe {
-                        self.device.cmd_draw(frame.command_buffer, 3, 1, 0, 0);
+                        device.cmd_draw(command_buffer, 3, 1, 0, 0);
                     }
                 }
             }
             if pipeline_index == PipelineKey::AnimatedGeometry as usize {
                 unsafe {
-                    self.device
-                        .cmd_next_subpass(frame.command_buffer, vk::SubpassContents::INLINE);
+                    device.cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
                 }
             }
             unsafe {
-                self.device.cmd_bind_pipeline(
-                    frame.command_buffer,
+                device.cmd_bind_pipeline(
+                    command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipelines[pipeline_index as usize].pipeline,
                 );
+                device.cmd_end_render_pass(command_buffer);
             }
         }
-        unsafe {
-            self.device.cmd_end_render_pass(frame.command_buffer);
-
-            self.device.cmd_begin_render_pass(
-                frame.command_buffer,
-                &vk::RenderPassBeginInfo {
-                    render_pass: self.ui.renderpass,
-                    framebuffer: self.ui.framebuffers[self.swapchain_image_index as usize],
-                    render_area: vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: vk::Extent2D {
-                            width: window_size.width,
-                            height: window_size.height,
-                        },
-                    },
-                    p_clear_values: gui_clear_values.as_ptr(),
-                    clear_value_count: gui_clear_values.len() as u32,
-                    ..Default::default()
-                },
-                vk::SubpassContents::INLINE,
-            );
-            self.device
-                .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
-            self.device.cmd_bind_pipeline(
-                frame.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.ui.pipeline,
-            );
-        }
-        self.ui.draw_meshes(
-            &geometry,
-            &self.device,
-            frame.command_buffer,
-            full_output.pixels_per_point,
-            window_size,
-        );
-
-        unsafe {
-            self.device.cmd_end_render_pass(frame.command_buffer);
-            self.device
-                .end_command_buffer(frame.command_buffer)
-                .unwrap();
-        }
-        let wait_dst_access_mask = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
-        let queue_submit_info = vk::SubmitInfo {
-            wait_semaphore_count: 1,
-            p_wait_semaphores: &frame.image_available,
-            p_wait_dst_stage_mask: &wait_dst_access_mask,
-            command_buffer_count: 1,
-            p_command_buffers: &frame.command_buffer,
-            p_signal_semaphores: &self.swapchain.render_finished
-                [self.swapchain_image_index as usize],
-            signal_semaphore_count: 1,
-            ..Default::default()
-        };
-
-        unsafe {
-            self.device
-                .queue_submit(self.queue, &[queue_submit_info], frame.in_flight)
-                .unwrap();
-        }
-
-        let mut present_results: [vk::Result; 1] = [Default::default(); 1];
-        let present_info = vk::PresentInfoKHR {
-            p_wait_semaphores: &self.swapchain.render_finished[self.swapchain_image_index as usize],
-            wait_semaphore_count: 1,
-            p_swapchains: &self.swapchain.swapchain,
-            swapchain_count: 1,
-            p_image_indices: &self.swapchain_image_index,
-            p_results: present_results.as_mut_ptr(),
-            ..Default::default()
-        };
-
-        let result = unsafe {
-            self.swapchain_loader
-                .queue_present(self.queue, &present_info)
-        };
-        let is_resized = match result {
-            Ok(_) => self.framebuffer_resized,
-            Err(vk_result) => match vk_result {
-                vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
-                _ => panic!("Failed to execute queue present."),
-            },
-        };
-        if is_resized {
-            self.framebuffer_resized = false;
-            self.swapchain.recreate(window_size);
-            self.ui.recreate_framebuffers(
-                &self.device,
-                &self.swapchain.framebuffers.swapchain_image_views,
-                vk::Extent2D {
-                    width: window_size.width,
-                    height: window_size.height,
-                },
-            );
-            world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
-                window_size.width as f32 / window_size.height as f32;
-        }
-
-        self.ui.cleanup_old_textures(full_output.textures_delta);
-        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
 
     // this is sorta like a frame graph builder kinda thing
@@ -578,18 +259,54 @@ impl WorldRenderer {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn init(event_loop: &ActiveEventLoop, window: &Arc<Window>) -> Self {
-        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+    pub fn init(context: &VulkanContext) -> Self {
+        let framebuffers = create_framebuffers(
+            device,
+            &swapchain_images,
+            render_pass,
+            allocator.clone(),
+            window_size,
+            image_format.format,
+        );
 
-        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+        // one set per swapchain image, * 4 for color normal position and final_color * 3 for
+        // safety
+        let required_sets: u32 = (swapchain_images.len() * 4 * 3) as u32;
 
-        let swapchain_image_formats = unsafe {
-            surface_loader
-                .get_physical_device_surface_formats(physical_device, surface)
+        let pool_sizes = [vk::DescriptorPoolSize {
+            // per uniform buffer, so six descriptors per
+            // set(2x what is needed for safety
+            descriptor_count: 6 * required_sets,
+            ty: vk::DescriptorType::INPUT_ATTACHMENT,
+        }];
+
+        let descriptor_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo {
+                        max_sets: required_sets,
+                        p_pool_sizes: pool_sizes.as_ptr(),
+                        pool_size_count: pool_sizes.len() as u32,
+                        ..Default::default()
+                    },
+                    None,
+                )
                 .unwrap()
         };
-        let swapchain_image_format =
-            SwapchainResources::choose_swapchain_format(&swapchain_image_formats).unwrap();
+
+        let descriptor_sets = create_attachment_descriptor_sets(
+            device,
+            descriptor_pool,
+            per_swapchain_image_set_layout,
+            &[
+                framebuffers.color_images.as_slice(),
+                framebuffers.normal_images.as_slice(),
+                framebuffers.position_images.as_slice(),
+            ],
+            &[0, 1, 2],
+        );
+
+        let render_finished = create_semaphores(device, image_count as usize);
 
         let render_pass = create_renderpass(&device, swapchain_image_format.format);
         let shared_allocator = Arc::new(Mutex::new(memory_allocator));

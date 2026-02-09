@@ -21,22 +21,21 @@ pub const VALIDATION_ENABLE: bool = true;
 pub struct VulkanContext {
     // needs to be kept alive, dont forget is very important
     // anything that starts with ash:: and not vk:: impliments drop
-    _entry: ash::Entry,
-    instance: ash::Instance,
+    pub entry: ash::Entry,
+    pub instance: ash::Instance,
     pub device: ash::Device,
     pub physical_device: vk::PhysicalDevice,
 
     debug_messenger: vk::DebugUtilsMessengerEXT,
+    debug_utils_loader: ash::ext::debug_utils::Instance,
 
     pub allocator: SharedAllocator,
     pub queue: vk::Queue,
     pub queue_family_index: QueueFamilyIndex,
 
-    debug_utils_loader: ash::ext::debug_utils::Instance,
-
     pub window: Arc<Window>,
-    surface: vk::SurfaceKHR,
-    framebuffer_resized: bool,
+    pub surface: vk::SurfaceKHR,
+    pub framebuffer_resized: bool,
 }
 
 impl VulkanContext {

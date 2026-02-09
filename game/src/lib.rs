@@ -8,7 +8,7 @@ use moonlight::ecs::World;
 use moonlight::physics::Aabb;
 use moonlight::physics::Collider;
 use moonlight::physics::RigidBody;
-use moonlight::renderer::draw::Renderer;
+use moonlight::renderer::draw::WorldRenderer;
 use moonlight::renderer::init::create_window;
 use moonlight::renderer::resources::Material;
 use moonlight::renderer::resources::Skybox;
@@ -41,7 +41,7 @@ struct MouseState {
 }
 
 pub struct App {
-    renderer: Option<Renderer>,
+    renderer: Option<WorldRenderer>,
     world: World,
     prev_frame_end: Instant,
     delta_time: Duration,
@@ -72,7 +72,7 @@ impl ApplicationHandler for App {
         let window = create_window(event_loop);
         //HACK: magic number, i dont care right now
 
-        self.renderer = Some(Renderer::init(event_loop, &window));
+        self.renderer = Some(WorldRenderer::init(event_loop, &window));
 
         // ───────────────────────────────────────────────────────
         // 2) Create “static” resources (camera, lights, input, etc.)

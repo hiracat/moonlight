@@ -1,60 +1,36 @@
 use ash::vk;
 use winit::dpi::PhysicalSize;
 
-use crate::renderer::swapchain::framebuffers::{create_framebuffers, Image};
+use crate::{
+    renderer::swapchain::framebuffers::{create_framebuffers, Image},
+    vulkan::VulkanContext,
+};
 pub mod framebuffers;
 pub mod renderpass;
 
-pub(crate) struct SwapchainResources {
-    pub(crate) swapchain: vk::SwapchainKHR,
-    pub(crate) swapchain_image_format: vk::SurfaceFormatKHR,
+pub struct SwapchainResources {
+    pub swapchain: vk::SwapchainKHR,
+    pub swapchain_image_format: vk::SurfaceFormatKHR,
     surface_loader: ash::khr::surface::Instance,
     swapchain_loader: ash::khr::swapchain::Device,
-    surface: vk::SurfaceKHR,
+    // the images that are managed by the swapchain, indexed by swapchain_image_index
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl SwapchainResources {
-    pub(crate) fn recreate(&mut self, size: PhysicalSize<u32>) {
-        *self = SwapchainResources::create(
-            &self.surface_loader,
-            &self.swapchain_loader,
-            &self.device,
-            self.physical_device,
-            self.render_pass,
-            Some(self.swapchain),
-            self.swapchain_image_format,
-            size,
-            self.allocator.clone(),
-            self.surface,
-            self.per_swapchain_image_set_layout,
-            &self.queue_family_indices,
-        );
-    }
-    pub(crate) fn create(
-        surface_loader: &ash::khr::surface::Instance,
-        swapchain_loader: &ash::khr::swapchain::Device,
-        device: &ash::Device,
-        physical_device: vk::PhysicalDevice,
-        render_pass: vk::RenderPass,
-        previous_swapchain: Option<vk::SwapchainKHR>,
-        swapchain_image_format: vk::SurfaceFormatKHR,
-        window_size: PhysicalSize<u32>,
-        allocator: SharedAllocator,
-        surface: vk::SurfaceKHR,
-        per_swapchain_image_set_layout: vk::DescriptorSetLayout,
-        queue_family_indices: &[QueueFamilyIndex],
-    ) -> Self {
+    pub fn create(context: &VulkanContext) -> Self {
+        let surface_loader = ash::khr::surface::Instance::new(&context.entry, &context.instance);
+        let swapchain_loader = ash::khr::swapchain::Device::new(&context.instance, &context.device);
+        let window_size = context.window.inner_size();
         let window_size = vk::Extent2D {
             width: window_size.width,
             height: window_size.height,
         };
 
-        let image_format = swapchain_image_format;
-
         let capabilities = unsafe {
-            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
+            surface_loader
+                .get_physical_device_surface_capabilities(context.physical_device, context.surface)
         }
         .unwrap();
 
@@ -66,7 +42,7 @@ impl SwapchainResources {
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR {
             image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            surface,
+            surface: context.surface,
             min_image_count: image_count,
             image_sharing_mode: vk::SharingMode::EXCLUSIVE,
             image_color_space: image_format.color_space,
@@ -74,12 +50,12 @@ impl SwapchainResources {
             image_extent: window_size,
             present_mode: vk::PresentModeKHR::FIFO,
             pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
-            old_swapchain: previous_swapchain.unwrap_or(vk::SwapchainKHR::null()),
+            old_swapchain: vk::SwapchainKHR::null(),
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
             clipped: vk::TRUE,
             image_array_layers: 1,
-            p_queue_family_indices: queue_family_indices.as_ptr(),
-            queue_family_index_count: queue_family_indices.len() as u32,
+            p_queue_family_indices: &context.queue_family_index,
+            queue_family_index_count: 1,
 
             ..Default::default()
         };
@@ -94,70 +70,46 @@ impl SwapchainResources {
                 .get_swapchain_images(swapchain)
                 .expect("Failed to get Swapchain Images.")
         };
+        let color_subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            level_count: 1,
+            layer_count: 1,
+            base_mip_level: 0,
+            base_array_layer: 0,
+        };
+        let swapchain_image_formats = unsafe {
+            surface_loader
+                .get_physical_device_surface_formats(context.physical_device, context.surface)
+                .unwrap()
+        };
+        let swapchain_image_format =
+            SwapchainResources::choose_swapchain_format(&swapchain_image_formats).unwrap();
 
-        let framebuffers = create_framebuffers(
-            device,
-            &swapchain_images,
-            render_pass,
-            allocator.clone(),
-            window_size,
-            image_format.format,
-        );
-
-        // one set per swapchain image, * 4 for color normal position and final_color * 3 for
-        // safety
-        let required_sets: u32 = (swapchain_images.len() * 4 * 3) as u32;
-
-        let pool_sizes = [vk::DescriptorPoolSize {
-            // per uniform buffer, so six descriptors per
-            // set(2x what is needed for safety
-            descriptor_count: 6 * required_sets,
-            ty: vk::DescriptorType::INPUT_ATTACHMENT,
-        }];
-
-        let descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo {
-                        max_sets: required_sets,
-                        p_pool_sizes: pool_sizes.as_ptr(),
-                        pool_size_count: pool_sizes.len() as u32,
+        let swapchain_image_views = Vec::new();
+        for image in swapchain_images {
+            let swapchain_image_view = unsafe {
+                context.device.create_image_view(
+                    &vk::ImageViewCreateInfo {
+                        format: swapchain_image_format.format,
+                        image: image,
+                        view_type: vk::ImageViewType::TYPE_2D,
+                        subresource_range: color_subresource_range,
                         ..Default::default()
                     },
                     None,
                 )
-                .unwrap()
-        };
-
-        let descriptor_sets = create_attachment_descriptor_sets(
-            device,
-            descriptor_pool,
-            per_swapchain_image_set_layout,
-            &[
-                framebuffers.color_images.as_slice(),
-                framebuffers.normal_images.as_slice(),
-                framebuffers.position_images.as_slice(),
-            ],
-            &[0, 1, 2],
-        );
-
-        let render_finished = create_semaphores(device, image_count as usize);
+            }
+            .unwrap();
+            swapchain_image_views.push(swapchain_image_view);
+        }
 
         Self {
             swapchain,
-            render_finished,
-            swapchain_image_format: image_format,
-            framebuffers,
-            allocator,
-            per_swapchain_image_descriptor_sets: descriptor_sets,
-            surface_loader: surface_loader.clone(),
-            swapchain_loader: swapchain_loader.clone(),
-            device: device.clone(),
-            physical_device,
-            render_pass,
-            surface,
-            per_swapchain_image_set_layout,
-            queue_family_indices: queue_family_indices.to_vec(),
+            swapchain_image_format: swapchain_image_format,
+            surface_loader: surface_loader,
+            swapchain_loader: swapchain_loader,
+            swapchain_images: swapchain_images,
+            swapchain_image_views: swapchain_image_views,
         }
     }
     pub fn choose_swapchain_format(
@@ -200,7 +152,7 @@ fn create_semaphores(device: &ash::Device, count: usize) -> Vec<vk::Semaphore> {
 /// - **binding_index**: Binding indices for each attachment type (length must be
 /// attachments.len())
 
-pub(crate) fn create_attachment_descriptor_sets(
+pub fn create_attachment_descriptor_sets(
     device: &ash::Device,
     descriptor_pool: vk::DescriptorPool,
     attachment_layout: vk::DescriptorSetLayout,
