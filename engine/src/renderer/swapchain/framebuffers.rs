@@ -1,16 +1,12 @@
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 
-use crate::renderer::draw::SharedAllocator;
-
-pub struct Framebuffers {
-    pub framebuffers: Vec<vk::Framebuffer>,
-    pub swapchain_image_views: Vec<vk::ImageView>,
-
+pub struct GBufferResources {
     pub color_images: Vec<Image>,
     pub normal_images: Vec<Image>,
     pub position_images: Vec<Image>,
 }
+
 pub struct Image {
     pub image: vk::Image,
     pub view: vk::ImageView,

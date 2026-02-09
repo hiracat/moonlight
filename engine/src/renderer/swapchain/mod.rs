@@ -11,24 +11,13 @@ pub mod renderpass;
 pub(crate) struct SwapchainResources {
     pub(crate) swapchain: vk::SwapchainKHR,
     pub(crate) swapchain_image_format: vk::SurfaceFormatKHR,
-
-    // wait before presenting
-    pub render_finished: Vec<vk::Semaphore>,
-
-    pub(crate) framebuffers: Framebuffers,
-    // one per swapchain image
-    pub(crate) per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
-
     surface_loader: ash::khr::surface::Instance,
     swapchain_loader: ash::khr::swapchain::Device,
-    device: ash::Device,
-    physical_device: vk::PhysicalDevice,
-    render_pass: vk::RenderPass,
     surface: vk::SurfaceKHR,
-    per_swapchain_image_set_layout: vk::DescriptorSetLayout,
-    queue_family_indices: Vec<QueueFamilyIndex>,
-    allocator: SharedAllocator,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
 }
+
 impl SwapchainResources {
     pub(crate) fn recreate(&mut self, size: PhysicalSize<u32>) {
         *self = SwapchainResources::create(

@@ -10,8 +10,11 @@ use crate::renderer::pipelines::{
     GraphicsPipelineDesc, InputAssemblyState, MultisampleState, PipelineBundle, PipelineKey,
     RasterState, VertexInputState,
 };
-use crate::renderer::resources::{GpuTexture, Mesh, ResourceManager};
-use crate::renderer::swapchain::renderpass::create_renderpass;
+use crate::renderer::{
+    resources::{GpuTexture, Mesh, ResourceManager},
+    swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass},
+};
+use crate::vulkan::{QueueFamilyIndex, SharedAllocator};
 use crate::{components::Camera, renderer::swapchain::SwapchainResources};
 use ash::vk::{
     self, DynamicState, PipelineColorBlendAttachmentState, VertexInputAttributeDescription,
@@ -44,10 +47,7 @@ pub const GEOMETRY_SUBPASS: u32 = 0;
 pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
-pub type SharedAllocator = Arc<Mutex<Allocator>>;
-pub type QueueFamilyIndex = u32;
-
-pub struct UI {
+pub struct UIRenderer {
     pub ui_ctx: egui::Context,
     pub winit_egui_state: egui_winit::State,
     pub full_output: Option<egui::FullOutput>,
@@ -73,44 +73,23 @@ pub struct UI {
     one_time_submit_pool: vk::CommandPool,
 }
 
-pub struct Renderer {
+pub struct WorldRenderer {
     // indexed by pipelineHandle
-    pub ui: UI,
     pipelines: Vec<PipelineBundle>,
 
-    // needs to be kept alive, dont forget is very important
-    // anything that starts with ash:: and not vk:: impliments drop
-    _entry: ash::Entry,
-    instance: ash::Instance,
-    pub(crate) device: ash::Device,
-    pub(crate) physical_device: vk::PhysicalDevice,
-    debug_messenger: vk::DebugUtilsMessengerEXT,
-
-    pub(crate) swapchain_loader: ash::khr::swapchain::Device,
-    pub(crate) surface_loader: ash::khr::surface::Instance,
-    pub(crate) debug_utils_loader: ash::ext::debug_utils::Instance,
-
-    pub window: Arc<Window>,
-    surface: vk::SurfaceKHR,
-
-    pub resource_manager: ResourceManager,
-
-    pub framebuffer_resized: bool,
-    pub start_time: Instant,
     swapchain_image_index: u32,
     frame_counter: u64,
     current_frame: usize,
 
-    render_pass: vk::RenderPass,
-    pub(crate) queue: vk::Queue,
-    pub(crate) queue_family_index: QueueFamilyIndex,
-
-    pub(crate) swapchain: SwapchainResources,
+    pub swapchain: SwapchainResources,
     per_frame: Vec<PerFrame>,
-    pub(crate) allocator: SharedAllocator,
 
-    pub(crate) one_time_submit_pool: vk::CommandPool,
-    pub(crate) one_time_submit: vk::CommandBuffer,
+    render_pass: vk::RenderPass,
+    pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
+    per_swapchain_image_set_layout: vk::DescriptorSetLayout,
+    pub render_finished: Vec<vk::Semaphore>,
+    pub framebuffers: Vec<vk::Framebuffer>,
+    gbuffers: GBufferResources,
 }
 
 #[derive(Debug)]
@@ -214,19 +193,13 @@ impl PerFrame {
     }
 }
 
-impl Drop for Renderer {
+impl Drop for WorldRenderer {
     fn drop(&mut self) {
-        unsafe {
-            if VALIDATION_ENABLE {
-                self.debug_utils_loader
-                    .destroy_debug_utils_messenger(self.debug_messenger, None);
-            }
-            self.instance.destroy_instance(None);
-        }
+        todo!();
     }
 }
 
-impl Renderer {
+impl WorldRenderer {
     #[allow(clippy::too_many_lines)]
     pub fn draw2(&mut self, world: &mut World) {
         self.window.request_redraw();
@@ -718,7 +691,7 @@ impl Renderer {
             per_frame.push(PerFrame::create(&device, queue_family_index));
         }
 
-        let ui = UI::init(
+        let ui = UIRenderer::init(
             &device,
             window.clone(),
             one_time_command_pool,
@@ -734,7 +707,7 @@ impl Renderer {
             },
         );
 
-        Renderer {
+        WorldRenderer {
             ui,
             pipelines,
             one_time_submit,
@@ -772,7 +745,7 @@ struct UIDrawJob {
     scissor: vk::Rect2D,
 }
 
-impl UI {
+impl UIRenderer {
     fn draw_meshes(
         &mut self,
         geometry: &[ClippedPrimitive],
@@ -1010,7 +983,7 @@ impl UI {
         swapchain_image_views: &[vk::ImageView],
         swapchain_format: vk::Format,
         swapchain_image_extent: vk::Extent2D,
-    ) -> UI {
+    ) -> UIRenderer {
         let ui_ctx = egui::Context::default();
         let winit_egui_state = egui_winit::State::new(
             ui_ctx.clone(),
@@ -1116,7 +1089,7 @@ impl UI {
             swapchain_image_extent,
         );
 
-        UI {
+        UIRenderer {
             ui_ctx,
             full_output: None,
             winit_egui_state,
