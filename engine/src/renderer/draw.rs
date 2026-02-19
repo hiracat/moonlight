@@ -48,15 +48,15 @@ pub struct UIRenderer {
     pub winit_egui_state: egui_winit::State,
     pub full_output: Option<egui::FullOutput>,
 
-    renderpass: vk::RenderPass,
-    pipeline: vk::Pipeline,
+    pub renderpass: vk::RenderPass,
+    pub pipeline: vk::Pipeline,
 
     pipeline_layout: vk::PipelineLayout,
     vertex_buffer: vk::Buffer,
     index_buffer: vk::Buffer,
     vertex_memory: Allocation,
     index_memory: Allocation,
-    framebuffers: Vec<vk::Framebuffer>,
+    pub framebuffers: Vec<vk::Framebuffer>,
 
     descriptor_set_layout: vk::DescriptorSetLayout,
 
@@ -73,14 +73,13 @@ pub struct UIRenderer {
 
 pub struct WorldRenderer {
     // indexed by pipelineHandle
-    render_pass: vk::RenderPass,
-    pipelines: Vec<PipelineBundle>,
+    pub render_pass: vk::RenderPass,
+    pub pipelines: Vec<PipelineBundle>,
 
     pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
-    per_swapchain_image_set_layout: vk::DescriptorSetLayout,
-    pub render_finished: Vec<vk::Semaphore>,
+    pub per_swapchain_image_set_layout: vk::DescriptorSetLayout,
     pub framebuffers: Vec<vk::Framebuffer>,
-    gbuffers: GBufferResources,
+    pub gbuffers: GBufferResources,
 }
 
 #[derive(Debug)]
@@ -383,7 +382,6 @@ impl WorldRenderer {
             instance,
             framebuffer_resized: false,
             current_frame: 0,
-            frame_counter: 0,
             swapchain,
             render_pass,
             allocator: shared_allocator,
@@ -411,7 +409,7 @@ struct UIDrawJob {
 }
 
 impl UIRenderer {
-    fn draw_meshes(
+    pub fn draw_meshes(
         &mut self,
         geometry: &[ClippedPrimitive],
         device: &ash::Device,
@@ -526,13 +524,17 @@ impl UIRenderer {
             }
         }
     }
-    fn cleanup_old_textures(&mut self, textures_delta: egui::TexturesDelta) {
+    pub fn cleanup_old_textures(&mut self, textures_delta: egui::TexturesDelta) {
         for image in textures_delta.free {
             self.textures.remove(&image);
         }
     }
 
-    fn handle_new_textures(&mut self, device: &ash::Device, textures_delta: &egui::TexturesDelta) {
+    pub fn handle_new_textures(
+        &mut self,
+        device: &ash::Device,
+        textures_delta: &egui::TexturesDelta,
+    ) {
         for texture in textures_delta.set.as_slice() {
             let (texture_id, image_delta) = texture;
             if image_delta.pos.is_some() {
@@ -623,7 +625,7 @@ impl UIRenderer {
         }
     }
 
-    fn recreate_framebuffers(
+    pub fn recreate_framebuffers(
         &mut self,
         device: &ash::Device,
         swapchain_image_views: &[vk::ImageView],

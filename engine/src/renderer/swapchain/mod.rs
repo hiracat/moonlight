@@ -1,25 +1,21 @@
 use ash::vk;
-use winit::dpi::PhysicalSize;
 
-use crate::{
-    renderer::swapchain::framebuffers::{create_framebuffers, Image},
-    vulkan::VulkanContext,
-};
+use crate::{renderer::swapchain::framebuffers::Image, vulkan::VulkanContext};
 pub mod framebuffers;
 pub mod renderpass;
 
 pub struct SwapchainResources {
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_image_format: vk::SurfaceFormatKHR,
-    surface_loader: ash::khr::surface::Instance,
-    swapchain_loader: ash::khr::swapchain::Device,
+    pub surface_loader: ash::khr::surface::Instance,
+    pub swapchain_loader: ash::khr::swapchain::Device,
     // the images that are managed by the swapchain, indexed by swapchain_image_index
-    swapchain_images: Vec<vk::Image>,
-    swapchain_image_views: Vec<vk::ImageView>,
+    pub swapchain_images: Vec<vk::Image>,
+    pub swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl SwapchainResources {
-    pub fn create(context: &VulkanContext) -> Self {
+    pub fn create(context: &VulkanContext, old_swapchain: Option<vk::SwapchainKHR>) -> Self {
         let surface_loader = ash::khr::surface::Instance::new(&context.entry, &context.instance);
         let swapchain_loader = ash::khr::swapchain::Device::new(&context.instance, &context.device);
         let window_size = context.window.inner_size();
@@ -39,18 +35,32 @@ impl SwapchainResources {
         } else {
             capabilities.min_image_count + 1
         };
+        let color_subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            level_count: 1,
+            layer_count: 1,
+            base_mip_level: 0,
+            base_array_layer: 0,
+        };
+        let swapchain_image_formats = unsafe {
+            surface_loader
+                .get_physical_device_surface_formats(context.physical_device, context.surface)
+                .unwrap()
+        };
+        let swapchain_image_format =
+            SwapchainResources::choose_swapchain_format(&swapchain_image_formats).unwrap();
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR {
             image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
             surface: context.surface,
             min_image_count: image_count,
             image_sharing_mode: vk::SharingMode::EXCLUSIVE,
-            image_color_space: image_format.color_space,
-            image_format: image_format.format,
+            image_color_space: swapchain_image_format.color_space,
+            image_format: swapchain_image_format.format,
             image_extent: window_size,
             present_mode: vk::PresentModeKHR::FIFO,
             pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
-            old_swapchain: vk::SwapchainKHR::null(),
+            old_swapchain: old_swapchain.unwrap_or(vk::SwapchainKHR::null()),
             composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
             clipped: vk::TRUE,
             image_array_layers: 1,
@@ -70,28 +80,14 @@ impl SwapchainResources {
                 .get_swapchain_images(swapchain)
                 .expect("Failed to get Swapchain Images.")
         };
-        let color_subresource_range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            level_count: 1,
-            layer_count: 1,
-            base_mip_level: 0,
-            base_array_layer: 0,
-        };
-        let swapchain_image_formats = unsafe {
-            surface_loader
-                .get_physical_device_surface_formats(context.physical_device, context.surface)
-                .unwrap()
-        };
-        let swapchain_image_format =
-            SwapchainResources::choose_swapchain_format(&swapchain_image_formats).unwrap();
 
-        let swapchain_image_views = Vec::new();
-        for image in swapchain_images {
+        let mut swapchain_image_views = Vec::new();
+        for image in &swapchain_images {
             let swapchain_image_view = unsafe {
                 context.device.create_image_view(
                     &vk::ImageViewCreateInfo {
                         format: swapchain_image_format.format,
-                        image: image,
+                        image: *image,
                         view_type: vk::ImageViewType::TYPE_2D,
                         subresource_range: color_subresource_range,
                         ..Default::default()
@@ -134,7 +130,7 @@ impl SwapchainResources {
     }
 }
 
-fn create_semaphores(device: &ash::Device, count: usize) -> Vec<vk::Semaphore> {
+pub fn create_semaphores(device: &ash::Device, count: usize) -> Vec<vk::Semaphore> {
     let mut semaphores = Vec::with_capacity(count);
     for _ in 0..count {
         semaphores.push(unsafe {

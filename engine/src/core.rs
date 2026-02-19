@@ -4,11 +4,12 @@ use ash::vk;
 use winit::event_loop::ActiveEventLoop;
 
 use crate::{
+    components::Camera,
     ecs::World,
     renderer::{
         draw::{UIRenderer, WorldRenderer, FRAMES_IN_FLIGHT},
         resources::ResourceManager,
-        swapchain::SwapchainResources,
+        swapchain::{create_semaphores, SwapchainResources},
     },
     vulkan::VulkanContext,
 };
@@ -27,6 +28,7 @@ struct Engine {
     resource_manager: ResourceManager,
 
     swapchain: SwapchainResources,
+    render_finished: Vec<vk::Semaphore>,
     per_frame: Vec<PerFrame>,
     swapchain_image_index: usize,
     current_frame: usize,
@@ -41,7 +43,7 @@ struct Engine {
 impl Engine {
     fn init(event_loop: &ActiveEventLoop) -> Self {
         let context = VulkanContext::init(event_loop);
-        let swapchain = SwapchainResources::create(&context);
+        let swapchain = SwapchainResources::create(&context, None);
         let world_renderer = WorldRenderer::init(&context);
         let ui_renderer = UIRenderer::init(&context);
         let resource_manager = ResourceManager::init(&context);
@@ -49,11 +51,13 @@ impl Engine {
         for _ in 0..FRAMES_IN_FLIGHT {
             per_frame.push(PerFrame::create(&context));
         }
+        let render_finished = create_semaphores(&context.device, swapchain.swapchain_images.len());
         Self {
             vulkan_context: context,
             world_renderer: world_renderer,
             ui_renderer: ui_renderer,
             swapchain: swapchain,
+            render_finished: render_finished,
             resource_manager: resource_manager,
             world: World::init(),
             prev_frame_end: Instant::now(),
@@ -65,14 +69,14 @@ impl Engine {
         }
     }
     fn draw(&mut self) {
-        let full_output = self.ui.full_output.take().unwrap();
-        self.ui
+        let full_output = self.ui_renderer.full_output.take().unwrap();
+        self.ui_renderer
             .winit_egui_state
-            .handle_platform_output(&self.window, full_output.platform_output);
-        self.ui
-            .handle_new_textures(&self.device, &full_output.textures_delta);
+            .handle_platform_output(&self.vulkan_context.window, full_output.platform_output);
+        self.ui_renderer
+            .handle_new_textures(&self.vulkan_context.device, &full_output.textures_delta);
         let geometry = self
-            .ui
+            .ui_renderer
             .ui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -84,61 +88,71 @@ impl Engine {
 
         let frame = &self.per_frame[self.current_frame];
         unsafe {
-            self.device
+            self.vulkan_context
+                .device
                 .wait_for_fences(&[frame.in_flight], true, u64::MAX)
                 .unwrap();
         };
 
-        self.frame_counter += 1;
+        self.frame_count += 1;
 
-        if self.framebuffer_resized {
+        if self.vulkan_context.framebuffer_resized {
             // Use the new dimensions of the window.
-            self.swapchain.recreate(window_size);
-            self.ui.recreate_framebuffers(
-                &self.device,
-                &self.swapchain.framebuffers.swapchain_image_views,
+            SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
+            self.ui_renderer.recreate_framebuffers(
+                &self.vulkan_context.device,
+                &self.swapchain.swapchain_image_views,
                 vk::Extent2D {
                     width: window_size.width,
                     height: window_size.height,
                 },
             );
-            world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
-                window_size.width as f32 / window_size.height as f32;
+            self.world
+                .get_mut_resource::<Camera>()
+                .unwrap()
+                .aspect_ratio = window_size.width as f32 / window_size.height as f32;
         }
 
         let is_suboptimal;
         (self.swapchain_image_index, is_suboptimal) = unsafe {
-            match self.swapchain_loader.acquire_next_image(
+            match self.swapchain.swapchain_loader.acquire_next_image(
                 self.swapchain.swapchain,
                 u64::MAX,
                 frame.image_available,
                 vk::Fence::null(),
             ) {
-                Ok((index, suboptimal)) => (index, suboptimal),
+                Ok((index, suboptimal)) => (index as usize, suboptimal),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.framebuffer_resized = true;
+                    self.vulkan_context.framebuffer_resized = true;
                     return;
                 }
                 Err(e) => panic!("failed to acquire next image: {e}"),
             }
         };
         if is_suboptimal {
-            self.framebuffer_resized = true;
+            self.vulkan_context.framebuffer_resized = true;
         }
 
         // NOTE: RENDERING START
 
         let frame = &self.per_frame[self.current_frame];
 
-        unsafe { self.device.reset_fences(&[frame.in_flight]).unwrap() };
         unsafe {
-            self.device
+            self.vulkan_context
+                .device
+                .reset_fences(&[frame.in_flight])
+                .unwrap()
+        };
+        unsafe {
+            self.vulkan_context
+                .device
                 .reset_descriptor_pool(frame.transient_pool, vk::DescriptorPoolResetFlags::empty())
                 .unwrap();
         }
 
         unsafe {
-            self.device
+            self.vulkan_context
+                .device
                 .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
         }
@@ -146,15 +160,16 @@ impl Engine {
         let frame = &self.per_frame[self.current_frame];
 
         unsafe {
-            self.device
+            self.vulkan_context
+                .device
                 .begin_command_buffer(
                     frame.command_buffer,
                     &vk::CommandBufferBeginInfo {
                         p_inheritance_info: &vk::CommandBufferInheritanceInfo {
                             pipeline_statistics: vk::QueryPipelineStatisticFlags::empty(),
                             subpass: 0, // ingored
-                            render_pass: self.render_pass,
-                            framebuffer: self.swapchain.framebuffers.framebuffers
+                            render_pass: self.world_renderer.render_pass,
+                            framebuffer: self.world_renderer.framebuffers
                                 [self.swapchain_image_index as usize],
                             query_flags: vk::QueryControlFlags::empty(),
                             occlusion_query_enable: vk::FALSE,
@@ -179,11 +194,11 @@ impl Engine {
         };
 
         unsafe {
-            self.device.cmd_begin_render_pass(
+            self.vulkan_context.device.cmd_begin_render_pass(
                 frame.command_buffer,
                 &vk::RenderPassBeginInfo {
-                    render_pass: self.ui.renderpass,
-                    framebuffer: self.ui.framebuffers[self.swapchain_image_index as usize],
+                    render_pass: self.ui_renderer.renderpass,
+                    framebuffer: self.ui_renderer.framebuffers[self.swapchain_image_index as usize],
                     render_area: vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
@@ -197,25 +212,29 @@ impl Engine {
                 },
                 vk::SubpassContents::INLINE,
             );
-            self.device
+            self.vulkan_context
+                .device
                 .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
-            self.device.cmd_bind_pipeline(
+            self.vulkan_context.device.cmd_bind_pipeline(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.ui.pipeline,
+                self.ui_renderer.pipeline,
             );
         }
-        self.ui.draw_meshes(
+        self.ui_renderer.draw_meshes(
             &geometry,
-            &self.device,
+            &self.vulkan_context.device,
             frame.command_buffer,
             full_output.pixels_per_point,
             window_size,
         );
 
         unsafe {
-            self.device.cmd_end_render_pass(frame.command_buffer);
-            self.device
+            self.vulkan_context
+                .device
+                .cmd_end_render_pass(frame.command_buffer);
+            self.vulkan_context
+                .device
                 .end_command_buffer(frame.command_buffer)
                 .unwrap();
         }
@@ -226,56 +245,65 @@ impl Engine {
             p_wait_dst_stage_mask: &wait_dst_access_mask,
             command_buffer_count: 1,
             p_command_buffers: &frame.command_buffer,
-            p_signal_semaphores: &self.swapchain.render_finished
-                [self.swapchain_image_index as usize],
+            p_signal_semaphores: &self.render_finished[self.swapchain_image_index as usize],
             signal_semaphore_count: 1,
             ..Default::default()
         };
 
         unsafe {
-            self.device
-                .queue_submit(self.queue, &[queue_submit_info], frame.in_flight)
+            self.vulkan_context
+                .device
+                .queue_submit(
+                    self.vulkan_context.queue,
+                    &[queue_submit_info],
+                    frame.in_flight,
+                )
                 .unwrap();
         }
 
         let mut present_results: [vk::Result; 1] = [Default::default(); 1];
         let present_info = vk::PresentInfoKHR {
-            p_wait_semaphores: &self.swapchain.render_finished[self.swapchain_image_index as usize],
+            p_wait_semaphores: &self.render_finished[self.swapchain_image_index as usize],
             wait_semaphore_count: 1,
             p_swapchains: &self.swapchain.swapchain,
             swapchain_count: 1,
-            p_image_indices: &self.swapchain_image_index,
+            p_image_indices: &(self.swapchain_image_index as u32),
             p_results: present_results.as_mut_ptr(),
             ..Default::default()
         };
 
         let result = unsafe {
-            self.swapchain_loader
-                .queue_present(self.queue, &present_info)
+            self.swapchain
+                .swapchain_loader
+                .queue_present(self.vulkan_context.queue, &present_info)
         };
         let is_resized = match result {
-            Ok(_) => self.framebuffer_resized,
+            Ok(_) => self.vulkan_context.framebuffer_resized,
             Err(vk_result) => match vk_result {
                 vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
                 _ => panic!("Failed to execute queue present."),
             },
         };
         if is_resized {
-            self.framebuffer_resized = false;
-            self.swapchain.recreate(window_size);
-            self.ui.recreate_framebuffers(
-                &self.device,
-                &self.swapchain.framebuffers.swapchain_image_views,
+            self.vulkan_context.framebuffer_resized = false;
+            self.swapchain =
+                SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
+            self.ui_renderer.recreate_framebuffers(
+                &self.vulkan_context.device,
+                &self.swapchain.swapchain_image_views,
                 vk::Extent2D {
                     width: window_size.width,
                     height: window_size.height,
                 },
             );
-            world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
-                window_size.width as f32 / window_size.height as f32;
+            self.world
+                .get_mut_resource::<Camera>()
+                .unwrap()
+                .aspect_ratio = window_size.width as f32 / window_size.height as f32;
         }
 
-        self.ui.cleanup_old_textures(full_output.textures_delta);
+        self.ui_renderer
+            .cleanup_old_textures(full_output.textures_delta);
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
     fn run(&mut self, game: Box<dyn Game>) {
@@ -296,12 +324,13 @@ pub struct PerFrame {
 impl PerFrame {
     fn create(context: &VulkanContext) -> Self {
         let command_pool_create_info = vk::CommandPoolCreateInfo {
-            queue_family_index,
+            queue_family_index: context.queue_family_index,
             flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             ..Default::default()
         };
         let command_pool = unsafe {
-            device
+            context
+                .device
                 .create_command_pool(&command_pool_create_info, None)
                 .unwrap()
         };
@@ -312,7 +341,8 @@ impl PerFrame {
             ..Default::default()
         };
         let command_buffer = unsafe {
-            device
+            context
+                .device
                 .allocate_command_buffers(&command_buffer_alloc_info)
                 .unwrap()
                 .first()
@@ -320,7 +350,7 @@ impl PerFrame {
                 .unwrap()
         };
         let in_flight = unsafe {
-            device.create_fence(
+            context.device.create_fence(
                 &vk::FenceCreateInfo {
                     flags: vk::FenceCreateFlags::SIGNALED,
                     ..Default::default()
@@ -350,7 +380,8 @@ impl PerFrame {
         ];
 
         let transient_pool = unsafe {
-            device
+            context
+                .device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo {
                         max_sets: 1000,
@@ -363,7 +394,8 @@ impl PerFrame {
                 .unwrap()
         };
         let image_available = unsafe {
-            device
+            context
+                .device
                 .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                 .unwrap()
         };
