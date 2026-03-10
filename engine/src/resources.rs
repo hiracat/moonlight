@@ -1,43 +1,32 @@
 /// This is for engine side components, anything that interacts with the engine in some special way
 /// is kept here, such as lights, meshes, textures and animations,
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 use ash::vk;
-use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
 
 use crate::{
-    renderer::draw::{
-        alloc_buffers, instant_submit_command_buffer, QueueFamilyIndex, SharedAllocator,
-        WorldRenderer,
-    },
-    vulkan::VulkanContext,
+    renderers::world::draw::{alloc_buffers, instant_submit_command_buffer},
+    vulkan::{QueueFamilyIndex, SharedAllocator, VulkanContext},
 };
 
 const MAX_SCENE_BONES: usize = 2048;
 
 pub struct ResourceManager {
-    device: ash::Device,
-    allocator: SharedAllocator,
+    context: Arc<VulkanContext>,
 
     meshes: Vec<Option<GpuMesh>>,
+
     textures: Vec<Option<GpuTexture>>,
+    default_texture: GpuTexture,
 
     pub(crate) animation_resources: AnimationResources,
 
-    default_texture: GpuTexture,
-
     // is a ring buffer for all
     pub(crate) ubo_ring_buffer: UniformRingBuffer,
-
-    //NOTE: unowned resources, just handles for reference/creating without requiring renderer to be
-    //passed in
-    queue_family_index: QueueFamilyIndex,
-    queue: vk::Queue,
-    one_time_submit_buffer: vk::CommandBuffer,
-    one_time_submit_pool: vk::CommandPool,
 }
 
 #[derive(Debug)]
@@ -608,33 +597,24 @@ impl Vertex {
 }
 
 impl ResourceManager {
-    pub(crate) fn init(context: &VulkanContext) -> Self {
-        let ring_buffer = UniformRingBuffer::create(allocator.clone(), device, 0xFFFFF);
+    pub(crate) fn init(context: Arc<VulkanContext>) -> Self {
+        let ring_buffer =
+            UniformRingBuffer::create(context.allocator.clone(), &context.device, 0xFFFFF);
         let pixel = Rgba::from([255, 255, 255, 0]);
         let mut image = DynamicImage::new_rgb8(1, 1);
         image.put_pixel(0, 0, pixel);
-        let default = GpuTexture::create_2d(
-            device,
-            queue_family_index,
-            allocator.clone(),
-            &image,
-            queue,
-            one_time_submit_buffer,
-            one_time_submit_pool,
-        );
+        let default = GpuTexture::create_2d(&context, &image);
 
         ResourceManager {
+            context: context.clone(),
             ubo_ring_buffer: ring_buffer,
             default_texture: default,
-            device: device.clone(),
-            allocator: allocator.clone(),
             meshes: Vec::new(),
             textures: Vec::new(),
-            animation_resources: AnimationResources::create(device, allocator),
-            one_time_submit_buffer,
-            queue,
-            queue_family_index,
-            one_time_submit_pool,
+            animation_resources: AnimationResources::create(
+                &context.device,
+                context.allocator.clone(),
+            ),
         }
     }
     pub fn load_animations(
@@ -781,15 +761,8 @@ impl ResourceManager {
             .unwrap()
             .decode()
             .unwrap();
-        self.textures.push(Some(GpuTexture::create_2d(
-            &self.device,
-            self.queue_family_index,
-            self.allocator.clone(),
-            &image,
-            self.queue,
-            self.one_time_submit_buffer,
-            self.one_time_submit_pool,
-        )));
+        self.textures
+            .push(Some(GpuTexture::create_2d(&self.context, &image)));
         Texture {
             id: self.textures.len() - 1,
             path: Some(path),
@@ -803,13 +776,8 @@ impl ResourceManager {
                 .unwrap()
         });
         self.textures.push(Some(GpuTexture::create_cubemap(
-            &self.device,
-            self.queue_family_index,
-            self.allocator.clone(),
+            &self.context,
             images.into(),
-            self.queue,
-            self.one_time_submit_buffer,
-            self.one_time_submit_pool,
         )));
         Texture {
             id: self.textures.len() - 1,
@@ -840,8 +808,8 @@ impl ResourceManager {
             gpu_mesh = Self::load_animated_mesh(
                 primative,
                 &buffers,
-                self.allocator.clone(),
-                &self.device,
+                self.context.allocator.clone(),
+                &self.context.device,
                 &gltf_joints_to_engine,
                 offset,
             );
@@ -853,8 +821,12 @@ impl ResourceManager {
             });
             is_animated = true;
         } else {
-            gpu_mesh =
-                Self::load_static_mesh(primative, &buffers, self.allocator.clone(), &self.device);
+            gpu_mesh = Self::load_static_mesh(
+                primative,
+                &buffers,
+                self.context.allocator.clone(),
+                &self.context.device,
+            );
             animated = None;
             is_animated = false;
         }
@@ -1029,7 +1001,8 @@ impl ResourceManager {
             ..Default::default()
         };
         unsafe {
-            self.device
+            self.context
+                .device
                 .allocate_descriptor_sets(&allocate_info)
                 .unwrap()[0]
         }
@@ -1185,15 +1158,7 @@ impl GpuTexture {
         unsafe { device.destroy_buffer(staging_buffer, None) };
         allocator.lock().unwrap().free(staging_mem).unwrap();
     }
-    pub fn create_cubemap(
-        device: &ash::Device,
-        queue_family_index: QueueFamilyIndex,
-        allocator: SharedAllocator,
-        mut images: [DynamicImage; 6],
-        queue: vk::Queue,
-        one_time_submit_buffer: vk::CommandBuffer,
-        one_time_submit_pool: vk::CommandPool,
-    ) -> Self {
+    pub fn create_cubemap(vulkan_context: &VulkanContext, mut images: [DynamicImage; 6]) -> Self {
         let image_bytes: Vec<_> = images
             .iter_mut()
             .map(|x| x.to_rgba8().into_raw())
@@ -1201,7 +1166,7 @@ impl GpuTexture {
             .collect();
 
         let create_info = vk::BufferCreateInfo {
-            p_queue_family_indices: &queue_family_index,
+            p_queue_family_indices: &vulkan_context.queue_family_index,
             queue_family_index_count: 1,
             // 4 bits per pixel * 6 images
             size: (images[0].width() * images[0].height() * 4 * 6) as u64,
@@ -1210,9 +1175,18 @@ impl GpuTexture {
             flags: vk::BufferCreateFlags::empty(),
             ..Default::default()
         };
-        let staging_buffer = unsafe { device.create_buffer(&create_info, None).unwrap() };
+        let staging_buffer = unsafe {
+            vulkan_context
+                .device
+                .create_buffer(&create_info, None)
+                .unwrap()
+        };
 
-        let requirements = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
+        let requirements = unsafe {
+            vulkan_context
+                .device
+                .get_buffer_memory_requirements(staging_buffer)
+        };
 
         let staging_mem_desc = AllocationCreateDesc {
             name: "image staging buffer",
@@ -1221,14 +1195,16 @@ impl GpuTexture {
             linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
-        let mut staging_mem = allocator
+        let mut staging_mem = vulkan_context
+            .allocator
             .lock()
             .unwrap()
             .allocate(&staging_mem_desc)
             .unwrap();
 
         unsafe {
-            device
+            vulkan_context
+                .device
                 .bind_buffer_memory(staging_buffer, staging_mem.memory(), staging_mem.offset())
                 .unwrap()
         }
@@ -1236,7 +1212,7 @@ impl GpuTexture {
         let image_format = vk::Format::R8G8B8A8_SRGB;
 
         let create_info = vk::ImageCreateInfo {
-            p_queue_family_indices: &queue_family_index,
+            p_queue_family_indices: &vulkan_context.queue_family_index,
             queue_family_index_count: 1,
             usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -1255,9 +1231,18 @@ impl GpuTexture {
             initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()
         };
-        let final_image = unsafe { device.create_image(&create_info, None).unwrap() };
+        let final_image = unsafe {
+            vulkan_context
+                .device
+                .create_image(&create_info, None)
+                .unwrap()
+        };
 
-        let requirements = unsafe { device.get_image_memory_requirements(final_image) };
+        let requirements = unsafe {
+            vulkan_context
+                .device
+                .get_image_memory_requirements(final_image)
+        };
 
         let final_image_mem_desc = AllocationCreateDesc {
             name: "image memory",
@@ -1266,14 +1251,16 @@ impl GpuTexture {
             linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
-        let image_mem = allocator
+        let image_mem = vulkan_context
+            .allocator
             .lock()
             .unwrap()
             .allocate(&final_image_mem_desc)
             .unwrap();
 
         unsafe {
-            device
+            vulkan_context
+                .device
                 .bind_image_memory(final_image, image_mem.memory(), image_mem.offset())
                 .unwrap()
         }
@@ -1292,10 +1279,10 @@ impl GpuTexture {
             layer_count: 6,
         };
         instant_submit_command_buffer(
-            &device,
-            one_time_submit_buffer,
-            one_time_submit_pool,
-            queue,
+            &vulkan_context.device,
+            vulkan_context.one_time_submit_buffer,
+            vulkan_context.one_time_submit_pool,
+            vulkan_context.queue,
             |command_buffer| {
                 let to_writable = vk::ImageMemoryBarrier {
                     old_layout: vk::ImageLayout::UNDEFINED,
@@ -1310,7 +1297,7 @@ impl GpuTexture {
                 };
 
                 unsafe {
-                    device.cmd_pipeline_barrier(
+                    vulkan_context.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
                         vk::PipelineStageFlags::TRANSFER,
@@ -1340,7 +1327,7 @@ impl GpuTexture {
                 }];
 
                 unsafe {
-                    device.cmd_copy_buffer_to_image(
+                    vulkan_context.device.cmd_copy_buffer_to_image(
                         command_buffer,
                         staging_buffer,
                         final_image,
@@ -1361,7 +1348,7 @@ impl GpuTexture {
                 };
                 //barrier the image into the shader readable layout
                 unsafe {
-                    device.cmd_pipeline_barrier(
+                    vulkan_context.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -1374,8 +1361,13 @@ impl GpuTexture {
             },
         );
 
-        unsafe { device.destroy_buffer(staging_buffer, None) };
-        allocator.lock().unwrap().free(staging_mem).unwrap();
+        unsafe { vulkan_context.device.destroy_buffer(staging_buffer, None) };
+        vulkan_context
+            .allocator
+            .lock()
+            .unwrap()
+            .free(staging_mem)
+            .unwrap();
 
         let sampler_create_info = vk::SamplerCreateInfo {
             flags: vk::SamplerCreateFlags::empty(),
@@ -1405,7 +1397,12 @@ impl GpuTexture {
             ..Default::default()
         };
 
-        let sampler = unsafe { device.create_sampler(&sampler_create_info, None).unwrap() };
+        let sampler = unsafe {
+            vulkan_context
+                .device
+                .create_sampler(&sampler_create_info, None)
+                .unwrap()
+        };
         let image_view_create_info = vk::ImageViewCreateInfo {
             image: final_image,
             format: image_format,
@@ -1420,7 +1417,8 @@ impl GpuTexture {
             ..Default::default()
         };
         let image_view = unsafe {
-            device
+            vulkan_context
+                .device
                 .create_image_view(&image_view_create_info, None)
                 .unwrap()
         };
@@ -1431,18 +1429,10 @@ impl GpuTexture {
             sampler,
         }
     }
-    pub fn create_2d(
-        device: &ash::Device,
-        queue_family_index: QueueFamilyIndex,
-        allocator: SharedAllocator,
-        image: &DynamicImage,
-        queue: vk::Queue,
-        one_time_submit_buffer: vk::CommandBuffer,
-        one_time_submit_pool: vk::CommandPool,
-    ) -> Self {
+    pub fn create_2d(vulkan_context: &VulkanContext, image: &DynamicImage) -> Self {
         let image = image.to_rgba8();
         let create_info = vk::BufferCreateInfo {
-            p_queue_family_indices: &queue_family_index,
+            p_queue_family_indices: &vulkan_context.queue_family_index,
             queue_family_index_count: 1,
             size: (image.width() * image.height() * 4) as u64,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
@@ -1450,9 +1440,18 @@ impl GpuTexture {
             flags: vk::BufferCreateFlags::empty(),
             ..Default::default()
         };
-        let staging_buffer = unsafe { device.create_buffer(&create_info, None).unwrap() };
+        let staging_buffer = unsafe {
+            vulkan_context
+                .device
+                .create_buffer(&create_info, None)
+                .unwrap()
+        };
 
-        let requirements = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
+        let requirements = unsafe {
+            vulkan_context
+                .device
+                .get_buffer_memory_requirements(staging_buffer)
+        };
 
         let staging_mem_desc = AllocationCreateDesc {
             name: "image staging buffer",
@@ -1461,14 +1460,16 @@ impl GpuTexture {
             linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
-        let mut staging_mem = allocator
+        let mut staging_mem = vulkan_context
+            .allocator
             .lock()
             .unwrap()
             .allocate(&staging_mem_desc)
             .unwrap();
 
         unsafe {
-            device
+            vulkan_context
+                .device
                 .bind_buffer_memory(staging_buffer, staging_mem.memory(), staging_mem.offset())
                 .unwrap()
         }
@@ -1476,7 +1477,7 @@ impl GpuTexture {
         let image_format = vk::Format::R8G8B8A8_SRGB;
 
         let create_info = vk::ImageCreateInfo {
-            p_queue_family_indices: &queue_family_index,
+            p_queue_family_indices: &vulkan_context.queue_family_index,
             queue_family_index_count: 1,
             usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -1495,9 +1496,18 @@ impl GpuTexture {
             initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()
         };
-        let final_image = unsafe { device.create_image(&create_info, None).unwrap() };
+        let final_image = unsafe {
+            vulkan_context
+                .device
+                .create_image(&create_info, None)
+                .unwrap()
+        };
 
-        let requirements = unsafe { device.get_image_memory_requirements(final_image) };
+        let requirements = unsafe {
+            vulkan_context
+                .device
+                .get_image_memory_requirements(final_image)
+        };
 
         let final_image_mem_desc = AllocationCreateDesc {
             name: "image memory",
@@ -1506,14 +1516,16 @@ impl GpuTexture {
             linear: false,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
-        let image_mem = allocator
+        let image_mem = vulkan_context
+            .allocator
             .lock()
             .unwrap()
             .allocate(&final_image_mem_desc)
             .unwrap();
 
         unsafe {
-            device
+            vulkan_context
+                .device
                 .bind_image_memory(final_image, image_mem.memory(), image_mem.offset())
                 .unwrap()
         }
@@ -1532,10 +1544,10 @@ impl GpuTexture {
             layer_count: 1,
         };
         instant_submit_command_buffer(
-            &device,
-            one_time_submit_buffer,
-            one_time_submit_pool,
-            queue,
+            &vulkan_context.device,
+            vulkan_context.one_time_submit_buffer,
+            vulkan_context.one_time_submit_pool,
+            vulkan_context.queue,
             |command_buffer| {
                 let to_writable = vk::ImageMemoryBarrier {
                     old_layout: vk::ImageLayout::UNDEFINED,
@@ -1550,7 +1562,7 @@ impl GpuTexture {
                 };
 
                 unsafe {
-                    device.cmd_pipeline_barrier(
+                    vulkan_context.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
                         vk::PipelineStageFlags::TRANSFER,
@@ -1580,7 +1592,7 @@ impl GpuTexture {
                 }];
 
                 unsafe {
-                    device.cmd_copy_buffer_to_image(
+                    vulkan_context.device.cmd_copy_buffer_to_image(
                         command_buffer,
                         staging_buffer,
                         final_image,
@@ -1601,7 +1613,7 @@ impl GpuTexture {
                 };
                 //barrier the image into the shader readable layout
                 unsafe {
-                    device.cmd_pipeline_barrier(
+                    vulkan_context.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -1614,8 +1626,13 @@ impl GpuTexture {
             },
         );
 
-        unsafe { device.destroy_buffer(staging_buffer, None) };
-        allocator.lock().unwrap().free(staging_mem).unwrap();
+        unsafe { vulkan_context.device.destroy_buffer(staging_buffer, None) };
+        vulkan_context
+            .allocator
+            .lock()
+            .unwrap()
+            .free(staging_mem)
+            .unwrap();
 
         let sampler_create_info = vk::SamplerCreateInfo {
             flags: vk::SamplerCreateFlags::empty(),
@@ -1645,7 +1662,12 @@ impl GpuTexture {
             ..Default::default()
         };
 
-        let sampler = unsafe { device.create_sampler(&sampler_create_info, None).unwrap() };
+        let sampler = unsafe {
+            vulkan_context
+                .device
+                .create_sampler(&sampler_create_info, None)
+                .unwrap()
+        };
         let image_view_create_info = vk::ImageViewCreateInfo {
             image: final_image,
             format: image_format,
@@ -1660,7 +1682,8 @@ impl GpuTexture {
             ..Default::default()
         };
         let image_view = unsafe {
-            device
+            vulkan_context
+                .device
                 .create_image_view(&image_view_create_info, None)
                 .unwrap()
         };
@@ -1675,15 +1698,15 @@ impl GpuTexture {
 
 impl GpuMesh {
     pub fn create<V: IsVertex + Pod>(
-        renderer: &mut WorldRenderer,
+        resource_manager: &mut ResourceManager,
         vertices: &[V],
         indices: &[u32],
     ) -> Self {
         let (mut vertex_buffers, mut vertex_allocs) = alloc_buffers(
-            renderer.allocator.clone(),
+            resource_manager.context.allocator.clone(),
             1,
             vertices.len() as u64 * size_of::<Vertex>() as u64,
-            &renderer.device,
+            &resource_manager.context.device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
@@ -1693,10 +1716,10 @@ impl GpuMesh {
         );
 
         let (mut index_buffers, mut index_allocs) = alloc_buffers(
-            renderer.allocator.clone(),
+            resource_manager.context.allocator.clone(),
             1,
             indices.len() as u64 * 4,
-            &renderer.device,
+            &resource_manager.context.device,
             vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::INDEX_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,

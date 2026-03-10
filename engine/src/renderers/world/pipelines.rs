@@ -7,19 +7,19 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
+use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 use ultraviolet::Slerp;
 
 use crate::ecs::{Not, Opt, OptM, ReqM, World};
-use crate::renderer::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Vertex};
-use crate::renderer::resources::{Material, Mesh, ResourceManager, Skybox};
+use crate::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Vertex};
+use crate::resources::{Material, Mesh, ResourceManager, Skybox};
 use crate::ubo::{
     AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, ModelUBO, PointLightUBO,
 };
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     ecs::Req,
-    renderer::draw::{DrawJob, GEOMETRY_SUBPASS, LIGHTING_SUBPASS},
+    renderers::world::draw::{DrawJob, GEOMETRY_SUBPASS, LIGHTING_SUBPASS},
 };
 pub struct PipelineBundle {
     pub pipeline: vk::Pipeline,
@@ -612,7 +612,7 @@ pub fn create_builtin_graphics_pipelines(
              descriptor_pool,
              world,
              descriptor_set_layouts,
-             swapchain_descriptor_set| {
+             _swapchain_descriptor_set| {
                 let mut builder = DescriptorWriteBuilder::new();
                 let cubemap = *world.get_resource::<Skybox>().unwrap();
                 let camera = world.get_resource::<Camera>().unwrap();

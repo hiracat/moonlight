@@ -1,6 +1,6 @@
 use ash::vk;
 
-use crate::{renderer::swapchain::framebuffers::Image, vulkan::VulkanContext};
+use crate::{renderers::world::swapchain::framebuffers::Image, vulkan::VulkanContext};
 pub mod framebuffers;
 pub mod renderpass;
 
@@ -12,6 +12,8 @@ pub struct SwapchainResources {
     // the images that are managed by the swapchain, indexed by swapchain_image_index
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
+
+    pub image_size: vk::Extent2D,
 }
 
 impl SwapchainResources {
@@ -100,6 +102,7 @@ impl SwapchainResources {
         }
 
         Self {
+            image_size: window_size,
             swapchain,
             swapchain_image_format: swapchain_image_format,
             surface_loader: surface_loader,

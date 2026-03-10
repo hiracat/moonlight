@@ -35,7 +35,9 @@ pub struct VulkanContext {
 
     pub window: Arc<Window>,
     pub surface: vk::SurfaceKHR,
-    pub framebuffer_resized: bool,
+
+    pub one_time_submit_buffer: vk::CommandBuffer,
+    pub one_time_submit_pool: vk::CommandPool,
 }
 
 impl VulkanContext {
@@ -88,8 +90,28 @@ impl VulkanContext {
             allocation_sizes: Default::default(),
         })
         .unwrap();
+
+        let pool_create_info = vk::CommandPoolCreateInfo {
+            flags: vk::CommandPoolCreateFlags::empty(),
+            queue_family_index,
+            ..Default::default()
+        };
+        let one_time_command_pool =
+            unsafe { device.create_command_pool(&pool_create_info, None).unwrap() };
+
+        let alloc_info = vk::CommandBufferAllocateInfo {
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_pool: one_time_command_pool,
+            command_buffer_count: 1,
+            ..Default::default()
+        };
+        let one_time_submit_buffer =
+            unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] };
+
         Self {
-            _entry: entry,
+            one_time_submit_pool: one_time_command_pool,
+            one_time_submit_buffer,
+            entry: entry,
             instance: instance,
             device: device,
             physical_device: physical_device,
@@ -100,7 +122,6 @@ impl VulkanContext {
             debug_utils_loader: debug_utils_loader,
             window: window,
             surface: surface,
-            framebuffer_resized: false,
         }
     }
 }

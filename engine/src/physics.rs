@@ -77,7 +77,6 @@ impl Collider {
                     Some(Vec3::new(0.0, 0.0, z))
                 }
             }
-            _ => unimplemented!(),
         }
     }
 }
@@ -140,7 +139,6 @@ impl Ray {
                 let t_hit = if t_enter < 0.0 { t_exit } else { t_enter };
                 Some(t_hit)
             }
-            _ => unimplemented!(),
         }
     }
 }

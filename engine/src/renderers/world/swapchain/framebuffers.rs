@@ -1,6 +1,8 @@
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 
+use crate::vulkan::SharedAllocator;
+
 pub struct GBufferResources {
     pub color_images: Vec<Image>,
     pub normal_images: Vec<Image>,
@@ -13,7 +15,7 @@ pub struct Image {
     pub memory: Allocation,
 }
 
-pub fn create_framebuffers(
+pub fn create_gbuffer_resources(
     device: &ash::Device,
     swapchain_images: &[vk::Image],
     render_pass: vk::RenderPass,
@@ -23,7 +25,7 @@ pub fn create_framebuffers(
     // HACK: the vec of allocations is to keep the allocatiosn from dropping and freeing underlying
     // memory, this should be replaced with some kind of wrapper or just one allocation per
     // framebuffer
-) -> Framebuffers {
+) -> GBufferResources {
     let extent = vk::Extent3D {
         width: swapchain_image_extent.width,
         height: swapchain_image_extent.height,
@@ -139,12 +141,10 @@ pub fn create_framebuffers(
         normals.push(normal);
         positions.push(position);
     }
-    Framebuffers {
-        framebuffers,
-        swapchain_image_views,
-        position_images: positions,
-        normal_images: normals,
+    GBufferResources {
         color_images: colors,
+        normal_images: normals,
+        position_images: positions,
     }
 }
 

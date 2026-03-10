@@ -1,57 +1,79 @@
-use std::time::Instant;
+use std::{
+    collections::HashSet,
+    f32::consts::PI,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ash::vk;
-use winit::event_loop::ActiveEventLoop;
+use ultraviolet::{Rotor3, Slerp, Vec2, Vec3};
+use winit::{
+    application::ApplicationHandler,
+    event::{DeviceEvent, ElementState, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::WindowId,
+};
 
 use crate::{
-    components::Camera,
-    ecs::World,
-    renderer::{
-        draw::{UIRenderer, WorldRenderer, FRAMES_IN_FLIGHT},
-        resources::ResourceManager,
-        swapchain::{create_semaphores, SwapchainResources},
+    components::{Camera, Transform},
+    ecs::{OptM, ReqM, World},
+    physics::{Collider, RigidBody},
+    renderers::{
+        ui::UIRenderer,
+        world::{
+            draw::{WorldRenderer, FRAMES_IN_FLIGHT},
+            swapchain::{create_semaphores, SwapchainResources},
+        },
     },
+    resources::ResourceManager,
     vulkan::VulkanContext,
 };
 
-trait Game {
-    fn on_start(&mut self, engine: &mut Engine);
-    fn on_update(&mut self, engine: &mut Engine, delta_time: f32);
-    fn on_close(&mut self, engine: &mut Engine);
+pub trait Game {
+    fn on_start(&mut self, world: &mut World, engine: &mut Engine);
+    fn on_update(&mut self, world: &mut World, engine: &mut Engine, delta_time: f32);
+    fn on_close(&mut self, world: &mut World, engine: &mut Engine);
+    fn on_ui(&mut self, world: &mut World, context: &egui::Context);
 }
 
-struct Engine {
-    vulkan_context: VulkanContext,
+pub struct Engine {
+    vulkan_context: Arc<VulkanContext>,
     world_renderer: WorldRenderer,
     ui_renderer: UIRenderer,
-
-    resource_manager: ResourceManager,
 
     swapchain: SwapchainResources,
     render_finished: Vec<vk::Semaphore>,
     per_frame: Vec<PerFrame>,
     swapchain_image_index: usize,
     current_frame: usize,
+    framebuffer_resized: bool,
 
-    world: World,
+    pub resource_manager: ResourceManager,
+    pub world: World,
 
-    prev_frame_end: Instant,
-    delta_time: f32,
-    frame_count: u64,
+    pub prev_frame_end: Instant,
+    pub delta_time: f32,
+    pub frame_count: u64,
+    pub window_size: (u32, u32),
 }
 
 impl Engine {
     fn init(event_loop: &ActiveEventLoop) -> Self {
-        let context = VulkanContext::init(event_loop);
+        let context = Arc::new(VulkanContext::init(event_loop));
+
         let swapchain = SwapchainResources::create(&context, None);
-        let world_renderer = WorldRenderer::init(&context);
-        let ui_renderer = UIRenderer::init(&context);
-        let resource_manager = ResourceManager::init(&context);
+        let world_renderer = WorldRenderer::init(&context, &swapchain);
+        let ui_renderer = UIRenderer::init(&context, &swapchain);
+        let resource_manager = ResourceManager::init(context.clone());
         let mut per_frame = Vec::new();
         for _ in 0..FRAMES_IN_FLIGHT {
             per_frame.push(PerFrame::create(&context));
         }
         let render_finished = create_semaphores(&context.device, swapchain.swapchain_images.len());
+        let size = context.window.inner_size();
+        let window_size = (size.width, size.height);
+
         Self {
             vulkan_context: context,
             world_renderer: world_renderer,
@@ -66,6 +88,8 @@ impl Engine {
             per_frame: per_frame,
             frame_count: 0,
             swapchain_image_index: 0,
+            framebuffer_resized: false,
+            window_size: window_size,
         }
     }
     fn draw(&mut self) {
@@ -74,7 +98,7 @@ impl Engine {
             .winit_egui_state
             .handle_platform_output(&self.vulkan_context.window, full_output.platform_output);
         self.ui_renderer
-            .handle_new_textures(&self.vulkan_context.device, &full_output.textures_delta);
+            .handle_new_textures(&self.vulkan_context, &full_output.textures_delta);
         let geometry = self
             .ui_renderer
             .ui_ctx
@@ -96,7 +120,7 @@ impl Engine {
 
         self.frame_count += 1;
 
-        if self.vulkan_context.framebuffer_resized {
+        if self.framebuffer_resized {
             // Use the new dimensions of the window.
             SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
             self.ui_renderer.recreate_framebuffers(
@@ -123,14 +147,14 @@ impl Engine {
             ) {
                 Ok((index, suboptimal)) => (index as usize, suboptimal),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.vulkan_context.framebuffer_resized = true;
+                    self.framebuffer_resized = true;
                     return;
                 }
                 Err(e) => panic!("failed to acquire next image: {e}"),
             }
         };
         if is_suboptimal {
-            self.vulkan_context.framebuffer_resized = true;
+            self.framebuffer_resized = true;
         }
 
         // NOTE: RENDERING START
@@ -278,14 +302,14 @@ impl Engine {
                 .queue_present(self.vulkan_context.queue, &present_info)
         };
         let is_resized = match result {
-            Ok(_) => self.vulkan_context.framebuffer_resized,
+            Ok(_) => self.framebuffer_resized,
             Err(vk_result) => match vk_result {
                 vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
                 _ => panic!("Failed to execute queue present."),
             },
         };
         if is_resized {
-            self.vulkan_context.framebuffer_resized = false;
+            self.framebuffer_resized = false;
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
             self.ui_renderer.recreate_framebuffers(
@@ -306,19 +330,19 @@ impl Engine {
             .cleanup_old_textures(full_output.textures_delta);
         self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
     }
-    fn run(&mut self, game: Box<dyn Game>) {
+    fn run(&mut self, _game: Box<dyn Game>) {
         todo!()
     }
 }
 pub struct PerFrame {
     pub command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    image_available: vk::Semaphore,
+    pub command_buffer: vk::CommandBuffer,
+    pub image_available: vk::Semaphore,
     // wait for the frame that was FRAMES_IN_FLIGHT frames ago, but has the same current_frame
     // since modulo
-    in_flight: vk::Fence,
+    pub in_flight: vk::Fence,
 
-    transient_pool: vk::DescriptorPool,
+    pub transient_pool: vk::DescriptorPool,
 }
 
 impl PerFrame {
@@ -405,6 +429,190 @@ impl PerFrame {
             in_flight,
             transient_pool,
             image_available,
+        }
+    }
+}
+
+type Keyboard = HashSet<KeyCode>;
+
+#[derive(Debug)]
+struct Controllable;
+#[derive(Debug, Default, Clone, Copy)]
+struct MouseState {
+    x: f32,
+    y: f32,
+    locked: bool,
+}
+
+pub struct App<T: Game> {
+    engine: Option<Engine>,
+    game: Option<T>,
+    world: World,
+}
+
+impl<T: Game> App<T> {
+    pub fn run(&mut self, game: T) {
+        let event_loop = EventLoop::new().expect("failed to init event loop");
+        event_loop.set_control_flow(ControlFlow::Poll);
+        self.game = Some(game);
+        event_loop.run_app(self).unwrap();
+    }
+}
+
+impl<T: Game> Default for App<T> {
+    fn default() -> Self {
+        App {
+            engine: None,
+            game: None,
+            world: World::init(),
+        }
+    }
+}
+
+impl<T: Game> ApplicationHandler for App<T> {
+    #[allow(clippy::too_many_lines)]
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // ───────────────────────────────────────────────────────
+        // 1) Window & input setup
+        // ───────────────────────────────────────────────────────
+        if self.engine.is_some() {
+            return;
+        }
+
+        //HACK: magic number, i dont care right now
+
+        self.engine = Some(Engine::init(event_loop));
+
+        self.engine.as_mut().unwrap().prev_frame_end = Instant::now();
+    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let window = self.engine.as_mut().unwrap().vulkan_context.window.clone();
+
+        let response = self
+            .engine
+            .as_mut()
+            .unwrap()
+            .ui_renderer
+            .winit_egui_state
+            .on_window_event(&window, &event);
+        if response.consumed == true {
+            return;
+        }
+        if response.repaint == true {
+            self.engine
+                .as_ref()
+                .unwrap()
+                .vulkan_context
+                .window
+                .request_redraw();
+        }
+        let game = self.game.as_mut().unwrap();
+        let window = self.engine.as_ref().unwrap().vulkan_context.window.clone();
+        let engine = self.engine.as_mut().unwrap();
+        let world = &mut self.world;
+
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("The close button was pressed; stopping");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(_) => self.engine.as_mut().unwrap().framebuffer_resized = true,
+            WindowEvent::RedrawRequested => {
+                // println!("frame {} starts here", self.current_frame);
+                let raw_input = engine.ui_renderer.winit_egui_state.take_egui_input(&window);
+                let full_output = engine.ui_renderer.ui_ctx.run(raw_input, |ctx| {
+                    game.on_ui(world, ctx);
+                });
+
+                engine.ui_renderer.full_output = Some(full_output);
+                engine.draw();
+                engine.delta_time = engine.prev_frame_end.elapsed().as_secs_f32();
+                // println!("\x1b[H\x1b[J");
+                // eprintln!(
+                //     "fps for frame {} is {}",
+                //     self.current_frame,
+                //     1.0 / self.delta_time.as_secs_f32()
+                // );
+
+                engine.current_frame += 1;
+                engine.prev_frame_end = Instant::now();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let mut release_mouse = false;
+                let keyboard = self
+                    .world
+                    .get_mut_resource::<Keyboard>()
+                    .expect("keyboard should have been added");
+                if event.state == ElementState::Pressed {
+                    match event.physical_key {
+                        PhysicalKey::Code(code) => {
+                            keyboard.insert(code);
+                            if code == KeyCode::Escape {
+                                window
+                                    .set_cursor_grab(winit::window::CursorGrabMode::None)
+                                    .unwrap();
+                                window.set_cursor_visible(true);
+                                release_mouse = true;
+                            }
+                        }
+                        PhysicalKey::Unidentified(_) => {}
+                    }
+                }
+                if event.state == ElementState::Released {
+                    match event.physical_key {
+                        PhysicalKey::Code(code) => {
+                            keyboard.remove(&code);
+                        }
+                        PhysicalKey::Unidentified(_) => {}
+                    }
+                }
+                if release_mouse {
+                    self.world.get_mut_resource::<MouseState>().unwrap().locked = false;
+                }
+            }
+            WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            } => {
+                window
+                    .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                    .unwrap();
+                window.set_cursor_visible(false);
+                self.world.get_mut_resource::<MouseState>().unwrap().locked = true;
+            }
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    engine.delta_time = 0.0;
+                    engine.prev_frame_end = Instant::now();
+                }
+            }
+            _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.engine
+            .as_mut()
+            .unwrap()
+            .vulkan_context
+            .window
+            .request_redraw();
+    }
+
+    #[allow(unused_variables)]
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        if let DeviceEvent::MouseMotion { delta } = event {
+            let state = self.world.get_mut_resource::<MouseState>().unwrap();
+            if state.locked {
+                state.x = delta.0 as f32;
+                state.y = delta.1 as f32;
+            }
         }
     }
 }
