@@ -7,7 +7,7 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
+use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 use ultraviolet::Slerp;
 
 use crate::ecs::{Not, Opt, OptM, ReqM, World};
@@ -389,9 +389,6 @@ pub fn create_builtin_graphics_pipelines(
                                             translation_frames.len(),
                                             channel.timestamps.len()
                                         );
-
-                                        dbg!(&channel.timestamps);
-                                        dbg!(animation.time);
 
                                         // less than current_time
                                         let t1 = channel.timestamps[current_timestamp_idx];

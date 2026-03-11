@@ -18,6 +18,8 @@ pub struct SwapchainResources {
 
 impl SwapchainResources {
     pub fn create(context: &VulkanContext, old_swapchain: Option<vk::SwapchainKHR>) -> Self {
+        dbg!("creating swapchain");
+        dbg!(old_swapchain);
         let surface_loader = ash::khr::surface::Instance::new(&context.entry, &context.instance);
         let swapchain_loader = ash::khr::swapchain::Device::new(&context.instance, &context.device);
         let window_size = context.window.inner_size();
@@ -111,6 +113,7 @@ impl SwapchainResources {
             swapchain_image_views: swapchain_image_views,
         }
     }
+
     pub fn choose_swapchain_format(
         formats: &[vk::SurfaceFormatKHR],
     ) -> Option<vk::SurfaceFormatKHR> {

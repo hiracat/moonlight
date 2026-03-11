@@ -46,11 +46,10 @@ pub struct Engine {
     render_finished: Vec<vk::Semaphore>,
     per_frame: Vec<PerFrame>,
     swapchain_image_index: usize,
-    current_frame: usize,
+    frame_in_flight: usize,
     framebuffer_resized: bool,
 
     pub resource_manager: ResourceManager,
-    pub world: World,
 
     pub prev_frame_end: Instant,
     pub delta_time: f32,
@@ -81,10 +80,9 @@ impl Engine {
             swapchain: swapchain,
             render_finished: render_finished,
             resource_manager: resource_manager,
-            world: World::init(),
             prev_frame_end: Instant::now(),
             delta_time: 0.0,
-            current_frame: 0,
+            frame_in_flight: 0,
             per_frame: per_frame,
             frame_count: 0,
             swapchain_image_index: 0,
@@ -92,7 +90,7 @@ impl Engine {
             window_size: window_size,
         }
     }
-    fn draw(&mut self) {
+    fn draw(&mut self, world: &mut World) {
         let full_output = self.ui_renderer.full_output.take().unwrap();
         self.ui_renderer
             .winit_egui_state
@@ -104,13 +102,18 @@ impl Engine {
             .ui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        let window_size = self.vulkan_context.window.inner_size();
+        let window_size_w = self.vulkan_context.window.inner_size();
+        let window_size_v = vk::Extent2D {
+            width: window_size_w.width,
+            height: window_size_w.height,
+        };
 
-        if window_size.width == 0 || window_size.height == 0 {
+        if window_size_w.width == 0 || window_size_w.height == 0 {
             return;
         }
 
-        let frame = &self.per_frame[self.current_frame];
+        let frame = &self.per_frame[self.frame_in_flight];
+
         unsafe {
             self.vulkan_context
                 .device
@@ -122,19 +125,12 @@ impl Engine {
 
         if self.framebuffer_resized {
             // Use the new dimensions of the window.
-            SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
-            self.ui_renderer.recreate_framebuffers(
-                &self.vulkan_context.device,
-                &self.swapchain.swapchain_image_views,
-                vk::Extent2D {
-                    width: window_size.width,
-                    height: window_size.height,
-                },
-            );
-            self.world
-                .get_mut_resource::<Camera>()
-                .unwrap()
-                .aspect_ratio = window_size.width as f32 / window_size.height as f32;
+            self.swapchain =
+                SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
+            self.ui_renderer
+                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+            self.world_renderer
+                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
         }
 
         let is_suboptimal;
@@ -159,8 +155,6 @@ impl Engine {
 
         // NOTE: RENDERING START
 
-        let frame = &self.per_frame[self.current_frame];
-
         unsafe {
             self.vulkan_context
                 .device
@@ -180,8 +174,6 @@ impl Engine {
                 .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
         }
-
-        let frame = &self.per_frame[self.current_frame];
 
         unsafe {
             self.vulkan_context
@@ -211,11 +203,20 @@ impl Engine {
         let viewport = vk::Viewport {
             x: 0.0,
             y: 0.0,
-            width: window_size.width as f32,
-            height: window_size.height as f32,
+            width: window_size_v.width as f32,
+            height: window_size_v.height as f32,
             max_depth: 1.0,
             min_depth: 0.0,
         };
+        self.world_renderer.record_commands(
+            world,
+            &self.vulkan_context.device,
+            frame.command_buffer,
+            frame.transient_pool,
+            window_size_v,
+            &mut self.resource_manager,
+            self.swapchain_image_index,
+        );
 
         unsafe {
             self.vulkan_context.device.cmd_begin_render_pass(
@@ -225,10 +226,7 @@ impl Engine {
                     framebuffer: self.ui_renderer.framebuffers[self.swapchain_image_index as usize],
                     render_area: vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: vk::Extent2D {
-                            width: window_size.width,
-                            height: window_size.height,
-                        },
+                        extent: window_size_v,
                     },
                     p_clear_values: gui_clear_values.as_ptr(),
                     clear_value_count: gui_clear_values.len() as u32,
@@ -250,7 +248,7 @@ impl Engine {
             &self.vulkan_context.device,
             frame.command_buffer,
             full_output.pixels_per_point,
-            window_size,
+            window_size_w,
         );
 
         unsafe {
@@ -312,26 +310,16 @@ impl Engine {
             self.framebuffer_resized = false;
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
-            self.ui_renderer.recreate_framebuffers(
-                &self.vulkan_context.device,
-                &self.swapchain.swapchain_image_views,
-                vk::Extent2D {
-                    width: window_size.width,
-                    height: window_size.height,
-                },
-            );
-            self.world
-                .get_mut_resource::<Camera>()
-                .unwrap()
-                .aspect_ratio = window_size.width as f32 / window_size.height as f32;
+            self.ui_renderer
+                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+            self.world_renderer
+                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
         }
 
         self.ui_renderer
             .cleanup_old_textures(full_output.textures_delta);
-        self.current_frame = (self.current_frame + 1) % FRAMES_IN_FLIGHT;
-    }
-    fn run(&mut self, _game: Box<dyn Game>) {
-        todo!()
+        self.frame_in_flight = (self.frame_in_flight + 1) % FRAMES_IN_FLIGHT;
+        self.frame_count += 1;
     }
 }
 pub struct PerFrame {
@@ -482,6 +470,10 @@ impl<T: Game> ApplicationHandler for App<T> {
         //HACK: magic number, i dont care right now
 
         self.engine = Some(Engine::init(event_loop));
+        self.game
+            .as_mut()
+            .unwrap()
+            .on_start(&mut self.world, self.engine.as_mut().unwrap());
 
         self.engine.as_mut().unwrap().prev_frame_end = Instant::now();
     }
@@ -525,7 +517,7 @@ impl<T: Game> ApplicationHandler for App<T> {
                 });
 
                 engine.ui_renderer.full_output = Some(full_output);
-                engine.draw();
+                engine.draw(world);
                 engine.delta_time = engine.prev_frame_end.elapsed().as_secs_f32();
                 // println!("\x1b[H\x1b[J");
                 // eprintln!(
@@ -534,7 +526,6 @@ impl<T: Game> ApplicationHandler for App<T> {
                 //     1.0 / self.delta_time.as_secs_f32()
                 // );
 
-                engine.current_frame += 1;
                 engine.prev_frame_end = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } => {

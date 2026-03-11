@@ -20,12 +20,12 @@ pub fn create_gbuffer_resources(
     swapchain_images: &[vk::Image],
     render_pass: vk::RenderPass,
     allocator: SharedAllocator,
+    swapchain_image_views: &Vec<vk::ImageView>,
     swapchain_image_extent: vk::Extent2D,
-    swapchain_image_format: vk::Format,
     // HACK: the vec of allocations is to keep the allocatiosn from dropping and freeing underlying
     // memory, this should be replaced with some kind of wrapper or just one allocation per
     // framebuffer
-) -> GBufferResources {
+) -> (Vec<vk::Framebuffer>, GBufferResources) {
     let extent = vk::Extent3D {
         width: swapchain_image_extent.width,
         height: swapchain_image_extent.height,
@@ -37,7 +37,6 @@ pub fn create_gbuffer_resources(
     let position_format = vk::Format::R32G32B32A32_SFLOAT;
 
     let mut framebuffers = Vec::new();
-    let mut swapchain_image_views = Vec::new();
     let mut colors = Vec::new();
     let mut normals = Vec::new();
     let mut positions = Vec::new();
@@ -98,22 +97,8 @@ pub fn create_gbuffer_resources(
             color_subresource_range,
         );
 
-        let swapchain_image_view = unsafe {
-            device.create_image_view(
-                &vk::ImageViewCreateInfo {
-                    format: swapchain_image_format,
-                    image: swapchain_images[i],
-                    view_type: vk::ImageViewType::TYPE_2D,
-                    subresource_range: color_subresource_range,
-                    ..Default::default()
-                },
-                None,
-            )
-        }
-        .unwrap();
-
         let attachments = vec![
-            swapchain_image_view,
+            swapchain_image_views[i],
             color.view,
             normal.view,
             depth.view,
@@ -136,16 +121,18 @@ pub fn create_gbuffer_resources(
                 .unwrap()
         };
         framebuffers.push(framebuffer);
-        swapchain_image_views.push(swapchain_image_view);
         colors.push(color);
         normals.push(normal);
         positions.push(position);
     }
-    GBufferResources {
-        color_images: colors,
-        normal_images: normals,
-        position_images: positions,
-    }
+    (
+        framebuffers,
+        GBufferResources {
+            color_images: colors,
+            normal_images: normals,
+            position_images: positions,
+        },
+    )
 }
 
 fn create_image(

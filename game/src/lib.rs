@@ -35,6 +35,8 @@ impl moonlight::core::Game for GameImpl {
         engine: &mut moonlight::core::Engine,
         delta_time: f32,
     ) {
+        let (width, height) = engine.window_size;
+        world.get_mut_resource::<Camera>().unwrap().aspect_ratio = width as f32 / height as f32;
         let offset_x = unsafe { OFFSET_X };
         let offset_y = unsafe { OFFSET_Y };
         let offset_z = unsafe { OFFSET_Z };
@@ -119,7 +121,7 @@ impl moonlight::core::Game for GameImpl {
                 fox,
                 Transform::from(
                     Some(Vec3::new(0.0, 3.0, 0.0)), // Elevated at center
-                    Some(Rotor3::identity()),        // Slight rotation for dramatic pose
+                    Some(Rotor3::identity()),       // Slight rotation for dramatic pose
                     Some(Vec3::new(1.0, 1.0, 1.0)),
                 ),
             )
@@ -138,7 +140,7 @@ impl moonlight::core::Game for GameImpl {
         world.add(fox, RigidBody::new()).unwrap();
         let (fox_model, fox_animations) = engine
             .resource_manager
-            .load_gltf_asset("data/models/animated_fox.slb");
+            .load_gltf_asset("data/models/animated_fox.glb");
         let mut fox_animations = fox_animations.unwrap();
         fox_animations.current_playing = Some(fox_animations.animations[0].clone());
 
@@ -161,9 +163,7 @@ impl moonlight::core::Game for GameImpl {
         let albedo = engine
             .resource_manager
             .create_texture("data/models/textures/ground_soft.jpg");
-        world
-            .add(standing_block, Material::create(albedo))
-            .unwrap();
+        world.add(standing_block, Material::create(albedo)).unwrap();
 
         world
             .add(
@@ -358,24 +358,24 @@ fn physics_update(world: &mut World, delta_time: f32) {
     for i in 0..collidable.len() {
         for j in i + 1..collidable.len() {
             match Collider::penetration_vector(
-                collidable[i].1.1,
-                collidable[j].1.1,
-                collidable[i].1.0,
-                collidable[j].1.0,
+                collidable[i].1 .1,
+                collidable[j].1 .1,
+                collidable[i].1 .0,
+                collidable[j].1 .0,
             ) {
                 Some(pen_vec) => {
-                    if collidable[i].1.2.is_some() && collidable[j].1.2.is_some() {
-                        collidable[i].1.0.position += pen_vec * 0.5;
+                    if collidable[i].1 .2.is_some() && collidable[j].1 .2.is_some() {
+                        collidable[i].1 .0.position += pen_vec * 0.5;
                         collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
-                        collidable[j].1.0.position -= pen_vec * 0.5;
+                        collidable[j].1 .0.position -= pen_vec * 0.5;
                         collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
                     } else {
-                        if collidable[i].1.2.is_some() {
-                            collidable[i].1.0.position += pen_vec;
+                        if collidable[i].1 .2.is_some() {
+                            collidable[i].1 .0.position += pen_vec;
                             collision_penetrations.push((collidable[i].0, pen_vec));
                         }
-                        if collidable[j].1.2.is_some() {
-                            collidable[j].1.0.position -= pen_vec;
+                        if collidable[j].1 .2.is_some() {
+                            collidable[j].1 .0.position -= pen_vec;
                             collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                         }
                     }

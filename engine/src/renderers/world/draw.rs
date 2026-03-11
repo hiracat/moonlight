@@ -1,10 +1,10 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use super::pipelines::{PipelineBundle, PipelineKey, create_builtin_graphics_pipelines};
+use super::pipelines::{create_builtin_graphics_pipelines, PipelineBundle, PipelineKey};
 use super::swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass};
 use crate::ecs::World;
 use crate::renderers::world::swapchain::framebuffers::create_gbuffer_resources;
-use crate::renderers::world::swapchain::{SwapchainResources, create_attachment_descriptor_sets};
+use crate::renderers::world::swapchain::{create_attachment_descriptor_sets, SwapchainResources};
 use crate::resources::{Mesh, ResourceManager};
 use crate::vulkan::{SharedAllocator, VulkanContext};
 use ash::vk::{self};
@@ -22,6 +22,7 @@ pub struct WorldRenderer {
 
     pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
     pub per_swapchain_image_set_layout: vk::DescriptorSetLayout,
+    pub image_descriptor_set_pool: vk::DescriptorPool,
     pub framebuffers: Vec<vk::Framebuffer>,
     pub gbuffers: GBufferResources,
 }
@@ -183,8 +184,10 @@ impl WorldRenderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipelines[pipeline_index as usize].pipeline,
                 );
-                device.cmd_end_render_pass(command_buffer);
             }
+        }
+        unsafe {
+            device.cmd_end_render_pass(command_buffer);
         }
     }
 
@@ -222,15 +225,16 @@ impl WorldRenderer {
         );
         let pipelines = create_builtin_graphics_pipelines(&context.device, render_pass);
         //HACK: yes this is a magic number, but its defined in the shader, so not resonable to fix
-        let per_swapchain_image_set_layout = pipelines.first().unwrap().descriptor_set_layouts[2];
+        // Index 2 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
+        let per_swapchain_image_set_layout = pipelines[2].descriptor_set_layouts[0];
 
-        let framebuffers = create_gbuffer_resources(
+        let (framebuffers, gbuffer_resources) = create_gbuffer_resources(
             &context.device,
             &swapchain_resources.swapchain_images,
             render_pass,
             context.allocator.clone(),
+            &swapchain_resources.swapchain_image_views,
             swapchain_resources.image_size,
-            swapchain_resources.swapchain_image_format.format,
         );
 
         // one set per swapchain image, * 4 for color normal position and final_color * 3 for
@@ -244,7 +248,7 @@ impl WorldRenderer {
             ty: vk::DescriptorType::INPUT_ATTACHMENT,
         }];
 
-        let descriptor_pool = unsafe {
+        let input_descriptor_pool = unsafe {
             context
                 .device
                 .create_descriptor_pool(
@@ -261,12 +265,12 @@ impl WorldRenderer {
 
         let descriptor_sets = create_attachment_descriptor_sets(
             &context.device,
-            descriptor_pool,
+            input_descriptor_pool,
             per_swapchain_image_set_layout,
             &[
-                framebuffers.color_images.as_slice(),
-                framebuffers.normal_images.as_slice(),
-                framebuffers.position_images.as_slice(),
+                gbuffer_resources.color_images.as_slice(),
+                gbuffer_resources.normal_images.as_slice(),
+                gbuffer_resources.position_images.as_slice(),
             ],
             &[0, 1, 2],
         );
@@ -275,10 +279,28 @@ impl WorldRenderer {
             render_pass,
             pipelines,
             per_swapchain_image_descriptor_sets: descriptor_sets,
+            image_descriptor_set_pool: input_descriptor_pool,
             per_swapchain_image_set_layout,
-            framebuffers: todo!(),
-            gbuffers: framebuffers,
+            framebuffers: framebuffers,
+            gbuffers: gbuffer_resources,
         }
+    }
+
+    pub fn update_swapchain_resources(
+        &mut self,
+        context: &VulkanContext,
+        swapchain_resources: &SwapchainResources,
+    ) {
+        let (framebuffers, gbuffer_resources) = create_gbuffer_resources(
+            &context.device,
+            &swapchain_resources.swapchain_images,
+            self.render_pass,
+            context.allocator.clone(),
+            &swapchain_resources.swapchain_image_views,
+            swapchain_resources.image_size,
+        );
+        self.framebuffers = framebuffers;
+        self.gbuffers = gbuffer_resources;
     }
 }
 

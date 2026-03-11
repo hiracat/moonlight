@@ -40,7 +40,7 @@ pub struct Camera {
     pub far: f32,
     pub pitch: f32,
     pub yaw: f32,
-    pub(crate) aspect_ratio: f32,
+    pub aspect_ratio: f32,
 }
 
 impl Camera {

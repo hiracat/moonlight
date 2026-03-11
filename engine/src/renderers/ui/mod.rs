@@ -9,14 +9,15 @@ use ash::vk::{
     VertexInputBindingDescription,
 };
 use bytemuck::cast_slice;
-use egui::{ClippedPrimitive, TextureId, epaint};
+use egui::{epaint, ClippedPrimitive, TextureId};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use winit::dpi::PhysicalSize;
 
 use crate::renderers::world::pipelines::{
-    ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
-    RasterState, VertexInputState, create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
+    create_graphics_pipeline, create_pipeline_layout_from_vert_frag, ColorBlendState,
+    DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState, RasterState,
+    VertexInputState,
 };
 use crate::renderers::world::swapchain::SwapchainResources;
 use crate::resources::GpuTexture;
@@ -42,6 +43,7 @@ pub struct UIRenderer {
     descriptor_sets: HashMap<TextureId, vk::DescriptorSet>,
     descriptor_pool: vk::DescriptorPool,
     textures: HashMap<egui::TextureId, GpuTexture>,
+
     // not owned/handles
     queue_family_index: QueueFamilyIndex,
     allocator: SharedAllocator,
@@ -267,19 +269,19 @@ impl UIRenderer {
         }
     }
 
-    pub fn recreate_framebuffers(
+    pub fn update_swapchain_resources(
         &mut self,
-        device: &ash::Device,
-        swapchain_image_views: &[vk::ImageView],
-        swapchain_image_extent: vk::Extent2D,
+        context: &VulkanContext,
+        swapchain_resources: &SwapchainResources,
     ) {
         self.framebuffers = Self::create_ui_framebuffers(
-            &device,
-            swapchain_image_views,
+            &context.device,
+            &swapchain_resources.swapchain_image_views,
             self.renderpass,
-            swapchain_image_extent,
+            swapchain_resources.image_size,
         );
     }
+
     pub fn create_ui_framebuffers(
         device: &ash::Device,
         swapchain_image_views: &[vk::ImageView],
