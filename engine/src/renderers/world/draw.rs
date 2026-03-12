@@ -1,11 +1,11 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use super::pipelines::{create_builtin_graphics_pipelines, PipelineBundle, PipelineKey};
+use super::pipelines::{PipelineBundle, PipelineKey, create_builtin_graphics_pipelines};
 use super::swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass};
 use crate::ecs::World;
 use crate::renderers::world::swapchain::framebuffers::create_gbuffer_resources;
 use crate::renderers::world::swapchain::update_attachment_descriptor_sets;
-use crate::renderers::world::swapchain::{create_attachment_descriptor_sets, SwapchainResources};
+use crate::renderers::world::swapchain::{SwapchainResources, create_attachment_descriptor_sets};
 use crate::resources::{Mesh, ResourceManager};
 use crate::vulkan::{SharedAllocator, VulkanContext};
 use ash::vk::{self};

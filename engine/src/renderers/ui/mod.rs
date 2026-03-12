@@ -9,15 +9,14 @@ use ash::vk::{
     VertexInputBindingDescription,
 };
 use bytemuck::cast_slice;
-use egui::{epaint, ClippedPrimitive, TextureId};
+use egui::{ClippedPrimitive, TextureId, epaint};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use winit::dpi::PhysicalSize;
 
 use crate::renderers::world::pipelines::{
-    create_graphics_pipeline, create_pipeline_layout_from_vert_frag, ColorBlendState,
-    DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState, RasterState,
-    VertexInputState,
+    ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
+    RasterState, VertexInputState, create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
 };
 use crate::renderers::world::swapchain::SwapchainResources;
 use crate::resources::GpuTexture;

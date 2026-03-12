@@ -1,8 +1,8 @@
-use std::{collections::HashSet, f32::consts::PI};
+use std::f32::consts::PI;
 
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
-    core::MouseState,
+    core::{Keyboard, MouseState},
     ecs::{OptM, ReqM, World},
     physics::{Aabb, Collider, RigidBody},
     resources::{Material, Skybox},
@@ -13,11 +13,11 @@ use winit::keyboard::KeyCode;
 pub struct GameImpl {}
 
 impl moonlight::core::Game for GameImpl {
-    fn on_ui(&mut self, world: &mut moonlight::ecs::World, context: &egui::Context) {
+    fn on_ui(&mut self, _world: &mut moonlight::ecs::World, context: &egui::Context) {
         let mut offset_x = unsafe { OFFSET_X };
         let mut offset_y = unsafe { OFFSET_Y };
         let mut offset_z = unsafe { OFFSET_Z };
-        egui::CentralPanel::default().show(context, |ui| {
+        egui::CentralPanel::default().show(context, |_ui| {
             egui::Window::new("Camera Offset").show(context, |ui| {
                 ui.add(egui::Slider::new(&mut offset_x, -10.0..=10.0).text("offset x"));
                 ui.add(egui::Slider::new(&mut offset_y, -10.0..=10.0).text("offset y"));
@@ -34,10 +34,8 @@ impl moonlight::core::Game for GameImpl {
         &mut self,
         world: &mut moonlight::ecs::World,
         engine: &mut moonlight::core::Engine,
-        delta_time: f32,
+        _delta_time: f32,
     ) {
-        let (width, height) = engine.window_size;
-        world.get_mut_resource::<Camera>().unwrap().aspect_ratio = width as f32 / height as f32;
         let offset_x = unsafe { OFFSET_X };
         let offset_y = unsafe { OFFSET_Y };
         let offset_z = unsafe { OFFSET_Z };
@@ -53,8 +51,8 @@ impl moonlight::core::Game for GameImpl {
     }
     fn on_close(
         &mut self,
-        world: &mut moonlight::ecs::World,
-        engine: &mut moonlight::core::Engine,
+        _world: &mut moonlight::ecs::World,
+        _engine: &mut moonlight::core::Engine,
     ) {
     }
     fn on_start(
@@ -67,7 +65,7 @@ impl moonlight::core::Game for GameImpl {
         // ───────────────────────────────────────────────────────
         // Camera at (0, 5, -6), fov=60°, near=1.0, far=100.0
         let (width, height) = engine.window_size;
-        let camera = Camera::create(
+        let _camera = Camera::create(
             Vec3::new(0.0, 5.0, -6.0),
             60.0,
             1.0,
@@ -79,17 +77,11 @@ impl moonlight::core::Game for GameImpl {
             DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.2, 0.2, 0.2));
         let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 1.0), 0.05);
 
-        // Keyboard + mouse input resources
-        let keyboard = Keyboard::new();
-        let mouse_movement = MouseState::default();
-
         // Register resources into the world
         world.name("main world");
-        world.add_resource(camera).unwrap();
+
         world.add_resource(directional).unwrap();
         world.add_resource(ambient).unwrap();
-        world.add_resource(keyboard).unwrap();
-        world.add_resource(mouse_movement).unwrap();
 
         let skybox = engine.resource_manager.create_cubemap([
             "data/skybox/px.png",
@@ -313,14 +305,12 @@ static mut OFFSET_X: f32 = 0.0;
 static mut OFFSET_Y: f32 = 0.0;
 static mut OFFSET_Z: f32 = 0.0;
 
-type Keyboard = HashSet<KeyCode>;
-
 #[derive(Debug)]
 struct Controllable;
 
 fn physics_update(world: &mut World, delta_time: f32) {
     //NOTE: MOVEMENT INTEGRATION
-    let mut rigidbodies = world.query_mut::<(ReqM<Transform>, ReqM<RigidBody>)>();
+    let rigidbodies = world.query_mut::<(ReqM<Transform>, ReqM<RigidBody>)>();
     for (_, (transform, rigidbody)) in rigidbodies {
         //NOTE:COMPUTES THE HORIZONTAL SPEED REDUCTION
         let horizontal_velocity = Vec3::new(rigidbody.velocity.x, 0.0, rigidbody.velocity.z);
@@ -354,24 +344,24 @@ fn physics_update(world: &mut World, delta_time: f32) {
     for i in 0..collidable.len() {
         for j in i + 1..collidable.len() {
             match Collider::penetration_vector(
-                collidable[i].1 .1,
-                collidable[j].1 .1,
-                collidable[i].1 .0,
-                collidable[j].1 .0,
+                collidable[i].1.1,
+                collidable[j].1.1,
+                collidable[i].1.0,
+                collidable[j].1.0,
             ) {
                 Some(pen_vec) => {
-                    if collidable[i].1 .2.is_some() && collidable[j].1 .2.is_some() {
-                        collidable[i].1 .0.position += pen_vec * 0.5;
+                    if collidable[i].1.2.is_some() && collidable[j].1.2.is_some() {
+                        collidable[i].1.0.position += pen_vec * 0.5;
                         collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
-                        collidable[j].1 .0.position -= pen_vec * 0.5;
+                        collidable[j].1.0.position -= pen_vec * 0.5;
                         collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
                     } else {
-                        if collidable[i].1 .2.is_some() {
-                            collidable[i].1 .0.position += pen_vec;
+                        if collidable[i].1.2.is_some() {
+                            collidable[i].1.0.position += pen_vec;
                             collision_penetrations.push((collidable[i].0, pen_vec));
                         }
-                        if collidable[j].1 .2.is_some() {
-                            collidable[j].1 .0.position -= pen_vec;
+                        if collidable[j].1.2.is_some() {
+                            collidable[j].1.0.position -= pen_vec;
                             collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                         }
                     }
@@ -442,19 +432,19 @@ fn player_update(world: &mut World, delta_time: f32) {
     let mut delta_v = Vec3::zero();
     let mut jump = 0.0;
     let mut max_speed = 7.0;
-    if keyboard.contains(&KeyCode::ShiftLeft) {
+    if keyboard.is_down(KeyCode::ShiftLeft) {
         max_speed = 20.0;
     }
-    if keyboard.contains(&KeyCode::KeyW) {
+    if keyboard.is_down(KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
     }
-    if keyboard.contains(&KeyCode::KeyS) {
+    if keyboard.is_down(KeyCode::KeyS) {
         delta_v += Vec3::new(0.0, 0.0, 1.0);
     }
-    if keyboard.contains(&KeyCode::KeyD) {
+    if keyboard.is_down(KeyCode::KeyD) {
         delta_v += Vec3::new(1.0, 0.0, 0.0);
     }
-    if keyboard.contains(&KeyCode::KeyA) {
+    if keyboard.is_down(KeyCode::KeyA) {
         delta_v += Vec3::new(-1.0, 0.0, 0.0);
     }
 
@@ -464,7 +454,7 @@ fn player_update(world: &mut World, delta_time: f32) {
 
     // BUG: allows the player to jump at the apex of their jump, but the period of time which the
     // bug is viable to exploit is almost zero so not going to fix
-    if keyboard.contains(&KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
+    if keyboard.is_down(KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
         jump = 8.0
     }
     if !(delta_v == Vec3::zero()) {

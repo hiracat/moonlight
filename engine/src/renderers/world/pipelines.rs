@@ -7,7 +7,7 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
+use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 use ultraviolet::Slerp;
 
 use crate::ecs::{Not, Opt, OptM, ReqM, World};

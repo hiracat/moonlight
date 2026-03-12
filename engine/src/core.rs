@@ -1,14 +1,10 @@
-use std::{
-    collections::HashSet,
-    f32::consts::PI,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use ash::vk;
-use ultraviolet::{Rotor3, Slerp, Vec2, Vec3};
+use ultraviolet::Vec3;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{DeviceEvent, ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -16,14 +12,13 @@ use winit::{
 };
 
 use crate::{
-    components::{Camera, Transform},
-    ecs::{OptM, ReqM, World},
-    physics::{Collider, RigidBody},
+    components::Camera,
+    ecs::World,
     renderers::{
         ui::UIRenderer,
         world::{
-            draw::{WorldRenderer, FRAMES_IN_FLIGHT},
-            swapchain::{create_semaphores, SwapchainResources},
+            draw::{FRAMES_IN_FLIGHT, WorldRenderer},
+            swapchain::{SwapchainResources, create_semaphores},
         },
     },
     resources::ResourceManager,
@@ -427,15 +422,27 @@ impl PerFrame {
     }
 }
 
-type Keyboard = HashSet<KeyCode>;
-
-#[derive(Debug)]
-struct Controllable;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MouseState {
     pub x: f32,
     pub y: f32,
     pub locked: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Keyboard {
+    keys: HashSet<KeyCode>,
+}
+impl Keyboard {
+    pub fn add(&mut self, key: KeyCode) {
+        self.keys.insert(key);
+    }
+    pub fn remove(&mut self, key: KeyCode) {
+        self.keys.remove(&key);
+    }
+    pub fn is_down(&self, key: KeyCode) -> bool {
+        return self.keys.contains(&key);
+    }
 }
 
 pub struct App<T: Game> {
@@ -472,7 +479,6 @@ impl<T: Game> ApplicationHandler for App<T> {
         if self.engine.is_some() {
             return;
         }
-
         //HACK: magic number, i dont care right now
 
         self.engine = Some(Engine::init(event_loop));
@@ -480,6 +486,28 @@ impl<T: Game> ApplicationHandler for App<T> {
             .as_mut()
             .unwrap()
             .on_start(&mut self.world, self.engine.as_mut().unwrap());
+
+        let window_size = self
+            .engine
+            .as_ref()
+            .unwrap()
+            .vulkan_context
+            .window
+            .inner_size();
+
+        // Keyboard + mouse input resources
+        let keyboard = Keyboard::default();
+        let mouse_movement = MouseState::default();
+        let camera = Camera::create(
+            Vec3::new(0.0, 5.0, -6.0),
+            60.0,
+            1.0,
+            200.0,
+            window_size.height as f32 / window_size.width as f32,
+        );
+        self.world.add_resource(camera).unwrap();
+        self.world.add_resource(keyboard).unwrap();
+        self.world.add_resource(mouse_movement).unwrap();
 
         self.engine.as_mut().unwrap().prev_frame_end = Instant::now();
     }
@@ -506,7 +534,6 @@ impl<T: Game> ApplicationHandler for App<T> {
         }
         let delta_time = self.engine.as_ref().unwrap().delta_time;
         let game = self.game.as_mut().unwrap();
-        let window = self.engine.as_ref().unwrap().vulkan_context.window.clone();
         let engine = self.engine.as_mut().unwrap();
         let world = &mut self.world;
 
@@ -515,7 +542,13 @@ impl<T: Game> ApplicationHandler for App<T> {
                 println!("The close button was pressed; stopping");
                 event_loop.exit();
             }
-            WindowEvent::Resized(_) => self.engine.as_mut().unwrap().framebuffer_resized = true,
+            WindowEvent::Resized(_) => {
+                engine.framebuffer_resized = true;
+                let PhysicalSize { width, height } = window.inner_size();
+                engine.window_size = (width, height);
+                world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
+                    width as f32 / height as f32;
+            }
             WindowEvent::RedrawRequested => {
                 game.on_update(world, engine, delta_time);
                 let raw_input = engine.ui_renderer.winit_egui_state.take_egui_input(&window);
@@ -538,7 +571,7 @@ impl<T: Game> ApplicationHandler for App<T> {
                 if event.state == ElementState::Pressed {
                     match event.physical_key {
                         PhysicalKey::Code(code) => {
-                            keyboard.insert(code);
+                            keyboard.add(code);
                             if code == KeyCode::Escape {
                                 window
                                     .set_cursor_grab(winit::window::CursorGrabMode::None)
@@ -553,7 +586,7 @@ impl<T: Game> ApplicationHandler for App<T> {
                 if event.state == ElementState::Released {
                     match event.physical_key {
                         PhysicalKey::Code(code) => {
-                            keyboard.remove(&code);
+                            keyboard.remove(code);
                         }
                         PhysicalKey::Unidentified(_) => {}
                     }
@@ -562,11 +595,7 @@ impl<T: Game> ApplicationHandler for App<T> {
                     self.world.get_mut_resource::<MouseState>().unwrap().locked = false;
                 }
             }
-            WindowEvent::MouseInput {
-                device_id,
-                state,
-                button,
-            } => {
+            WindowEvent::MouseInput { .. } => {
                 window
                     .set_cursor_grab(winit::window::CursorGrabMode::Locked)
                     .unwrap();

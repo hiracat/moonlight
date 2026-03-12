@@ -4,7 +4,7 @@
 
 use std::{
     any::{Any, TypeId},
-    collections::{hash_map::HashMap, HashSet},
+    collections::{HashSet, hash_map::HashMap},
     time::Instant,
 };
 
@@ -1297,7 +1297,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Req<&str>)>();
 
                 for item in query {
-                    counter += item.1 .1[0];
+                    counter += item.1.1[0];
                     std::hint::black_box(counter);
                 }
             },
@@ -1313,7 +1313,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Opt<i64>)>();
 
                 for item in query {
-                    counter += item.1 .2.unwrap_or(&0);
+                    counter += item.1.2.unwrap_or(&0);
                     std::hint::black_box(counter);
                 }
             },
