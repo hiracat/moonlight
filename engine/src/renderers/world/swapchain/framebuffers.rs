@@ -9,6 +9,7 @@ pub struct GBufferResources {
     pub position_images: Vec<Image>,
 }
 
+#[derive(Debug)]
 pub struct Image {
     pub image: vk::Image,
     pub view: vk::ImageView,

@@ -124,6 +124,9 @@ impl Engine {
         self.frame_count += 1;
 
         if self.framebuffer_resized {
+            unsafe {
+                self.vulkan_context.device.device_wait_idle().unwrap();
+            }
             // Use the new dimensions of the window.
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
@@ -308,6 +311,9 @@ impl Engine {
         };
         if is_resized {
             self.framebuffer_resized = false;
+            unsafe {
+                self.vulkan_context.device.device_wait_idle().unwrap();
+            }
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
             self.ui_renderer
@@ -426,10 +432,10 @@ type Keyboard = HashSet<KeyCode>;
 #[derive(Debug)]
 struct Controllable;
 #[derive(Debug, Default, Clone, Copy)]
-struct MouseState {
-    x: f32,
-    y: f32,
-    locked: bool,
+pub struct MouseState {
+    pub x: f32,
+    pub y: f32,
+    pub locked: bool,
 }
 
 pub struct App<T: Game> {
@@ -498,6 +504,7 @@ impl<T: Game> ApplicationHandler for App<T> {
                 .window
                 .request_redraw();
         }
+        let delta_time = self.engine.as_ref().unwrap().delta_time;
         let game = self.game.as_mut().unwrap();
         let window = self.engine.as_ref().unwrap().vulkan_context.window.clone();
         let engine = self.engine.as_mut().unwrap();
@@ -510,7 +517,7 @@ impl<T: Game> ApplicationHandler for App<T> {
             }
             WindowEvent::Resized(_) => self.engine.as_mut().unwrap().framebuffer_resized = true,
             WindowEvent::RedrawRequested => {
-                // println!("frame {} starts here", self.current_frame);
+                game.on_update(world, engine, delta_time);
                 let raw_input = engine.ui_renderer.winit_egui_state.take_egui_input(&window);
                 let full_output = engine.ui_renderer.ui_ctx.run(raw_input, |ctx| {
                     game.on_ui(world, ctx);
@@ -519,12 +526,6 @@ impl<T: Game> ApplicationHandler for App<T> {
                 engine.ui_renderer.full_output = Some(full_output);
                 engine.draw(world);
                 engine.delta_time = engine.prev_frame_end.elapsed().as_secs_f32();
-                // println!("\x1b[H\x1b[J");
-                // eprintln!(
-                //     "fps for frame {} is {}",
-                //     self.current_frame,
-                //     1.0 / self.delta_time.as_secs_f32()
-                // );
 
                 engine.prev_frame_end = Instant::now();
             }

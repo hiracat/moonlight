@@ -4,7 +4,7 @@
 
 use std::{
     any::{Any, TypeId},
-    collections::{HashSet, hash_map::HashMap},
+    collections::{hash_map::HashMap, HashSet},
     time::Instant,
 };
 
@@ -759,6 +759,7 @@ pub enum WorldError {
 }
 
 pub struct World {
+    pub name: String,
     entities: HashSet<EntityId>,
 
     component_storages: HashMap<TypeId, Box<dyn ErasedComponentStorage>>,
@@ -1064,10 +1065,14 @@ impl World {
             entities: HashSet::new(),
             component_storages: HashMap::new(),
             resource_storage: HashMap::new(),
+            name: "".to_string(),
 
             next_free: 0,
             last_dead: Vec::new(),
         }
+    }
+    pub fn name(&mut self, name: &str) {
+        self.name = name.to_string();
     }
     pub fn spawn(&mut self) -> EntityId {
         let free = {
@@ -1292,7 +1297,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Req<&str>)>();
 
                 for item in query {
-                    counter += item.1.1[0];
+                    counter += item.1 .1[0];
                     std::hint::black_box(counter);
                 }
             },
@@ -1308,7 +1313,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Opt<i64>)>();
 
                 for item in query {
-                    counter += item.1.2.unwrap_or(&0);
+                    counter += item.1 .2.unwrap_or(&0);
                     std::hint::black_box(counter);
                 }
             },

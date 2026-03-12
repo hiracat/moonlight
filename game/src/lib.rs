@@ -2,6 +2,7 @@ use std::{collections::HashSet, f32::consts::PI};
 
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
+    core::MouseState,
     ecs::{OptM, ReqM, World},
     physics::{Aabb, Collider, RigidBody},
     resources::{Material, Skybox},
@@ -83,6 +84,7 @@ impl moonlight::core::Game for GameImpl {
         let mouse_movement = MouseState::default();
 
         // Register resources into the world
+        world.name("main world");
         world.add_resource(camera).unwrap();
         world.add_resource(directional).unwrap();
         world.add_resource(ambient).unwrap();
@@ -315,12 +317,6 @@ type Keyboard = HashSet<KeyCode>;
 
 #[derive(Debug)]
 struct Controllable;
-#[derive(Debug, Default, Clone, Copy)]
-struct MouseState {
-    x: f32,
-    y: f32,
-    locked: bool,
-}
 
 fn physics_update(world: &mut World, delta_time: f32) {
     //NOTE: MOVEMENT INTEGRATION

@@ -1,6 +1,5 @@
-use ash::vk;
-
 use crate::{renderers::world::swapchain::framebuffers::Image, vulkan::VulkanContext};
+use ash::vk;
 pub mod framebuffers;
 pub mod renderpass;
 
@@ -180,6 +179,18 @@ pub fn create_attachment_descriptor_sets(
             .unwrap()
     };
 
+    update_attachment_descriptor_sets(device, &descriptor_sets, attachments, binding_indices);
+
+    descriptor_sets
+}
+
+pub fn update_attachment_descriptor_sets(
+    device: &ash::Device,
+    descriptor_sets: &[vk::DescriptorSet],
+    attachments: &[&[Image]],
+    binding_indices: &[u32],
+) {
+    let frame_count = attachments[0].len();
     let mut descriptor_writes = Vec::new();
     let mut all_image_infos: Vec<Vec<vk::DescriptorImageInfo>> =
         Vec::with_capacity(attachments.len());
@@ -207,6 +218,4 @@ pub fn create_attachment_descriptor_sets(
     }
 
     unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
-
-    descriptor_sets
 }

@@ -3,7 +3,7 @@
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 use ash::vk;
-use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
+use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
@@ -920,7 +920,6 @@ impl ResourceManager {
         let bone_weights = reader.read_weights(0).unwrap().into_f32();
         let raw_bone_indices = reader.read_joints(0).unwrap().into_u16();
 
-        dbg!(gltf_joint_to_engine);
         let translated_bone_indices: Vec<[u32; 4]> = raw_bone_indices
             .map(|x| {
                 x.map(|x| {

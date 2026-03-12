@@ -4,6 +4,7 @@ use super::pipelines::{create_builtin_graphics_pipelines, PipelineBundle, Pipeli
 use super::swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass};
 use crate::ecs::World;
 use crate::renderers::world::swapchain::framebuffers::create_gbuffer_resources;
+use crate::renderers::world::swapchain::update_attachment_descriptor_sets;
 use crate::renderers::world::swapchain::{create_attachment_descriptor_sets, SwapchainResources};
 use crate::resources::{Mesh, ResourceManager};
 use crate::vulkan::{SharedAllocator, VulkanContext};
@@ -300,6 +301,17 @@ impl WorldRenderer {
             swapchain_resources.image_size,
         );
         self.framebuffers = framebuffers;
+
+        update_attachment_descriptor_sets(
+            &context.device,
+            &self.per_swapchain_image_descriptor_sets,
+            &[
+                gbuffer_resources.color_images.as_slice(),
+                gbuffer_resources.normal_images.as_slice(),
+                gbuffer_resources.position_images.as_slice(),
+            ],
+            &[0, 1, 2],
+        );
         self.gbuffers = gbuffer_resources;
     }
 }
