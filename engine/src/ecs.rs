@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 //TODO: want to replace this code with an archetype based system, since i finnnnallllyyy understand
 //them, but i should build both systems and profile first
+//
 
 use std::{
     any::{Any, TypeId},
-    collections::{HashSet, hash_map::HashMap},
+    collections::{hash_map::HashMap, HashSet},
+    marker::PhantomData,
+    mem::offset_of,
+    slice,
     time::Instant,
 };
-
 macro_rules! assert_unique_types {
     ($($ty:ident)+) => {
         {
@@ -17,746 +20,364 @@ macro_rules! assert_unique_types {
         }
     };
 }
-macro_rules! get_first {
-    ($first:ident $($rest:ident)*) => {
-        $first
-    };
-}
-macro_rules! impl_join{
-    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),* [not] $(($not_name:ident,$peek_not:ident: $not_ty:ident)),*) => {
-        struct $struct<$($ty,)+ $($opt_ty,)* $($not_ty),*>{
-            $(
-                $name: $ty,
-            )+
-            $(
-                $opt_name: $opt_ty,
-            )*
-            $(
-                $not_name: $not_ty
-            ),*
-        }
-        impl <$($ty,)+ $($opt_ty,)* $($not_ty),*> Joinable for $struct<$($ty,)+ $($opt_ty,)* $($not_ty),*>
-        where
-            $(
-                $ty: Joinable,
-            )+
-            $(
-                $opt_ty: Joinable,
-            )*
-            $(
-                $not_ty: Joinable,
-            )*
+macro_rules! impl_fetch {
+    (
+        req: [$($req_ty:ident),*],
+        opt: [$($opt_ty:ident),*],
+        not: [$($not_ty:ident),*]
+    ) => {
+        //allows constructing new names of variables
+        paste::paste! {
+            // the internal iterator type, with a constructed name, and gives it type params as
+            // well as the 'a lifetime
+            pub struct [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* Iter>]<'a, $($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*> {
+                // the dyn query, and phantomdata
+                // dynquery handles all the logic of merging
+                query: DynQuery<'a>,
+                $( [<phantom_ $req_ty:lower>]: PhantomData<$req_ty>, )*
+                $( [<phantom_ $opt_ty:lower>]: PhantomData<$opt_ty>, )*
+                $( [<phantom_ $not_ty:lower>]: PhantomData<$not_ty>, )*
+            }
+
+            // def types, impl iterator for type
+            impl<'a, $($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*>
+                Iterator for [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* Iter>]<'a, $($req_ty,)* $($opt_ty,)* $($not_ty,)*>
             {
-                type Ref<'a> = ($($ty::Ref<'a>,)+ $(Option<$opt_ty::Ref<'a>>,)*) where Self: 'a;
-                type Component<'a> = ($($ty::Component<'a>,)+$ ($opt_ty::Component<'a>,)* $($not_ty::Component<'a>,)*)
-                where
-                    $($ty: 'a,)+
-                    $($opt_ty: 'a,)*
-                    $($not_ty: 'a,)*;
-                type Iter<'a> = $iter<'a, $($ty,)+ $($opt_ty,)* $($not_ty),*>
-                where
-                    $($ty: 'a,)+
-                    $($opt_ty: 'a,)*
-                    $($not_ty: 'a,)*;
-                fn join<'a>(self) -> Self::Iter<'a> {
-                    $iter::new($(self.$name.join(),)+ $(self.$opt_name.join(),)* $(self.$not_name.join()),*)
+                // iterator type (entityid, all the types)
+                type Item = (EntityId, ( $(&'a $req_ty,)* $(Option<&'a $opt_ty>,)* ));
+
+                //.next, just a wrapper around dynquery.next, but then unsafe casting to the
+                //correct types, it is safe because the pointers are pointers to the correct types,
+                //just reinterpited
+                fn next(&mut self) -> Option<Self::Item> {
+                    self.query.next().map(|(entityid, req, _opt)| {
+                        // how many of req do we have/whats our current
+                        let mut _req_idx = 0usize;
+                        $(
+                            // for every req, cast it to the corrent type, then inc so we know to
+                            // use the next pointer, since everything is different types cant use
+                            // loop
+                            let [<val_ $req_ty:lower>] = unsafe { &*(req[_req_idx] as *const $req_ty) };
+
+                            _req_idx = _req_idx + 1;
+                        )*
+                        // how many of opt do we have/whats our current
+                        let mut _opt_idx = 0usize;
+                        $(
+                            // for every opt, take one map it to the correct type or none
+                            let [<val_ $opt_ty:lower>] = _opt[_opt_idx].map(|bytes| unsafe { &*(bytes as *const u8 as *const $opt_ty) });
+                            _opt_idx = _opt_idx + 1;
+                        )*
+                        (entityid, ( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
+                    })
                 }
             }
 
-        pub struct $iter<'a, $($ty,)+ $($opt_ty,)* $($not_ty),*>
-        where
-        $(
-        $ty: Joinable+ 'a,
-        )+
-        $(
-        $opt_ty: Joinable+ 'a,
-        )*
-        $(
-        $not_ty: Joinable+ 'a,
-        )*
-        {
-            $(
-                $name: <$ty as Joinable>::Iter<'a>,
-                $peek: Option<(EntityId, <$ty as Joinable>::Ref<'a>)>,
-            )+
-            $(
-                $opt_name: <$opt_ty as Joinable>::Iter<'a>,
-                $peek_opt: Option<(EntityId, <$opt_ty as Joinable>::Ref<'a>)>,
-            )*
-            $(
-                $not_name: <$not_ty as Joinable>::Iter<'a>,
-                $peek_not: Option<(EntityId, <$not_ty as Joinable>::Ref<'a>)>,
-            )*
-        }
-        impl<'a, $($ty),+, $($opt_ty,)* $($not_ty),*> $iter<'a, $($ty),+, $($opt_ty,)* $($not_ty,)*>
-        where
-            $(
-                $ty: Joinable,
-            )+
-            $(
-                $opt_ty: Joinable,
-            )*
-            $(
-                $not_ty: Joinable,
-            )*
+            // fetch: the front facing type that we impliment for tuple combinations that knows how
+            // to query based on the tuple combo
+            impl<$($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*>
+                Fetch for ( $(Req<$req_ty>,)* $(Opt<$opt_ty>,)* $(Not<$not_ty>,)* )
             {
-                fn new(
-                $(
-                   mut $name: $ty::Iter<'a>,
-                )+
-                $(
-                   mut $opt_name: $opt_ty::Iter<'a>,
-                )*
-                $(
-                   mut $not_name: $not_ty::Iter<'a>,
-                )*
-                )
-                    -> Self{
-                $(
-                    let $peek = $name.next();
-                )+
-                $(
-                    let $peek_opt = $opt_name.next();
-                )*
-                $(
-                    let $peek_not = $not_name.next();
-                )*
-                Self {
-                $(
-                   $peek,
-                   $name,
-                )+
-                $(
-                   $peek_opt,
-                   $opt_name,
-                )*
-                $(
-                   $peek_not,
-                   $not_name,
-                )*
-                }
+                // use the previously defined iterator type
+                type Iter<'w> = [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* Iter>]<'w, $($req_ty,)* $($opt_ty,)* $($not_ty,)*>;
+                // the item is just (T, U, Option<V>), entityid is added later
+                type Item<'w> = ( $(&'w $req_ty,)* $(Option<&'w $opt_ty>,)* );
+                //lookup result is the same but with a result wrapper
+                type LookupResult<'w> = Result<( $(&'w $req_ty,)* $(Option<&'w $opt_ty>,)* ), WorldError>;
+
+                fn fetch<'w>(world: &'w World) -> Self::Iter<'w> {
+                    // if the types overlap then creates multiple borrows
+                    assert_unique_types!($($req_ty)* $($opt_ty)* $($not_ty)*);
+                    // construct cursors, creating an empty cursor if the storage doesnt exist
+                    let req_cursors = vec![
+                        $(
+                            world.get_storage::<$req_ty>()
+                                .map(|x|Cursor::new(x))
+                                .unwrap_or_else(|| Cursor::empty::<$req_ty>()),
+                        )*
+                    ];
+                    let opt_cursors = vec![
+                        $(
+                            world.get_storage::<$opt_ty>()
+                                .map(|x|Cursor::new(x))
+                                .unwrap_or_else(|| Cursor::empty::<$opt_ty>()),
+                        )*
+                    ];
+                    let not_cursors = vec![
+                        $(
+                            world.get_storage::<$not_ty>()
+                                .map(|x|Cursor::new(x))
+                                .unwrap_or_else(|| Cursor::empty::<$not_ty>()),
+                        )*
+                    ];
+
+                    // building the type and returning it, this is wwhere the iterator is actually
+                    // made
+                    [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* Iter>] {
+                        query: DynQuery::new(req_cursors, opt_cursors, not_cursors),
+                        $( [<phantom_ $req_ty:lower>]: PhantomData, )*
+                        $( [<phantom_ $opt_ty:lower>]: PhantomData, )*
+                        $( [<phantom_ $not_ty:lower>]: PhantomData, )*
+                    }
                 }
 
-            }
-        impl <'a, $($ty,)+ $($opt_ty,)* $($not_ty),*> Iterator for $iter<'a, $($ty),+, $($opt_ty,)* $($not_ty),*>
-        where
-        $(
-        $ty: Joinable,
-        )+
-        $(
-        $opt_ty: Joinable,
-        )*
-        $(
-        $not_ty: Joinable,
-        )*
-        {
-            type Item = (EntityId,
-                (
-                $(
-                    $ty::Ref<'a>,
-                )+
-                $(
-                    Option<$opt_ty::Ref<'a>>,
-                )*
-                ),
-            );
-            fn next(&mut self) -> Option<Self::Item> {
-                $(
-                let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
-                self.$peek = self.$name.next();
-                )+
-                let mut max_rq_id;
-                loop {
-                    let mut all_max = true;
-                    max_rq_id = get_first!($($name)+)$(.max($name))+;
+                fn get<'w>(entity: EntityId, world: &'w World) -> Self::LookupResult<'w> {
+                    // if the types overlap then creates multiple borrows
+                    assert_unique_types!($($req_ty)* $($opt_ty)* $($not_ty)*);
+                    // find the storages for all req types
                     $(
-                    if $name < max_rq_id {
-                        ($name, $peek) = Option::take(&mut self.$peek)?;
-                        self.$peek = self.$name.next();
-                        all_max = false;
-                    }
-                    )+
-
-                    #[allow(unused_mut)]
-                    let mut blocked = false;
+                        let [<storage_ $req_ty:lower>]: &ComponentStorage<$req_ty> = match world.get_storage().ok_or(WorldError::ComponentTypeMissing) {
+                            Ok(it) => it,
+                            Err(err) => return Err(err),
+                        };
+                    )*
+                    // find the storages for all opt types
                     $(
-                    if let Some(($not_name, $peek_not)) = Option::take(&mut self.$peek_not) {
-                        if max_rq_id == $not_name {
-                            self.$peek_not = self.$not_name.next();
-                            blocked = true;
-                        } else if max_rq_id > $not_name {
-                            self.$peek_not = self.$not_name.next();
-                            all_max = false;
-                        } else {
-                            self.$peek_not = Some(($not_name, $peek_not));
-                        }
-                    }
+                        let [<storage_ $opt_ty:lower>]: Option<&ComponentStorage<$opt_ty>> = world.get_storage();
                     )*
 
-                    if all_max {
-
-                        if blocked {
-                            $(
-                            ($name, $peek) = Option::take(&mut self.$peek)?;
-                            self.$peek = self.$name.next();
-                            )+
-                            continue;
-                        }
-                        break;
-                    }
+                    // get the val of each returning err if storage doesnt have it
+                    $(
+                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get(entity).ok_or(WorldError::EntityMissingComponent) {
+                            Ok(it) => it,
+                            Err(err) => return Err(err),
+                        };
+                    )*
+                    // for each opt, and_then is basically apply operation to inner or none, and
+                    // storage.get(entity) which ends up either val = some() or none
+                    $(
+                        let [<val_ $opt_ty:lower>] = [<storage_ $opt_ty:lower>].and_then(|s| s.get(entity));
+                    )*
+                    // return
+                    Ok(( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
                 }
-                // bring all optionals to at least the current place
-                $(
-                while let Some(($opt_name, _)) = self.$peek_opt{
-                    if $opt_name < max_rq_id {
-                        self.$peek_opt = self.$opt_name.next()
-                    } else {
-                        break;
-                    }
-                }
-                // take a peek
-                let $peek_opt = if let Some(($opt_name, $peek_opt)) = Option::take(&mut self.$peek_opt) {
-                    // if peek is the one we want
-                    if max_rq_id == $opt_name {
-                        // use it  and advance
-                        let tmp = Some($peek_opt);
-                        self.$peek_opt = self.$opt_name.next();
-                        tmp
-                    } else {
-                        // else put it back for next time because it might be useful then
-                        self.$peek_opt = Some(($opt_name, $peek_opt));
-                        None
-                    }
-                } else {
-                    None
-                };
-                )*
-                return Some((max_rq_id, ($($peek,)+ $($peek_opt),*)));
             }
         }
-
     };
 }
-macro_rules! impl_join_mut {
-    ($struct:ident, $iter:ident, $(($name:ident, $peek:ident: $ty:ident)),+ [opt] $(($opt_name:ident, $peek_opt:ident: $opt_ty:ident)),* [not] $(($not_name:ident,$peek_not:ident: $not_ty:ident)),*) => {
-        struct $struct<$($ty),+ $(,$opt_ty)* $(,$not_ty)*>{
-            $(
-                $name: $ty,
-            )+
-            $(
-                $opt_name: $opt_ty,
-            )*
-            $(
-                $not_name: $not_ty
-            ),*
-        }
-        impl <$($ty),+ $(,$opt_ty)* $(,$not_ty)*> JoinableMut for $struct<$($ty),+ $(,$opt_ty)* $(,$not_ty)*>
-        where
-            $(
-                $ty: JoinableMut,
-            )+
-            $(
-                $opt_ty: JoinableMut,
-            )*
-            $(
-                $not_ty: JoinableMut,
-            )*
+
+macro_rules! impl_fetch_mut {
+    (
+        req: [$($req_ty:ident),*],
+        opt: [$($opt_ty:ident),*],
+        not: [$($not_ty:ident),*]
+    ) => {
+        //allows constructing new names of variables
+        paste::paste! {
+            // the internal iterator type, with a constructed name, and gives it type params as
+            // well as the 'a lifetime
+            pub struct [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* IterMut>]<'a, $($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*> {
+                // the dyn query, and phantomdata
+                // dynquery handles all the logic of merging
+                query: DynQueryMut<'a>,
+                $( [<phantom_ $req_ty:lower>]: PhantomData<$req_ty>, )*
+                $( [<phantom_ $opt_ty:lower>]: PhantomData<$opt_ty>, )*
+                $( [<phantom_ $not_ty:lower>]: PhantomData<$not_ty>, )*
+            }
+
+            // def types, impl iterator for type
+            impl<'a, $($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*>
+                Iterator for [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* IterMut>]<'a, $($req_ty,)* $($opt_ty,)* $($not_ty,)*>
             {
-                type Mut<'a> = ($($ty::Mut<'a>,)+ $(Option<$opt_ty::Mut<'a>>),*) where Self: 'a;
-                type Component<'a> = ($($ty::Component<'a>),+$ (,$opt_ty::Component<'a>)* $(,$not_ty::Component<'a>)*)
-                where
-                    $($ty: 'a,)+
-                    $($opt_ty: 'a,)*
-                    $($not_ty: 'a,)*;
-                type Iter<'a> = $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
-                where
-                    $($ty: 'a,)+
-                    $($opt_ty: 'a,)*
-                    $($not_ty: 'a,)*;
-                unsafe fn join<'a>(self) -> Self::Iter<'a> {
-                    unsafe {
-                        $iter::new($(self.$name.join(),)+ $(self.$opt_name.join(),)* $(self.$not_name.join()),*)
-                    }
+                // iterator type (entityid, all the types)
+                type Item = (EntityId, ( $(&'a mut $req_ty,)* $(Option<&'a mut $opt_ty>,)* ));
+
+                //.next, just a wrapper around dynquery.next, but then unsafe casting to the
+                //correct types, it is safe because the pointers are pointers to the correct types,
+                //just reinterpited
+                fn next(&mut self) -> Option<Self::Item> {
+                    self.query.next().map(|(entityid, req, _opt)| {
+                        // how many of req do we have/whats our current
+                        let mut _req_idx = 0usize;
+                        $(
+                            // for every req, cast it to the corrent type, then inc so we know to
+                            // use the next pointer, since everything is different types cant use
+                            // loop
+                            let [<val_ $req_ty:lower>] = unsafe { &mut *(req[_req_idx] as *mut $req_ty) };
+
+                            _req_idx = _req_idx + 1;
+                        )*
+                        // how many of opt do we have/whats our current
+                        let mut _opt_idx = 0usize;
+                        $(
+                            // for every opt, take one map it to the correct type or none
+                            let [<val_ $opt_ty:lower>] = _opt[_opt_idx].map(|bytes| unsafe { &mut *(bytes as *mut $opt_ty) });
+
+                            _opt_idx = _opt_idx + 1;
+                        )*
+                        (entityid, ( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
+                    })
                 }
             }
 
-        pub struct $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
-        where
-        $(
-        $ty: JoinableMut + 'a,
-        )+
-        $(
-        $opt_ty: JoinableMut + 'a,
-        )*
-        $(
-        $not_ty: JoinableMut + 'a,
-        )*
-        {
-            $(
-                $name: <$ty as JoinableMut>::Iter<'a>,
-                $peek: Option<(EntityId, <$ty as JoinableMut>::Mut<'a>)>,
-            )+
-            $(
-                $opt_name: <$opt_ty as JoinableMut>::Iter<'a>,
-                $peek_opt: Option<(EntityId, <$opt_ty as JoinableMut>::Mut<'a>)>,
-            )*
-            $(
-                $not_name: <$not_ty as JoinableMut>::Iter<'a>,
-                $peek_not: Option<(EntityId, <$not_ty as JoinableMut>::Mut<'a>)>,
-            )*
-        }
-        impl<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*> $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
-        where
-            $(
-                $ty: JoinableMut,
-            )+
-            $(
-                $opt_ty: JoinableMut,
-            )*
-            $(
-                $not_ty: JoinableMut,
-            )*
+            // fetch: the front facing type that we impliment for tuple combinations that knows how
+            // to query based on the tuple combo
+            impl<$($req_ty: 'static,)* $($opt_ty: 'static,)* $($not_ty: 'static,)*>
+                FetchMut for ( $(ReqM<$req_ty>,)* $(OptM<$opt_ty>,)* $(NotM<$not_ty>,)* )
             {
-                unsafe fn new(
-                $(
-                   mut $name: $ty::Iter<'a>,
-                )+
-                $(
-                   mut $opt_name: $opt_ty::Iter<'a>,
-                )*
-                $(
-                   mut $not_name: $not_ty::Iter<'a>,
-                )*
-                )
-                    -> Self{
-                $(
-                    let $peek = $name.next();
-                )+
-                $(
-                    let $peek_opt = $opt_name.next();
-                )*
-                $(
-                    let $peek_not = $not_name.next();
-                )*
-                Self {
-                $(
-                   $peek,
-                   $name,
-                )+
-                $(
-                   $peek_opt,
-                   $opt_name,
-                )*
-                $(
-                   $peek_not,
-                   $not_name,
-                )*
-                }
-                }
+                // use the previously defined iterator type
+                type Iter<'w> = [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* IterMut>]<'w, $($req_ty,)* $($opt_ty,)* $($not_ty,)*>;
+                // the item is just (T, U, Option<V>), entityid is added later
+                type Item<'w> = ( $(&'w mut $req_ty,)* $(Option<&'w mut $opt_ty>,)* );
+                //lookup result is the same but with a result wrapper
+                type LookupResult<'w> = Result<( $(&'w mut $req_ty,)* $(Option<&'w mut $opt_ty>,)* ), WorldError>;
 
-            }
+                fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w> {
+                    // if the types overlap then creates multiple borrows
+                    assert_unique_types!($($req_ty)* $($opt_ty)* $($not_ty)*);
+                    // construct cursors, creating an empty cursor if the storage doesnt exist
+                    let req_cursors = vec![
+                        $(
+                            world.get_storage_mut::<$req_ty>()
+                                .map(|x|CursorMut::new(x))
+                                .unwrap_or_else(|| CursorMut::empty::<$req_ty>()),
+                        )*
+                    ];
+                    let opt_cursors = vec![
+                        $(
+                            world.get_storage_mut::<$opt_ty>()
+                                .map(|x|CursorMut::new(x))
+                                .unwrap_or_else(|| CursorMut::empty::<$opt_ty>()),
+                        )*
+                    ];
+                    let not_cursors = vec![
+                        $(
+                            world.get_storage_mut::<$not_ty>()
+                                .map(|x|CursorMut::new(x))
+                                .unwrap_or_else(|| CursorMut::empty::<$not_ty>()),
+                        )*
+                    ];
 
-        impl <'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*> Iterator for $iter<'a, $($ty),+ $(,$opt_ty)* $(,$not_ty)*>
-        where
-        $(
-        $ty: JoinableMut,
-        )+
-        $(
-        $opt_ty: JoinableMut,
-        )*
-        $(
-        $not_ty: JoinableMut,
-        )*
-        {
-            type Item = (EntityId,
-                (
-                $(
-                    $ty::Mut<'a>,
-                )+
-                $(
-                    Option<$opt_ty::Mut<'a>>,
-                )*
-                ),
-            );
-            fn next(&mut self) -> Option<Self::Item> {
-                $(
-                let (mut $name, mut $peek) = Option::take(&mut self.$peek)?;
-                self.$peek = self.$name.next();
-                )+
-                let mut max_rq_id;
-                loop {
-                    let mut all_max = true;
-                    max_rq_id = get_first!($($name)+)$(.max($name))+;
-                    $(
-                    if $name < max_rq_id {
-                        ($name, $peek) = Option::take(&mut self.$peek)?;
-                        self.$peek = self.$name.next();
-                        all_max = false;
+                    // building the type and returning it, this is wwhere the iterator is actually
+                    // made
+                    [<Dyn $( Req $req_ty )* $( Opt $opt_ty )* $( Not $not_ty )* IterMut>] {
+                        query: DynQueryMut::new(req_cursors, opt_cursors, not_cursors),
+                        $( [<phantom_ $req_ty:lower>]: PhantomData, )*
+                        $( [<phantom_ $opt_ty:lower>]: PhantomData, )*
+                        $( [<phantom_ $not_ty:lower>]: PhantomData, )*
                     }
-                    )+
+                }
 
-                    #[allow(unused_mut)]
-                    let mut blocked = false;
+                fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::LookupResult<'w> {
+                    // if the types overlap then creates multiple borrows
+                    assert_unique_types!($($req_ty)* $($opt_ty)* $($not_ty)*);
+
+
+                    // safety: assert_unique_types! guarantees storages are distinct
+                    let world_ptr: *mut World = world;
+
+                    // find the storages for all req types
                     $(
-                    if let Some(($not_name, $peek_not)) = Option::take(&mut self.$peek_not) {
-                        if max_rq_id == $not_name {
-                            self.$peek_not = self.$not_name.next();
-                            blocked = true;
-                        } else if max_rq_id > $not_name {
-                            self.$peek_not = self.$not_name.next();
-                            all_max = false;
-                        } else {
-                            self.$peek_not = Some(($not_name, $peek_not));
-                        }
-                    }
+                        let [<storage_ $req_ty:lower>]: &mut ComponentStorage<$req_ty> =
+                            match unsafe { (*world_ptr).get_storage_mut::<$req_ty>() } {
+                                Some(it) => it,
+                                None => return Err(WorldError::ComponentTypeMissing),
+                            };
                     )*
 
-                    if all_max {
+                    // find the storages for all opt types
+                    $(
+                        let [<storage_ $opt_ty:lower>]: Option<&mut ComponentStorage<$opt_ty>> =
+                                unsafe { (*world_ptr).get_storage_mut::<$opt_ty>() };
+                    )*
 
-                        if blocked {
-                            $(
-                            ($name, $peek) = Option::take(&mut self.$peek)?;
-                            self.$peek = self.$name.next();
-                            )+
-                            continue;
-                        }
-                        break;
-                    }
+
+                    // get the val of each returning err if storage doesnt have it
+                    $(
+                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get_mut(entity).ok_or(WorldError::EntityMissingComponent) {
+                            Ok(it) => it,
+                            Err(err) => return Err(err),
+                        };
+                    )*
+                    // for each opt, and_then is basically apply operation to inner or none, and
+                    // storage.get(entity) which ends up either val = some() or none
+                    $(
+                        let [<val_ $opt_ty:lower>] = [<storage_ $opt_ty:lower>].and_then(|s| s.get_mut(entity));
+                    )*
+                    // return
+                    Ok(( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
                 }
-                // bring all optionals to at least the current place
-                $(
-                while let Some(($opt_name, _)) = self.$peek_opt{
-                    if $opt_name < max_rq_id {
-                        self.$peek_opt = self.$opt_name.next()
-                    } else {
-                        break;
-                    }
-                }
-                // take a peek
-                let $peek_opt = if let Some(($opt_name, $peek_opt)) = Option::take(&mut self.$peek_opt) {
-                    // if peek is the one we want
-                    if max_rq_id == $opt_name {
-                        // use it  and advance
-                        let tmp = Some($peek_opt);
-                        self.$peek_opt = self.$opt_name.next();
-                        tmp
-                    } else {
-                        // else put it back for next time because it might be useful then
-                        self.$peek_opt = Some(($opt_name, $peek_opt));
-                        None
-                    }
-                } else {
-                    None
-                };
-                )*
-                return Some((max_rq_id, ($($peek,)+ $($peek_opt),*)));
             }
         }
-    }
-}
-macro_rules! impl_fetch{
-    ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
-impl< $($ty: 'static),+ $(,$opt: 'static)* $(,$not: 'static)*> Fetch for ($(Req<$ty>),+ $(,Opt<$opt>)* $(,Not<$not>)*) {
-    type Iter<'w> = $iter<'w, $(&'w [(EntityId, $ty)]),+ $(,&'w [(EntityId, $opt)])* $(,&'w [(EntityId, $not)])*>;
-    type Item<'w> = ($(&'w $ty,)+ $(Option<&'w $opt>),*);
-
-    type OptionalItems<'w> = Result<($(&'w $ty,)+ $(Option<&'w $opt>),*), WorldError>;
-
-    fn get<'w>(entity: EntityId, world: &'w World) -> Self::OptionalItems<'w> {
-        let ptr_world: &World = world;
-        assert_unique_types!($($ty)+ $($opt)* $($not)*);
-        $(
-        let $name = {
-            (*ptr_world)
-                .get_storage::<$ty>()
-                .ok_or(WorldError::ComponentTypeMissing)?
-                .get(entity)
-                .ok_or(WorldError::EntityMissingComponent)?
-        };
-        )+
-        $(
-        let $optname: Option<&$opt> = {
-            (*ptr_world)
-                .get_storage::<$opt>()
-                .and_then(|x| x.get(entity))
-        };
-        )*
-        $(
-            if (*ptr_world)
-                .get_storage::<$not>()
-                .and_then(|x| x.get(entity)).is_some() {
-                    return Err(WorldError::EntityHasComponent);
-            }
-        )*
-        Ok(($($name,)+ $($optname),*))
-    }
-    fn fetch<'w>(world: &'w World) -> Self::Iter<'w> {
-        assert_unique_types!($($ty)+ $($opt)* $($not)*);
-        let ptr_world: &World = world;
-        $(
-        let $name: &[(EntityId, $ty)] = {
-            ptr_world
-                .get_storage::<$ty>()
-                .map_or(&[], |x| x.data.as_slice())
-        };
-        )+
-        $(
-        let $optname: &[(EntityId, $opt)] = {
-            ptr_world
-                .get_storage::<$opt>()
-                .map_or(&[], |x| x.data.as_slice())
-        };
-        )*
-        $(
-        let $notname: &[(EntityId, $not)] = {
-            ptr_world
-                .get_storage::<$not>()
-                .map_or(&[], |x| x.data.as_slice())
-        };
-        )*
-        let join = $struct {
-            $(
-            $name,
-            )+
-            $(
-            $optname,
-            )*
-            $(
-            $notname,
-            )*
-        };
-        //Safety: Panics of any types are the same
-        return  join.join() ;
-    }
-}
-};
-}
-macro_rules! impl_fetch_mut{
-    ($struct:ident, $iter:ident, $(($name:ident, $ty:ident)),+ [opt] $(($optname:ident, $opt:ident)),* [not] $(($notname:ident, $not:ident)),*) => {
-impl<$($ty: 'static),+ $(,$opt:'static)* $(,$not:'static)*> FetchMut for ($(ReqM<$ty>),+ $(,OptM<$opt>)* $(,NotM<$not>)*) {
-    type Iter<'w> = $iter<'w, $(&'w mut [(EntityId, $ty)]),+ $(,&'w mut [(EntityId, $opt)])* $(,&'w mut [(EntityId, $not)])*>;
-    type Item<'w> = ($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*);
-
-    type OptionalItems<'w> = Result<($(&'w mut $ty,)+ $(Option<&'w mut $opt>),*), WorldError>;
-
-    fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::OptionalItems<'w> {
-        let ptr_world: *mut World = world;
-        assert_unique_types!($($ty)+ $($opt)* $($not)*);
-        $(
-        let $name = unsafe {
-            (*ptr_world)
-                .get_storage_mut::<$ty>()
-                .ok_or(WorldError::ComponentTypeMissing)?
-                .get_mut(entity)
-                .ok_or(WorldError::EntityMissingComponent)?
-        };
-        )+
-        $(
-        let $optname: Option<&mut $opt> = unsafe {
-            (*ptr_world)
-                .get_storage_mut::<$opt>()
-                .and_then(|x| x.get_mut(entity))
-        };
-        )*
-        $(
-            if unsafe {(*ptr_world)
-                .get_storage_mut::<$not>()
-                .and_then(|x| x.get_mut(entity)).is_some()} {
-                    return Err(WorldError::EntityHasComponent);
-            }
-        )*
-        Ok(($($name,)+ $($optname),*))
-    }
-    fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w> {
-        assert_unique_types!($($ty)+ $($opt)*);
-        let ptr_world: *mut World = world;
-        $(
-        let $name: &mut [(EntityId, $ty)] = unsafe {
-            (*ptr_world)
-                .get_storage_mut::<$ty>()
-                .map_or(&mut [], |x| x.data.as_mut_slice())
-        };
-        )+
-        $(
-        let $optname: &mut [(EntityId, $opt)] = unsafe {
-            (*ptr_world)
-                .get_storage_mut::<$opt>()
-                .map_or(&mut [], |x| x.data.as_mut_slice())
-        };
-        )*
-        $(
-        let $notname: &mut [(EntityId, $not)] = unsafe {
-            (*ptr_world)
-                .get_storage_mut::<$not>()
-                .map_or(&mut [], |x| x.data.as_mut_slice())
-        };
-        )*
-        let join = $struct {
-            $(
-            $name,
-            )+
-            $(
-            $optname,
-            )*
-            $(
-            $notname,
-            )*
-        };
-        //Safety: Panics of any types are the same
-        return unsafe { join.join() };
-    }
-}
-};
+    };
 }
 
-// 2
-impl_fetch!(Join2, Join2Iter, (a, T), (c, U)[opt][not]);
-impl_fetch_mut!(JoinMut2, JoinMut2Iter, (a, T), (c, U)[opt][not]);
-impl_join!(Join2, Join2Iter, (a, peek_a: T), (c, peek_c: U)[opt][not]);
-impl_join_mut!(JoinMut2, JoinMut2Iter, (a, peek_a: T),(c, peek_c: U)[opt][not]);
+//2
+impl_fetch!(req: [T, U], opt: [], not: []);
+impl_fetch!(req: [T], opt: [U], not: []);
+impl_fetch!(req: [T], opt: [], not: [U]);
 
-impl_fetch!(Join1opt1, Join1opt1Iter, (a, T)[opt](c, U)[not]);
-impl_fetch_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, T)[opt](c, U)[not]);
-impl_join!(Join1opt1, Join1opt1Iter, (a, peek_a: T)[opt] (c, peek_c: U)[not]);
-impl_join_mut!(JoinMut1opt1, JoinMut1opt1Iter, (a, peek_a: T)[opt](c, peek_c: U)[not]);
-
-impl_fetch_mut!(JoinMut1not1, JoinMut1not1Iter, (a, T)[opt][not](c, U));
-impl_join_mut!(JoinMut1not1, JoinMut1not1Iter, (a, peek_a: T)[opt][not](c, _peek_c: U));
-
-impl_fetch!(Join1not1, Join1not1Iter, (a, T)[opt][not](c, U));
-impl_join!(Join1not1, Join1not1Iter, (a, peek_a: T)[opt][not](c, _peek_c: U));
-
-// 3
-impl_fetch!(Join3, Join3Iter, (a, T), (b, U), (c, V)[opt][not]);
-impl_fetch_mut!(JoinMut3, JoinMut3Iter, (a, T), (b, U), (c, V)[opt][not]);
-impl_join!(Join3, Join3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
-impl_join_mut!(JoinMut3, JoinMut3Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V)[opt][not]);
-
-impl_fetch!(Join2not1, Join2not1Iter, (a, T), (b, U)[opt][not](c, V));
-impl_fetch_mut!(
-    JoinMut2not1,
-    JoinMut2not1Iter,
-    (a, T),
-    (b, U)[opt][not](c, V)
-);
-impl_join!(Join2not1, Join2not1Iter, (a, peek_a: T),(b, _peek_b: U)[opt][not] (c, _peek_c: V));
-impl_join_mut!(JoinMut2not1, JoinMut2not1Iter, (a, peek_a: T),(b, _peek_b: U)[opt][not] (c, _peek_c: V));
-
-impl_fetch!(Join1not2, Join1not2Iter, (a, T)[opt][not](b, U), (c, V));
-impl_fetch_mut!(
-    JoinMut1not2,
-    JoinMut1not2Iter,
-    (a, T)[opt][not](b, U),
-    (c, V)
-);
-impl_join!(Join1not2, Join1not2Iter, (a, peek_a: T)[opt][not](b, _peek_b: U), (c, _peek_c: V));
-impl_join_mut!(JoinMut1not2, JoinMut1not2Iter, (a, peek_a: T)[opt][not](b, _peek_b: U), (c, _peek_c: V));
-
-impl_fetch!(Join2opt1, Join2opt1Iter, (a, T), (b, U)[opt](c, V)[not]);
-impl_fetch_mut!(
-    JoinMut2opt1,
-    JoinMut2opt1Iter,
-    (a, T),
-    (b, U)[opt](c, V)[not]
-);
-impl_join!(Join2opt1, Join2opt1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not]);
-impl_join_mut!(JoinMut2opt1, JoinMut2opt1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not]);
-
-impl_fetch!(
-    Join1opt1Not1,
-    Join1opt1Not1Iter,
-    (a, T)[opt](c, V)[not](e, X)
-);
-impl_fetch_mut!(
-    JoinMut1opt1Not1,
-    JoinMut1opt1Not1Iter,
-    (a, T)[opt](c, V)[not](e, X)
-);
-impl_join!(Join1opt1Not1, Join1opt1Not1Iter, (a, peek_a: T)[opt] (c, peek_c: V)[not](e, _peek_e: X));
-impl_join_mut!(JoinMut1opt1Not1, JoinMut1opt1Not1Iter, (a, peek_a: T)[opt] (c, peek_c: V)[not](e, _peek_e: X));
+//3
+impl_fetch!(req: [T, U, V], opt: [], not: []);
+impl_fetch!(req: [T, U], opt: [V], not: []);
+impl_fetch!(req: [T, U], opt: [], not: [V]);
+impl_fetch!(req: [T], opt: [U, V], not: []);
+impl_fetch!(req: [T], opt: [U], not: [V]);
+impl_fetch!(req: [T], opt: [], not: [U, V]);
 
 //4
+impl_fetch!(req: [T, U, V, W], opt: [], not: []);
+impl_fetch!(req: [T, U, V], opt: [W], not: []);
+impl_fetch!(req: [T, U, V], opt: [], not: [W]);
+impl_fetch!(req: [T, U], opt: [V, W], not: []);
+impl_fetch!(req: [T, U], opt: [V], not: [W]);
+impl_fetch!(req: [T, U], opt: [], not: [V, W]);
+impl_fetch!(req: [T], opt: [U, V, W], not: []);
+impl_fetch!(req: [T], opt: [U, V], not: [W]);
+impl_fetch!(req: [T], opt: [U], not: [V, W]);
+impl_fetch!(req: [T], opt: [], not: [U, V, W]);
 
-impl_fetch!(Join4, Join4Iter, (a, T), (b, U), (c, V), (d, W)[opt][not]);
-impl_fetch_mut!(
-    JoinMut4,
-    JoinMut4Iter,
-    (a, T),
-    (b, U),
-    (c, V),
-    (d, W)[opt][not]
-);
-impl_join!(Join4, Join4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[opt][not]);
-impl_join_mut!(JoinMut4, JoinMut4Iter, (a, peek_a: T),(b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[opt][not]);
+//mut
+//2
+impl_fetch_mut!(req: [T, U], opt: [], not: []);
+impl_fetch_mut!(req: [T], opt: [U], not: []);
+impl_fetch_mut!(req: [T], opt: [], not: [U]);
 
-impl_fetch!(
-    Join2opt2,
-    Join2opt2Iter,
-    (a, T),
-    (b, U)[opt](c, V),
-    (d, W)[not]
-);
-impl_fetch_mut!(
-    JoinMut2opt2,
-    JoinMut2opt2Iter,
-    (a, T),
-    (b, U)[opt](c, V),
-    (d, W)[not]
-);
-impl_join!(Join2opt2, Join2opt2Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V), (d, peek_d: W)[not]);
-impl_join_mut!(JoinMut2opt2, JoinMut2opt2Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V), (d, peek_d: W)[not]);
+//3
+impl_fetch_mut!(req: [T, U, V], opt: [], not: []);
+impl_fetch_mut!(req: [T, U], opt: [V], not: []);
+impl_fetch_mut!(req: [T, U], opt: [], not: [V]);
+impl_fetch_mut!(req: [T], opt: [U, V], not: []);
+impl_fetch_mut!(req: [T], opt: [U], not: [V]);
+impl_fetch_mut!(req: [T], opt: [], not: [U, V]);
 
-impl_fetch!(
-    Join2opt1not1,
-    Join2opt1not1Iter,
-    (a, T),
-    (b, U)[opt](c, V)[not](d, W)
-);
-impl_fetch_mut!(
-    JoinMut2opt1not1,
-    JoinMut2opt1not1Iter,
-    (a, T),
-    (b, U)[opt](c, V)[not](d, W)
-);
-impl_join!(Join2opt1not1, Join2opt1not1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not] (d, _peek_d: W));
-impl_join_mut!(JoinMut2opt1not1, JoinMut2opt1not1Iter, (a, peek_a: T),(b, peek_b: U)[opt] (c, peek_c: V)[not] (d, _peek_d: W));
-
-impl_fetch!(
-    Join1opt3,
-    Join1opt3Iter,
-    (a, T)[opt](b, U),
-    (c, V),
-    (d, W)[not]
-);
-impl_fetch_mut!(
-    JoinMut1opt3,
-    JoinMut1opt3Iter,
-    (a, T)[opt](b, U),
-    (c, V),
-    (d, W)[not]
-);
-impl_join!(Join1opt3, Join1opt3Iter, (a, peek_a: T)[opt](b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[not]);
-impl_join_mut!(JoinMut1opt3, JoinMut1opt3Iter, (a, peek_a: T)[opt](b, peek_b: U), (c, peek_c: V), (d, peek_d: W)[not]);
+//4
+impl_fetch_mut!(req: [T, U, V, W], opt: [], not: []);
+impl_fetch_mut!(req: [T, U, V], opt: [W], not: []);
+impl_fetch_mut!(req: [T, U, V], opt: [], not: [W]);
+impl_fetch_mut!(req: [T, U], opt: [V, W], not: []);
+impl_fetch_mut!(req: [T, U], opt: [V], not: [W]);
+impl_fetch_mut!(req: [T, U], opt: [], not: [V, W]);
+impl_fetch_mut!(req: [T], opt: [U, V, W], not: []);
+impl_fetch_mut!(req: [T], opt: [U, V], not: [W]);
+impl_fetch_mut!(req: [T], opt: [U], not: [V, W]);
+impl_fetch_mut!(req: [T], opt: [], not: [U, V, W]);
 
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
 
-#[derive(Debug /*thiserror::Error*/)]
+#[derive(Debug)]
 pub enum WorldError {
-    // #[error("entity already has component")]
     ComponentAlreadyAdded,
-    // #[error("entity does not have the requested component")]
     EntityMissingComponent,
-    // #[error("the requested entity does not exist")]
     EntityMissing,
-    // #[error("the requested component does not exist")]
     ComponentTypeMissing,
-    // #[error("a resource of this type has already been added")]
     ResourceAlreadyAdded,
-
-    // for a Not<T> query
     EntityHasComponent,
 }
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Opt<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Req<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Not<C>(pub C);
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OptM<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReqM<C>(pub C);
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NotM<C>(pub C);
 
 pub struct World {
     pub name: String,
@@ -769,9 +390,28 @@ pub struct World {
     last_dead: Vec<u32>,
 }
 
+pub trait Fetch {
+    type Iter<'w>: Iterator;
+    type Item<'w>;
+    type LookupResult<'w>;
+    fn fetch<'w>(world: &'w World) -> Self::Iter<'w>;
+    fn get<'w>(entity: EntityId, world: &'w World) -> Self::LookupResult<'w>;
+}
+pub trait FetchMut {
+    type Iter<'w>: Iterator;
+    type Item<'w>;
+    type LookupResult<'w>;
+    fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w>;
+    fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::LookupResult<'w>;
+}
+
 pub struct Query<'a, C: Fetch> {
     iter: C::Iter<'a>,
 }
+pub struct QueryMut<'a, C: FetchMut> {
+    iter: C::Iter<'a>,
+}
+
 impl<'w, C> Iterator for Query<'w, C>
 where
     C: Fetch + 'static,
@@ -784,9 +424,6 @@ where
     }
 }
 
-pub struct QueryMut<'a, C: FetchMut> {
-    iter: C::Iter<'a>,
-}
 impl<'w, C> Iterator for QueryMut<'w, C>
 where
     C: FetchMut + 'static,
@@ -799,65 +436,13 @@ where
     }
 }
 
-pub trait Fetch {
-    // reference to component storage iterator
-    type Iter<'w>: Iterator;
-    type Item<'w>;
-    type OptionalItems<'w>;
-    fn fetch<'w>(world: &'w World) -> Self::Iter<'w>;
-    fn get<'w>(entity: EntityId, world: &'w World) -> Self::OptionalItems<'w>;
-}
-
-pub trait FetchMut {
-    // reference to component storage iterator
-    type Iter<'w>: Iterator;
-    type Item<'w>;
-    type OptionalItems<'w>;
-    fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w>;
-    fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::OptionalItems<'w>;
-}
-pub trait Joinable {
-    type Ref<'a>: 'a + Copy
-    where
-        Self: 'a;
-
-    type Component<'a>: 'a
-    where
-        Self: 'a;
-
-    /// The iterator over `(EntityId, Ref<'a>)`
-    type Iter<'a>: Iterator<Item = (EntityId, Self::Ref<'a>)>
-    where
-        Self: 'a;
-
-    fn join<'a>(self) -> Self::Iter<'a>;
-}
-
-pub trait JoinableMut {
-    type Mut<'a>: 'a
-    where
-        Self: 'a;
-
-    type Component<'a>: 'a
-    where
-        Self: 'a;
-
-    /// The iterator over `(EntityId, Ref<'a>)`
-    type Iter<'a>: Iterator<Item = (EntityId, Self::Mut<'a>)>
-    where
-        Self: 'a;
-
-    // SAFETY: must ensure that all the iterators point to distinct places
-    unsafe fn join<'a>(self) -> Self::Iter<'a>;
-}
-
 impl<T: 'static> Fetch for (T,) {
     type Item<'w> = (&'w T,);
     type Iter<'w> = std::iter::Map<
         std::slice::Iter<'w, (EntityId, T)>,
         fn(&'w (EntityId, T)) -> (EntityId, (&'w T,)),
     >;
-    type OptionalItems<'w> = Result<&'w T, WorldError>;
+    type LookupResult<'w> = Result<&'w T, WorldError>;
 
     fn fetch<'w>(world: &'w World) -> Self::Iter<'w> {
         fn map_fn<T>(x: &(EntityId, T)) -> (EntityId, (&T,)) {
@@ -868,7 +453,7 @@ impl<T: 'static> Fetch for (T,) {
             None => [].iter().map(map_fn),
         }
     }
-    fn get<'w>(entity: EntityId, world: &'w World) -> Self::OptionalItems<'w> {
+    fn get<'w>(entity: EntityId, world: &'w World) -> Self::LookupResult<'w> {
         let storage = match world.get_storage().ok_or(WorldError::ComponentTypeMissing) {
             Ok(it) => it,
             Err(err) => return Err(err),
@@ -884,9 +469,9 @@ impl<T: 'static> FetchMut for (T,) {
         std::slice::IterMut<'w, (EntityId, T)>,
         fn(&'w mut (EntityId, T)) -> (EntityId, (&'w mut T,)),
     >;
-    type OptionalItems<'w> = Result<&'w mut T, WorldError>;
+    type LookupResult<'w> = Result<&'w mut T, WorldError>;
 
-    fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::OptionalItems<'w> {
+    fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::LookupResult<'w> {
         let storage = match world
             .get_storage_mut()
             .ok_or(WorldError::ComponentTypeMissing)
@@ -910,78 +495,339 @@ impl<T: 'static> FetchMut for (T,) {
     }
 }
 
-impl<'s, T: 'static> Joinable for &'s [(EntityId, T)] {
-    type Component<'a>
-        = T
-    where
-        's: 'a;
-    type Iter<'a>
-        = std::iter::Map<
-        std::slice::Iter<'a, (EntityId, T)>,
-        fn(&'a (EntityId, T)) -> (EntityId, &'a T),
-    >
-    where
-        's: 'a;
+struct DynQuery<'a> {
+    req: Vec<Cursor<'a>>,
+    opt: Vec<Cursor<'a>>,
+    not: Vec<Cursor<'a>>,
 
-    type Ref<'a>
-        = &'a T
-    where
-        's: 'a;
-
-    fn join<'a>(self) -> Self::Iter<'a>
-    where
-        's: 'a,
-    {
-        fn map_fn<T>(x: &(EntityId, T)) -> (EntityId, &T) {
-            (x.0, &x.1)
-        }
-        self.iter().map(map_fn::<T>)
-    }
-}
-impl<'s, T: 'static> JoinableMut for &'s mut [(EntityId, T)] {
-    type Component<'a>
-        = T
-    where
-        's: 'a;
-    type Iter<'a>
-        = std::iter::Map<
-        std::slice::IterMut<'a, (EntityId, T)>,
-        fn(&'a mut (EntityId, T)) -> (EntityId, &'a mut T),
-    >
-    where
-        's: 'a;
-
-    type Mut<'a>
-        = &'a mut T
-    where
-        's: 'a;
-
-    ///SAFETY: part of the trait, but this implimentation is guaranteed to be safe, it simply maps
-    ///the shape from an awkward one to the one that the recursive trait expects
-    unsafe fn join<'a>(self) -> Self::Iter<'a>
-    where
-        's: 'a,
-    {
-        fn map_fn<T>(x: &mut (EntityId, T)) -> (EntityId, &mut T) {
-            (x.0, &mut x.1)
-        }
-        self.iter_mut().map(map_fn::<T>)
-    }
+    // reusable buffers to return every time, because allocating every frame is very bad
+    req_results: Vec<*const [u8]>,
+    opt_results: Vec<Option<*const [u8]>>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Opt<C>(pub C);
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Req<C>(pub C);
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Not<C>(pub C);
+impl<'a> DynQuery<'a> {
+    fn new(req: Vec<Cursor<'a>>, opt: Vec<Cursor<'a>>, not: Vec<Cursor<'a>>) -> Self {
+        let req_len = req.len();
+        let opt_len = opt.len();
+        Self {
+            req,
+            opt,
+            not,
+            req_results: Vec::with_capacity(req_len),
+            opt_results: Vec::with_capacity(opt_len),
+        }
+    }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct OptM<C>(pub C);
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ReqM<C>(pub C);
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NotM<C>(pub C);
+    fn next(&mut self) -> Option<(EntityId, &Vec<*const [u8]>, &Vec<Option<*const [u8]>>)> {
+        self.req_results.clear();
+        self.opt_results.clear();
+
+        'outer: loop {
+            // Step 1: find max entity across all required cursors
+            let max_entity = self
+                .req
+                .iter()
+                .map(|s| s.current_entity)
+                .max()
+                .unwrap_or(EntityId(0)); // None if req is empty
+
+            // Step 2: advance nots and skip any entity that matches a not
+            for storage in &mut self.not {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity == max_entity {
+                    // this entity is excluded, advance all entities to skip past it
+                    for req in &mut self.req {
+                        while req.current_entity <= max_entity {
+                            req.advance();
+                            if req.current_entity == EntityId(u32::MAX) {
+                                return None;
+                            }
+                        }
+                    }
+                    continue 'outer;
+                }
+            }
+
+            // Step 3: align all required cursors to max_entity
+            for storage in &mut self.req {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity > max_entity {
+                    // a required cursor jumped ahead, restart with new max
+                    continue 'outer;
+                }
+            }
+
+            // Step 4: all required cursors are aligned, check if any req is exhausted
+            self.req_results.clear();
+            for storage in &mut self.req {
+                if storage.current_entity == EntityId(u32::MAX) {
+                    return None; // exhausted
+                }
+                self.req_results.push(storage.get_current_data());
+            }
+
+            // Step 5: collect optional results
+            self.opt_results.clear();
+            for storage in &mut self.opt {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity == max_entity {
+                    self.opt_results.push(Some(storage.get_current_data()));
+                } else {
+                    self.opt_results.push(None);
+                }
+            }
+
+            // Step 6: advance all required cursors for next call
+            for storage in &mut self.req {
+                storage.advance();
+            }
+
+            return Some((max_entity, &self.req_results, &self.opt_results));
+        }
+    }
+}
+struct DynQueryMut<'a> {
+    req: Vec<CursorMut<'a>>,
+    opt: Vec<CursorMut<'a>>,
+    not: Vec<CursorMut<'a>>,
+
+    req_results: Vec<*mut [u8]>,
+    opt_results: Vec<Option<*mut [u8]>>,
+}
+
+impl<'a> DynQueryMut<'a> {
+    fn new(req: Vec<CursorMut<'a>>, opt: Vec<CursorMut<'a>>, not: Vec<CursorMut<'a>>) -> Self {
+        let req_len = req.len();
+        let opt_len = opt.len();
+        Self {
+            req,
+            opt,
+            not,
+            req_results: Vec::with_capacity(req_len),
+            opt_results: Vec::with_capacity(opt_len),
+        }
+    }
+
+    fn next(&mut self) -> Option<(EntityId, &Vec<*mut [u8]>, &Vec<Option<*mut [u8]>>)> {
+        self.req_results.clear();
+        self.opt_results.clear();
+
+        'outer: loop {
+            // Step 1: find max entity across all required cursors
+            let max_entity = self
+                .req
+                .iter()
+                .map(|s| s.current_entity)
+                .max()
+                .unwrap_or(EntityId(0)); // None if req is empty
+
+            // Step 2: advance nots and skip any entity that matches a not
+            for storage in &mut self.not {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity == max_entity {
+                    // this entity is excluded, advance all entities to skip past it
+                    for req in &mut self.req {
+                        while req.current_entity <= max_entity {
+                            req.advance();
+                            if req.current_entity == EntityId(u32::MAX) {
+                                return None;
+                            }
+                        }
+                    }
+                    continue 'outer;
+                }
+            }
+
+            // Step 3: align all required cursors to max_entity
+            for storage in &mut self.req {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity > max_entity {
+                    // a required cursor jumped ahead, restart with new max
+                    continue 'outer;
+                }
+            }
+
+            // Step 4: all required cursors are aligned, check if any req is exhausted
+            self.req_results.clear();
+            for storage in &mut self.req {
+                if storage.current_entity == EntityId(u32::MAX) {
+                    return None; // exhausted
+                }
+                self.req_results
+                    .push(unsafe { &mut *storage.get_current_data() });
+            }
+
+            // Step 5: collect optional results
+            self.opt_results.clear();
+            for storage in &mut self.opt {
+                while storage.current_entity < max_entity {
+                    storage.advance();
+                }
+                if storage.current_entity == max_entity {
+                    self.opt_results
+                        .push(Some(unsafe { &mut *storage.get_current_data() }));
+                } else {
+                    self.opt_results.push(None);
+                }
+            }
+
+            // Step 6: advance all required cursors for next call
+            for storage in &mut self.req {
+                storage.advance();
+            }
+
+            return Some((max_entity, &self.req_results, &self.opt_results));
+        }
+    }
+}
+
+struct Cursor<'a> {
+    current_index: usize,
+    current_entity: EntityId,
+
+    data: &'a [u8],
+    stride: usize,
+    entityid_offset: usize,
+    val_offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn empty<T: 'static>() -> Self {
+        let first_entity = EntityId(u32::MAX);
+        let storage = &[];
+
+        Self {
+            current_index: 0,
+            current_entity: first_entity,
+            data: storage,
+            stride: size_of::<(EntityId, T)>(),
+            entityid_offset: offset_of!((EntityId, T), 0),
+            val_offset: offset_of!((EntityId, T), 1),
+        }
+    }
+    fn new<T: 'static>(storage: &ComponentStorage<T>) -> Self {
+        let first_entity = storage
+            .data
+            .get(0)
+            .map(|x| x.0)
+            .unwrap_or(EntityId(u32::MAX));
+        let storage = unsafe {
+            slice::from_raw_parts(
+                storage.data.as_ptr() as *const u8,
+                storage.data.len() * size_of::<(EntityId, T)>(),
+            )
+        };
+
+        Self {
+            current_index: 0,
+            current_entity: first_entity,
+            data: storage,
+            stride: size_of::<(EntityId, T)>(),
+            entityid_offset: offset_of!((EntityId, T), 0),
+            val_offset: offset_of!((EntityId, T), 1),
+        }
+    }
+    fn advance(&mut self) -> EntityId {
+        self.current_index += 1;
+        self.current_entity = self
+            .data
+            .get(
+                self.current_index * self.stride
+                    ..(self.current_index * self.stride) + size_of::<EntityId>(),
+            )
+            .map(|x| EntityId(u32::from_ne_bytes(x.try_into().unwrap())))
+            .unwrap_or(EntityId(u32::MAX));
+
+        self.current_entity
+    }
+    fn get_current_data(&self) -> *const [u8] {
+        let start = self.current_index * self.stride + self.val_offset;
+        let end = (self.current_index + 1) * self.stride;
+
+        self.data
+            .get(start..end)
+            .expect("current data should be valid")
+    }
+}
+
+struct CursorMut<'a> {
+    current_index: usize,
+    current_entity: EntityId,
+
+    data: &'a mut [u8],
+    stride: usize,
+    entityid_offset: usize,
+    val_offset: usize,
+}
+
+impl<'a> CursorMut<'a> {
+    fn empty<T: 'static>() -> Self {
+        let first_entity = EntityId(u32::MAX);
+        let storage = &mut [];
+
+        Self {
+            current_index: 0,
+            current_entity: first_entity,
+            data: storage,
+            stride: size_of::<(EntityId, T)>(),
+            entityid_offset: offset_of!((EntityId, T), 0),
+            val_offset: offset_of!((EntityId, T), 1),
+        }
+    }
+    fn new<T: 'static>(storage: &mut ComponentStorage<T>) -> Self {
+        let first_entity = storage
+            .data
+            .get(0)
+            .map(|x| x.0)
+            .unwrap_or(EntityId(u32::MAX));
+        let storage = unsafe {
+            slice::from_raw_parts_mut(
+                storage.data.as_mut_ptr() as *mut u8,
+                storage.data.len() * size_of::<(EntityId, T)>(),
+            )
+        };
+
+        Self {
+            current_index: 0,
+            current_entity: first_entity,
+            data: storage,
+            stride: size_of::<(EntityId, T)>(),
+            entityid_offset: offset_of!((EntityId, T), 0),
+            val_offset: offset_of!((EntityId, T), 1),
+        }
+    }
+    fn advance(&mut self) -> EntityId {
+        self.current_index += 1;
+        self.current_entity = self
+            .data
+            .get(
+                self.current_index * self.stride
+                    ..(self.current_index * self.stride) + size_of::<EntityId>(),
+            )
+            .map(|x| EntityId(u32::from_ne_bytes(x.try_into().unwrap())))
+            .unwrap_or(EntityId(u32::MAX));
+
+        self.current_entity
+    }
+    // required to be rawpointer because when this is called multiple times, each time the data is
+    // different, but rust doesnt see that
+    fn get_current_data(&mut self) -> *mut [u8] {
+        let start = self.current_index * self.stride + self.val_offset;
+        let end = (self.current_index + 1) * self.stride;
+
+        &mut self.data[start..end] as *mut [u8]
+    }
+}
 
 #[derive(Debug)]
 pub struct ComponentStorage<T: 'static> {
@@ -1047,7 +893,6 @@ trait ErasedComponentStorage: Any {
 }
 
 impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
-    /// returns true if remove was successful
     fn remove_entity(&mut self, entity: EntityId) {
         let _ = self.remove(entity);
     }
@@ -1131,10 +976,10 @@ impl World {
             })
     }
 
-    pub fn get<T: 'static + Fetch>(&self, entity: EntityId) -> T::OptionalItems<'_> {
+    pub fn get<T: 'static + Fetch>(&self, entity: EntityId) -> T::LookupResult<'_> {
         T::get(entity, self)
     }
-    pub fn get_mut<T: 'static + FetchMut>(&mut self, entity: EntityId) -> T::OptionalItems<'_> {
+    pub fn get_mut<T: 'static + FetchMut>(&mut self, entity: EntityId) -> T::LookupResult<'_> {
         T::get_mut(entity, self)
     }
     pub fn add_resource<T: 'static>(&mut self, resource: T) -> Result<(), WorldError> {
@@ -1297,7 +1142,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Req<&str>)>();
 
                 for item in query {
-                    counter += item.1.1[0];
+                    counter += item.1 .1[0];
                     std::hint::black_box(counter);
                 }
             },
@@ -1313,7 +1158,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Opt<i64>)>();
 
                 for item in query {
-                    counter += item.1.2.unwrap_or(&0);
+                    counter += item.1 .2.unwrap_or(&0);
                     std::hint::black_box(counter);
                 }
             },
@@ -1373,7 +1218,6 @@ fn benchmark() {
                 let _ = world.destroy(EntityId(e as u32));
             }
         });
-        panic!("ran benchmark");
     }
 }
 
@@ -2224,7 +2068,7 @@ fn not_filter_large_scale_mutable() {
     );
 
     // Verify mutations
-    for (e, (num, flt, str)) in world.query::<(Req<u32>, Req<f64>, Opt<String>)>() {
+    for (e, (num, flt, _str)) in world.query::<(Req<u32>, Req<f64>, Opt<String>)>() {
         let i = e.0 as usize;
         if i % 4 == 0 {
             // These should NOT be mutated
