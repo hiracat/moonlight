@@ -2,84 +2,44 @@ use std::f32::consts::PI;
 
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
-    core::{Keyboard, MouseState},
-    ecs::{OptM, ReqM, World},
+    core::{Game, Keyboard, MouseState},
+    ecs::{OptM, Req, ReqM, World},
     physics::{Aabb, Collider, RigidBody},
     resources::{Material, Skybox},
 };
 use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::keyboard::KeyCode;
 
-pub struct GameImpl {}
-
-impl moonlight::core::Game for GameImpl {
-    fn on_ui(&mut self, _world: &mut moonlight::ecs::World, context: &egui::Context) {
-        let mut offset_x = unsafe { OFFSET_X };
-        let mut offset_y = unsafe { OFFSET_Y };
-        let mut offset_z = unsafe { OFFSET_Z };
-        egui::CentralPanel::default().show(context, |_ui| {
-            egui::Window::new("Camera Offset").show(context, |ui| {
-                ui.add(egui::Slider::new(&mut offset_x, -10.0..=10.0).text("offset x"));
-                ui.add(egui::Slider::new(&mut offset_y, -10.0..=10.0).text("offset y"));
-                ui.add(egui::Slider::new(&mut offset_z, -10.0..=10.0).text("offset z"));
-            })
-        });
-        unsafe {
-            OFFSET_X = offset_x;
-            OFFSET_Y = offset_y;
-            OFFSET_Z = offset_z;
-        }
-    }
-    fn on_update(
-        &mut self,
-        world: &mut moonlight::ecs::World,
-        engine: &mut moonlight::core::Engine,
-        _delta_time: f32,
-    ) {
-        let offset_x = unsafe { OFFSET_X };
-        let offset_y = unsafe { OFFSET_Y };
-        let offset_z = unsafe { OFFSET_Z };
-
-        let delta_time = engine.delta_time;
-        player_update(world, delta_time);
-        physics_update(world, delta_time);
-        camera_update(world, delta_time, Vec3::new(offset_x, offset_y, offset_z));
-
-        // reset mouse movment after camera handles it
-        world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
-        world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
-    }
-    fn on_close(
-        &mut self,
-        _world: &mut moonlight::ecs::World,
-        _engine: &mut moonlight::core::Engine,
-    ) {
-    }
+// ai generated test game, will be replaced, just wanted an interesting test scene to have
+#[derive(Default)]
+pub struct GameImpl {
+    pub camera_offset: Vec3,
+    pub time: f32,
+    pub gem_collected: bool,
+    pub platform_entities: Vec<moonlight::ecs::EntityId>,
+    pub gem_entity: moonlight::ecs::EntityId,
+}
+impl Game for GameImpl {
+    fn on_close(&mut self, world: &mut World, engine: &mut moonlight::core::Engine) {}
     fn on_start(
         &mut self,
         world: &mut moonlight::ecs::World,
         engine: &mut moonlight::core::Engine,
     ) {
-        // ───────────────────────────────────────────────────────
-        // 2) Create "static" resources (camera, lights, input, etc.)
-        // ───────────────────────────────────────────────────────
-        // Camera at (0, 5, -6), fov=60°, near=1.0, far=100.0
         let (width, height) = engine.window_size;
-        let _camera = Camera::create(
-            Vec3::new(0.0, 5.0, -6.0),
+        let camera = Camera::create(
+            Vec3::new(0.0, 5.0, -10.0),
             60.0,
             1.0,
             200.0,
             height as f32 / width as f32,
         );
-        // Sun (directional) and ambient light
         let directional =
-            DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.2, 0.2, 0.2));
-        let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 1.0), 0.05);
+            DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.6, 0.2, 0.2));
+        let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.05);
 
-        // Register resources into the world
-        world.name("main world");
-
+        world.name("platformer");
+        *world.get_mut_resource().unwrap() = camera;
         world.add_resource(directional).unwrap();
         world.add_resource(ambient).unwrap();
 
@@ -91,74 +51,50 @@ impl moonlight::core::Game for GameImpl {
             "data/skybox/pz.png",
             "data/skybox/nz.png",
         ]);
-        let skybox = Skybox::new(skybox);
-        world.add_resource(skybox).unwrap();
+        world.add_resource(Skybox::new(skybox)).unwrap();
 
-        // ───────────────────────────────────────────────────────
-        // 3) Spawn entities
-        // ───────────────────────────────────────────────────────
+        // ── Fox ──────────────────────────────────────────────────
         let fox = world.spawn();
-        let ground = world.spawn();
-        let red_light = world.spawn();
-        let blue_light = world.spawn();
-        let green_light = world.spawn();
-        let x_axis = world.spawn();
-        let y_axis = world.spawn();
-        let z_axis = world.spawn();
-        let standing_block = world.spawn();
-
-        // ───────────────────────────────────────────────────────
-        // THE FOX - Center stage, elevated on a mystical platform
-        // ───────────────────────────────────────────────────────
         world
             .add(
                 fox,
                 Transform::from(
-                    Some(Vec3::new(0.0, 3.0, 0.0)), // Elevated at center
-                    Some(Rotor3::identity()),       // Slight rotation for dramatic pose
+                    Some(Vec3::new(0.0, 1.0, 0.0)),
+                    Some(Rotor3::identity()),
                     Some(Vec3::new(1.0, 1.0, 1.0)),
                 ),
             )
             .unwrap();
         world.add(fox, Controllable).unwrap();
-
-        // Fox collision - smaller and more precise
-        let fox_half_extents = Vec3::new(0.4, 0.588, 0.4);
-        let fox_center_offset = Vec3::new(0.0, 0.588, 0.0);
         world
             .add(
                 fox,
-                Collider::Aabb(Aabb::new(fox_half_extents, fox_center_offset)),
+                Collider::Aabb(Aabb::new(
+                    Vec3::new(0.4, 0.588, 0.4),
+                    Vec3::new(0.0, 0.588, 0.0),
+                )),
             )
             .unwrap();
         world.add(fox, RigidBody::new()).unwrap();
+
         let (fox_model, fox_animations) = engine
             .resource_manager
             .load_gltf_asset("data/models/animated_fox.glb");
         let mut fox_animations = fox_animations.unwrap();
         fox_animations.current_playing = Some(fox_animations.animations[0].clone());
-
         world.add(fox, fox_model).unwrap();
         world.add(fox, fox_animations).unwrap();
-
-        let albedo = engine
+        let fox_albedo = engine
             .resource_manager
             .create_texture("data/models/textures/animated_fox_texture.png");
+        world.add(fox, Material::create(fox_albedo)).unwrap();
 
-        world.add(fox, Material::create(albedo)).unwrap();
-
-        let albedo = engine
+        // ── Ground ───────────────────────────────────────────────
+        let ground = world.spawn();
+        let ground_tex = engine
             .resource_manager
-            .create_texture("data/models/textures/ground.jpg");
-        world.add(ground, Material::create(albedo)).unwrap();
-        world.add(x_axis, Material::create(albedo)).unwrap();
-        world.add(y_axis, Material::create(albedo)).unwrap();
-        world.add(z_axis, Material::create(albedo)).unwrap();
-        let albedo = engine
-            .resource_manager
-            .create_texture("data/models/textures/ground_soft.jpg");
-        world.add(standing_block, Material::create(albedo)).unwrap();
-
+            .create_texture("data/models/textures/ground_roots.png");
+        world.add(ground, Material::create(ground_tex)).unwrap();
         world
             .add(
                 ground,
@@ -174,137 +110,201 @@ impl moonlight::core::Game for GameImpl {
                     .0,
             )
             .unwrap();
-
-        // Ground collision - the full 40x40 area with some depth
         world
             .add(
                 ground,
                 Collider::Aabb(Aabb::new(
-                    Vec3::new(1.0, 4.0, 1.0),  // Half-extents: 40x2x40 total size
-                    Vec3::new(0.0, -4.0, 0.0), // Center offset: buried 1 unit down
+                    Vec3::new(1.0, 4.0, 1.0),
+                    Vec3::new(0.0, -4.0, 0.0),
                 )),
             )
             .unwrap();
 
-        world
-            .add(
-                x_axis,
-                Transform::from(
-                    Some(Vec3::new(8.0, 0.0, 8.0)), // High and forward-right
-                    None,
-                    Some(Vec3::new(10.0, 9.0, 10.0)),
-                ),
-            )
-            .unwrap();
-        world
-            .add(
-                y_axis,
-                Transform::from(
-                    Some(Vec3::new(-12.0, 0.0, -3.0)), // Tallest, to the left and slightly back
-                    None,
-                    Some(Vec3::new(2.0, 2.0, 2.0)),
-                ),
-            )
-            .unwrap();
-        world
-            .add(
-                z_axis,
-                Transform::from(
-                    Some(Vec3::new(5.0, 0.0, -10.0)), // Behind the fox, watching over
-                    None,
-                    Some(Vec3::new(3.0, 3.0, 3.0)),
-                ),
-            )
-            .unwrap();
-
-        world
-            .add(
-                standing_block,
-                Transform::from(
-                    Some(Vec3::new(4.0, 5.5, -3.0)),
-                    None,
-                    Some(Vec3::new(3.0, 0.3, 3.0)),
-                ),
-            )
-            .unwrap();
-
-        // Colliders for the floating monuments - smaller, more precise
-        let cube_collider = Collider::Aabb(Aabb::new(Vec3::new(1.0, 1.0, 1.0), Vec3::zero()));
-        world.add(x_axis, cube_collider).unwrap();
-        world.add(y_axis, cube_collider).unwrap();
-        world.add(z_axis, cube_collider).unwrap();
-        world.add(standing_block, cube_collider).unwrap();
+        // ── Platforms ────────────────────────────────────────────
+        // Each entry: (x, base_y, z, bob_speed, bob_phase, bob_amplitude)
+        let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
+            (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),   // easy first hop
+            (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),   // starts rising
+            (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),   // slow, high amplitude
+            (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),  // fast, small bob
+            (10.0, 9.0, -3.0, 1.1, 3.0, 1.0), // turn left
+            (7.0, 11.0, -6.0, 0.6, 1.5, 1.8), // big slow swing
+            (4.0, 13.0, -4.0, 2.0, 0.0, 0.5), // fast small
+            (1.0, 15.0, -2.0, 1.0, 4.0, 1.0), // final approach
+        ];
 
         let cube = engine
             .resource_manager
             .load_gltf_asset("data/models/large_cube.glb")
             .0;
-        // Attach models to monuments
-        world.add(x_axis, cube).unwrap();
-        world.add(y_axis, cube).unwrap();
-        world.add(z_axis, cube).unwrap();
-        world.add(standing_block, cube).unwrap();
+        let platform_tex = engine
+            .resource_manager
+            .create_texture("data/models/textures/ground.jpg");
 
+        for &(x, base_y, z, _speed, _phase, _amp) in platform_defs {
+            let e = world.spawn();
+            world
+                .add(
+                    e,
+                    Transform::from(
+                        Some(Vec3::new(x, base_y, z)),
+                        None,
+                        Some(Vec3::new(2.5, 0.3, 2.5)),
+                    ),
+                )
+                .unwrap();
+            world
+                .add(
+                    e,
+                    Collider::Aabb(Aabb::new(Vec3::new(1.0, 0.15, 1.0), Vec3::zero())),
+                )
+                .unwrap();
+            world.add(e, cube).unwrap();
+            world.add(e, Material::create(platform_tex)).unwrap();
+            self.platform_entities.push(e);
+        }
+
+        // ── Gem (goal) ───────────────────────────────────────────
+        let gem = world.spawn();
         world
             .add(
-                red_light,
-                PointLight::new(
-                    Vec3::new(1.0, 0.3, 0.2), // Warm red-orange
-                    35.0,                     // Medium intensity
+                gem,
+                Transform::from(
+                    Some(Vec3::new(1.0, 17.0, -2.0)),
                     None,
-                    Some(2.0),
+                    Some(Vec3::new(0.5, 0.5, 0.5)),
                 ),
             )
             .unwrap();
-        world
-            .add(
-                red_light,
-                Transform::from(Some(Vec3::new(10.0, 8.0, 6.0)), None, None), // Near the red monument, but higher
-            )
-            .unwrap();
+        let gem_model = engine
+            .resource_manager
+            .load_gltf_asset("data/models/diamond.glb")
+            .0;
+        let gem_tex = engine
+            .resource_manager
+            .create_texture("data/models/textures/diamond.png");
+        world.add(gem, gem_model).unwrap();
+        world.add(gem, Material::create(gem_tex)).unwrap();
+        self.gem_entity = gem;
 
-        world
-            .add(
-                green_light,
-                PointLight::new(
-                    Vec3::new(0.2, 1.0, 0.3), // Vibrant green
-                    35.0,                     // Medium intensity
-                    None,
-                    Some(2.0),
-                ),
-            )
-            .unwrap();
-        world
-            .add(
-                green_light,
-                Transform::from(Some(Vec3::new(-10.0, 7.0, -2.0)), None, None), // Left side, near green monument
-            )
-            .unwrap();
-
+        // ── Lights ───────────────────────────────────────────────
+        let blue_light = world.spawn();
         world
             .add(
                 blue_light,
-                PointLight::new(
-                    Vec3::new(0.1, 0.1, 1.0), // Cool blue
-                    55.0,                     // Medium intensity
-                    Some(1.2),
-                    Some(0.4),
-                ),
+                PointLight::new(Vec3::new(0.1, 0.4, 1.0), 60.0, Some(1.2), Some(0.4)),
             )
             .unwrap();
         world
             .add(
                 blue_light,
-                Transform::from(Some(Vec3::new(2.0, 5.0, -12.0)), None, None), // Behind fox, creating rim light
+                Transform::from(Some(Vec3::new(1.0, 18.0, -2.0)), None, None),
+            )
+            .unwrap();
+
+        let warm_light = world.spawn();
+        world
+            .add(
+                warm_light,
+                PointLight::new(Vec3::new(1.0, 0.6, 0.2), 40.0, None, Some(1.5)),
+            )
+            .unwrap();
+        world
+            .add(
+                warm_light,
+                Transform::from(Some(Vec3::new(0.0, 3.0, 0.0)), None, None),
             )
             .unwrap();
     }
+    fn on_update(
+        &mut self,
+        world: &mut moonlight::ecs::World,
+        engine: &mut moonlight::core::Engine,
+        _delta_time: f32,
+    ) {
+        let delta_time = engine.delta_time;
+        self.time += delta_time;
+
+        player_update(world, delta_time);
+        physics_update(world, delta_time);
+        camera_update(world, delta_time, self.camera_offset);
+
+        // ── Bob platforms ────────────────────────────────────────
+        let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
+            (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),
+            (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),
+            (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),
+            (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),
+            (10.0, 9.0, -3.0, 1.1, 3.0, 1.0),
+            (7.0, 11.0, -6.0, 0.6, 1.5, 1.8),
+            (4.0, 13.0, -4.0, 2.0, 0.0, 0.5),
+            (1.0, 15.0, -2.0, 1.0, 4.0, 1.0),
+        ];
+
+        for (i, &entity) in self.platform_entities.iter().enumerate() {
+            let (x, base_y, z, speed, phase, amp) = platform_defs[i];
+            let new_y = base_y + (self.time * speed + phase).sin() * amp;
+
+            if let Ok(transform) = world.get_mut::<(Transform,)>(entity) {
+                transform.position = Vec3::new(x, new_y, z);
+            }
+        }
+
+        // ── Spin gem and check collection ────────────────────────
+        if !self.gem_collected {
+            if let Ok(gem_transform) = world.get_mut::<(Transform,)>(self.gem_entity) {
+                // spin
+                gem_transform.rotation = Rotor3::from_rotation_xz(self.time * 2.0);
+
+                // check if fox is close enough
+                let gem_pos = gem_transform.position;
+                // get fox position via query
+            }
+
+            // need fox pos separately since we already borrowed gem
+            let mut fox_pos = Vec3::zero();
+            for (_, (t, c)) in world.query::<(Req<Transform>, Req<Controllable>)>() {
+                fox_pos = t.position;
+            }
+            if let Ok(gem_transform) = world.get_mut::<(Transform,)>(self.gem_entity) {
+                let dist = (gem_transform.position - fox_pos).mag();
+                if dist < 1.5 {
+                    self.gem_collected = true;
+                    // hide gem by scaling to zero
+                    gem_transform.scale = Vec3::zero();
+                    println!("🦊 Gem collected! You win!");
+                }
+            }
+        }
+
+        world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
+        world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
+    }
+    fn on_ui(&mut self, _world: &mut moonlight::ecs::World, context: &egui::Context) {
+        egui::CentralPanel::default().show(context, |_ui| {
+            if self.gem_collected {
+                egui::Window::new("🦊 You Win!")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(context, |ui| {
+                        ui.heading("You collected the gem!");
+                        ui.label("Jump across the platforms to reach the top.");
+                    });
+            } else {
+                egui::Window::new("Goal").show(context, |ui| {
+                    ui.label("Reach the glowing gem at the top!");
+                });
+            }
+
+            egui::Window::new("Camera").show(context, |ui| {
+                ui.add(egui::Slider::new(&mut self.camera_offset.x, -10.0..=10.0).text("x"));
+                ui.add(egui::Slider::new(&mut self.camera_offset.y, -10.0..=10.0).text("y"));
+                ui.add(egui::Slider::new(&mut self.camera_offset.z, -10.0..=10.0).text("z"));
+            });
+        });
+    }
 }
 
-static mut OFFSET_X: f32 = 0.0;
-static mut OFFSET_Y: f32 = 0.0;
-static mut OFFSET_Z: f32 = 0.0;
-
+// this on down is human written code though
 #[derive(Debug)]
 struct Controllable;
 
@@ -344,24 +344,24 @@ fn physics_update(world: &mut World, delta_time: f32) {
     for i in 0..collidable.len() {
         for j in i + 1..collidable.len() {
             match Collider::penetration_vector(
-                collidable[i].1.1,
-                collidable[j].1.1,
-                collidable[i].1.0,
-                collidable[j].1.0,
+                collidable[i].1 .1,
+                collidable[j].1 .1,
+                collidable[i].1 .0,
+                collidable[j].1 .0,
             ) {
                 Some(pen_vec) => {
-                    if collidable[i].1.2.is_some() && collidable[j].1.2.is_some() {
-                        collidable[i].1.0.position += pen_vec * 0.5;
+                    if collidable[i].1 .2.is_some() && collidable[j].1 .2.is_some() {
+                        collidable[i].1 .0.position += pen_vec * 0.5;
                         collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
-                        collidable[j].1.0.position -= pen_vec * 0.5;
+                        collidable[j].1 .0.position -= pen_vec * 0.5;
                         collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
                     } else {
-                        if collidable[i].1.2.is_some() {
-                            collidable[i].1.0.position += pen_vec;
+                        if collidable[i].1 .2.is_some() {
+                            collidable[i].1 .0.position += pen_vec;
                             collision_penetrations.push((collidable[i].0, pen_vec));
                         }
-                        if collidable[j].1.2.is_some() {
-                            collidable[j].1.0.position -= pen_vec;
+                        if collidable[j].1 .2.is_some() {
+                            collidable[j].1 .0.position -= pen_vec;
                             collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                         }
                     }

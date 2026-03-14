@@ -355,6 +355,11 @@ impl_fetch_mut!(req: [T], opt: [], not: [U, V, W]);
 
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
+impl Default for EntityId {
+    fn default() -> Self {
+        EntityId(u32::MAX)
+    }
+}
 
 #[derive(Debug)]
 pub enum WorldError {

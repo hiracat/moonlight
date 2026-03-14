@@ -17,8 +17,8 @@ use crate::{
     renderers::{
         ui::UIRenderer,
         world::{
-            draw::{FRAMES_IN_FLIGHT, WorldRenderer},
-            swapchain::{SwapchainResources, create_semaphores},
+            draw::{WorldRenderer, FRAMES_IN_FLIGHT},
+            swapchain::{create_semaphores, SwapchainResources},
         },
     },
     resources::ResourceManager,
@@ -482,10 +482,6 @@ impl<T: Game> ApplicationHandler for App<T> {
         //HACK: magic number, i dont care right now
 
         self.engine = Some(Engine::init(event_loop));
-        self.game
-            .as_mut()
-            .unwrap()
-            .on_start(&mut self.world, self.engine.as_mut().unwrap());
 
         let window_size = self
             .engine
@@ -509,6 +505,10 @@ impl<T: Game> ApplicationHandler for App<T> {
         self.world.add_resource(keyboard).unwrap();
         self.world.add_resource(mouse_movement).unwrap();
 
+        self.game
+            .as_mut()
+            .unwrap()
+            .on_start(&mut self.world, self.engine.as_mut().unwrap());
         self.engine.as_mut().unwrap().prev_frame_end = Instant::now();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

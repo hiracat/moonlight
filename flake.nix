@@ -24,6 +24,7 @@
           shaderc
 
           cloc
+          lua54Packages.lua
         ];
         shellHook = ''
           export VK_LAYER_PATH=${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d

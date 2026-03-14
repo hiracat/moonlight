@@ -3,7 +3,7 @@
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 use ash::vk;
-use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
+use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use ultraviolet as uv;
@@ -1080,7 +1080,7 @@ impl GpuTexture {
                     dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
                     image: self.image,
                     subresource_range,
-                    src_access_mask: vk::AccessFlags::empty(),
+                    src_access_mask: vk::AccessFlags::SHADER_READ,
                     dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
                     ..Default::default()
                 };
@@ -1144,7 +1144,7 @@ impl GpuTexture {
                     device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
