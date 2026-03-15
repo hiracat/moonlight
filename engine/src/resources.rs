@@ -29,17 +29,16 @@ pub struct ResourceManager {
     pub(crate) ubo_ring_buffer: UniformRingBuffer,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Skeleton {
     // TODO:just the index into the skeletons array(need to find a way to remove, but might just have to
     // waste some memory, or use option and waste some indices
     pub(crate) id: usize,
 }
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 pub struct Animation {
     // the index of the inner vec, so accessing an animation requires a skeleton and an animation
     pub(crate) id: usize,
-    name: String,
 }
 pub(crate) struct AnimationResources {
     // store all skeletons and bones, then flatten to upload to the gpu.
@@ -129,7 +128,7 @@ impl AnimationResources {
 // marks a entity as having animations, and stores references to the animations(should be
 // reconstructable from a file path, but thats deferred til serialization)
 // referenced https://www.youtube.com/watch?v=da6d28IylL8 to make this, and https://whoisryosuke.com/blog/2022/importing-gltf-with-wgpu-and-rust
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Animated {
     //PERF: this could possible be put into the resource manager since it can be large, but not
     //necesary for now
@@ -342,7 +341,6 @@ pub struct Material {
 #[derive(Debug, Clone, Copy)]
 pub struct Texture {
     id: usize,
-    path: Option<&'static str>,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Skybox {
@@ -364,7 +362,6 @@ impl Material {
 pub struct Mesh {
     id: usize,
     pub(crate) animated: bool,
-    path: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -698,10 +695,7 @@ impl ResourceManager {
         let animation_ids = animation_clips
             .iter()
             .enumerate()
-            .map(|(idx, animation)| Animation {
-                name: animation.name.clone(),
-                id: idx,
-            })
+            .map(|(idx, animation)| Animation { id: idx })
             .collect();
 
         self.animation_resources.skeletons.push(skeleton);
@@ -756,7 +750,7 @@ impl ResourceManager {
     pub(crate) fn default_texture(&mut self) -> &GpuTexture {
         &self.default_texture
     }
-    pub fn create_texture(&mut self, path: &'static str) -> Texture {
+    pub fn create_texture(&mut self, path: &str) -> Texture {
         let image = ImageReader::open(Path::new(path))
             .unwrap()
             .decode()
@@ -765,28 +759,28 @@ impl ResourceManager {
             .push(Some(GpuTexture::create_2d(&self.context, &image)));
         Texture {
             id: self.textures.len() - 1,
-            path: Some(path),
         }
     }
-    pub fn create_cubemap(&mut self, paths: [&'static str; 6]) -> Texture {
-        let images: [DynamicImage; 6] = paths.map(|path| {
-            ImageReader::open(Path::new(path))
-                .unwrap()
-                .decode()
-                .unwrap()
-        });
+    pub fn create_cubemap(&mut self, paths: &[&str]) -> Texture {
+        assert!(paths.len() == 6, "must be six images to form a cubemap");
+        let images: Vec<DynamicImage> = paths
+            .iter()
+            .map(|path| {
+                ImageReader::open(Path::new(path))
+                    .unwrap()
+                    .decode()
+                    .unwrap()
+            })
+            .collect();
         self.textures.push(Some(GpuTexture::create_cubemap(
             &self.context,
-            images.into(),
+            images.try_into().unwrap(),
         )));
         Texture {
             id: self.textures.len() - 1,
-            //HACK: need to either seperate different texture types out(probably smartest and
-            //easiest, or figure out a way to do multiple path types per texture(maybe enum)
-            path: None,
         }
     }
-    pub fn load_gltf_asset(&mut self, path: &'static str) -> (Mesh, Option<Animated>) {
+    pub fn load_gltf_asset(&mut self, path: &str) -> (Mesh, Option<Animated>) {
         let (document, buffers, _images) = gltf::import(path).unwrap();
         assert_eq!(document.meshes().len(), 1);
         let mesh = &document.meshes().next().unwrap();
@@ -835,7 +829,6 @@ impl ResourceManager {
         (
             Mesh {
                 id: self.meshes.len() - 1,
-                path: Some(path),
                 animated: is_animated,
             },
             animated,

@@ -31,7 +31,7 @@ impl Transform {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Camera {
     pub position: uv::Vec3,
     pub rotation: uv::Rotor3,
@@ -60,6 +60,7 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct AmbientLight {
     pub color: uv::Vec3,
     pub intensity: f32,
@@ -71,6 +72,7 @@ impl AmbientLight {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct PointLight {
     pub color: uv::Vec3,
     pub brightness: f32,
@@ -96,6 +98,7 @@ impl PointLight {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct DirectionalLight {
     pub from_position: uv::Vec4,
     pub color: uv::Vec3,

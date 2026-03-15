@@ -1,9 +1,11 @@
 use std::f32::consts::PI;
 
+use mlua::{Function, Lua};
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     core::{Game, Keyboard, MouseState},
     ecs::{OptM, Req, ReqM, World},
+    lua::LuaWorld,
     physics::{Aabb, Collider, RigidBody},
     resources::{Material, Skybox},
 };
@@ -43,7 +45,7 @@ impl Game for GameImpl {
         world.add_resource(directional).unwrap();
         world.add_resource(ambient).unwrap();
 
-        let skybox = engine.resource_manager.create_cubemap([
+        let skybox = engine.resource_manager.create_cubemap(&[
             "data/skybox/px.png",
             "data/skybox/nx.png",
             "data/skybox/py.png",
@@ -225,9 +227,18 @@ impl Game for GameImpl {
         let delta_time = engine.delta_time;
         self.time += delta_time;
 
-        player_update(world, delta_time);
-        physics_update(world, delta_time);
-        camera_update(world, delta_time, self.camera_offset);
+        let lua = Lua::new();
+        let chunk = std::fs::read_to_string("data/scripts/main.lua").expect("should have script");
+        if let Err(e) = lua.load(chunk).exec() {
+            eprintln!("script error: {}", e);
+        }
+        let function: Option<mlua::Function> = lua.globals().get("Update").ok();
+        let lua_world = LuaWorld {
+            world: world as *mut World,
+            registry: moonlight::lua::LuaComponentRegistry::new(),
+        };
+
+        function.and_then(|x| Some(x.call::<()>((lua_world, delta_time))));
 
         // ── Bob platforms ────────────────────────────────────────
         let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
@@ -277,6 +288,9 @@ impl Game for GameImpl {
             }
         }
 
+        player_update(world, delta_time);
+        physics_update(world, delta_time);
+        camera_update(world, delta_time, self.camera_offset);
         world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
         world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
     }

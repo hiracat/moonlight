@@ -1,34 +1,590 @@
-use std::any::TypeId;
+use std::{any::TypeId, collections::HashMap};
 
 use mlua::prelude::*;
+use winit::keyboard::KeyCode;
 
-struct LuaRunner {
-    lua: Lua,
-}
-impl LuaRunner {
-    fn init() {}
-}
+use crate::{
+    components::*,
+    core::{Keyboard, MouseState},
+    ecs::{EntityId, QueryInfo, World},
+    physics::RigidBody,
+    resources::{Animated, Animation, Material, Mesh, ResourceManager, Skeleton, Skybox, Texture},
+};
+use ultraviolet as uv;
 
-fn init_lua() {
-    let lua = Lua::new();
-
-    let map_table = lua.create_table()?;
-    map_table.set(1, "one")?;
-    map_table.set("two", 2)?;
-
-    lua.globals().set("map_table", map_table)?;
-
-    lua.load("for k,v in pairs(map_table) do print(k,v) end")
-        .exec()?;
-
-    Ok(())
+pub struct LuaWorld {
+    pub world: *mut World,
+    pub registry: LuaComponentRegistry,
 }
 
-struct LuaQuery {
-    pub with: Vec<TypeId>,
-    pub opt: Vec<TypeId>,
-    pub not: Vec<TypeId>,
+// ── Ref wrappers (ECS query results) ─────────────────────────────────────────
+
+struct TransformRef(*mut Transform);
+struct RigidBodyRef(*mut RigidBody);
+struct PointLightRef(*mut PointLight);
+struct AmbientLightRef(*mut AmbientLight);
+struct DirectionalLightRef(*mut DirectionalLight);
+struct CameraRef(*mut Camera);
+struct MeshRef(*mut Mesh);
+struct MaterialRef(*mut Material);
+struct TextureRef(*mut Texture);
+struct SkyboxRef(*mut Skybox);
+struct SkeletonRef(*mut Skeleton);
+struct AnimationRef(*mut Animation);
+struct AnimatedRef(*mut Animated);
+
+// ── Registry ─────────────────────────────────────────────────────────────────
+
+pub struct LuaComponentRegistry {
+    pub typeids: HashMap<String, TypeId>,
+    pub to_lua: HashMap<String, fn(*mut [u8], &Lua) -> LuaResult<LuaAnyUserData>>,
 }
-impl LuaQuery {
-    fn get_result(&self, world: &World) -> LuaTable {}
+
+impl LuaComponentRegistry {
+    pub fn new() -> Self {
+        let mut typeids = HashMap::new();
+        let mut to_lua: HashMap<String, fn(*mut [u8], &Lua) -> LuaResult<LuaAnyUserData>> =
+            HashMap::new();
+
+        macro_rules! reg {
+            ($name:literal, $t:ty, $ref:ident) => {
+                typeids.insert($name.to_string(), TypeId::of::<$t>());
+                to_lua.insert($name.to_string(), |ptr, lua| {
+                    lua.create_userdata($ref(ptr as *mut u8 as *mut $t))
+                });
+            };
+        }
+
+        reg!("Transform", Transform, TransformRef);
+        reg!("RigidBody", RigidBody, RigidBodyRef);
+        reg!("PointLight", PointLight, PointLightRef);
+        reg!("AmbientLight", AmbientLight, AmbientLightRef);
+        reg!("DirectionalLight", DirectionalLight, DirectionalLightRef);
+        reg!("Camera", Camera, CameraRef);
+        reg!("Mesh", Mesh, MeshRef);
+        reg!("Material", Material, MaterialRef);
+        reg!("Texture", Texture, TextureRef);
+        reg!("Skybox", Skybox, SkyboxRef);
+        reg!("Skeleton", Skeleton, SkeletonRef);
+        reg!("Animation", Animation, AnimationRef);
+        reg!("Animated", Animated, AnimatedRef);
+
+        Self { typeids, to_lua }
+    }
+}
+
+// ── Ref UserData impls ────────────────────────────────────────────────────────
+
+impl LuaUserData for TransformRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("x", |_, this| Ok(unsafe { (*this.0).position.x }));
+        fields.add_field_method_set("x", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("y", |_, this| Ok(unsafe { (*this.0).position.y }));
+        fields.add_field_method_set("y", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("z", |_, this| Ok(unsafe { (*this.0).position.z }));
+        fields.add_field_method_set("z", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.z = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("sx", |_, this| Ok(unsafe { (*this.0).scale.x }));
+        fields.add_field_method_set("sx", |_, this, val: f32| {
+            unsafe {
+                (*this.0).scale.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("sy", |_, this| Ok(unsafe { (*this.0).scale.y }));
+        fields.add_field_method_set("sy", |_, this, val: f32| {
+            unsafe {
+                (*this.0).scale.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("sz", |_, this| Ok(unsafe { (*this.0).scale.z }));
+        fields.add_field_method_set("sz", |_, this, val: f32| {
+            unsafe {
+                (*this.0).scale.z = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get_forward", |_, this, ()| {
+            let mut vec = uv::Vec3::new(0.0, 0.0, 1.0);
+            unsafe {
+                (*this.0).rotation.rotate_vec(&mut vec);
+            }
+            Ok((vec.x, vec.y, vec.z))
+        });
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<TransformRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl LuaUserData for RigidBodyRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("vx", |_, this| Ok(unsafe { (*this.0).velocity.x }));
+        fields.add_field_method_set("vx", |_, this, val: f32| {
+            unsafe {
+                (*this.0).velocity.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("vy", |_, this| Ok(unsafe { (*this.0).velocity.y }));
+        fields.add_field_method_set("vy", |_, this, val: f32| {
+            unsafe {
+                (*this.0).velocity.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("vz", |_, this| Ok(unsafe { (*this.0).velocity.z }));
+        fields.add_field_method_set("vz", |_, this, val: f32| {
+            unsafe {
+                (*this.0).velocity.z = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<RigidBodyRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl LuaUserData for PointLightRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("r", |_, this| Ok(unsafe { (*this.0).color.x }));
+        fields.add_field_method_set("r", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("g", |_, this| Ok(unsafe { (*this.0).color.y }));
+        fields.add_field_method_set("g", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("b", |_, this| Ok(unsafe { (*this.0).color.z }));
+        fields.add_field_method_set("b", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.z = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("brightness", |_, this| Ok(unsafe { (*this.0).brightness }));
+        fields.add_field_method_set("brightness", |_, this, val: f32| {
+            unsafe {
+                (*this.0).brightness = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("linear", |_, this| Ok(unsafe { (*this.0).linear }));
+        fields.add_field_method_set("linear", |_, this, val: f32| {
+            unsafe {
+                (*this.0).linear = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("quadratic", |_, this| Ok(unsafe { (*this.0).quadratic }));
+        fields.add_field_method_set("quadratic", |_, this, val: f32| {
+            unsafe {
+                (*this.0).quadratic = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<PointLightRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl LuaUserData for AmbientLightRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("r", |_, this| Ok(unsafe { (*this.0).color.x }));
+        fields.add_field_method_set("r", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("g", |_, this| Ok(unsafe { (*this.0).color.y }));
+        fields.add_field_method_set("g", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("b", |_, this| Ok(unsafe { (*this.0).color.z }));
+        fields.add_field_method_set("b", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.z = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("intensity", |_, this| Ok(unsafe { (*this.0).intensity }));
+        fields.add_field_method_set("intensity", |_, this, val: f32| {
+            unsafe {
+                (*this.0).intensity = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<AmbientLightRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl LuaUserData for DirectionalLightRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("r", |_, this| Ok(unsafe { (*this.0).color.x }));
+        fields.add_field_method_set("r", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("g", |_, this| Ok(unsafe { (*this.0).color.y }));
+        fields.add_field_method_set("g", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("b", |_, this| Ok(unsafe { (*this.0).color.z }));
+        fields.add_field_method_set("b", |_, this, val: f32| {
+            unsafe {
+                (*this.0).color.z = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("dx", |_, this| Ok(unsafe { (*this.0).from_position.x }));
+        fields.add_field_method_set("dx", |_, this, val: f32| {
+            unsafe {
+                (*this.0).from_position.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("dy", |_, this| Ok(unsafe { (*this.0).from_position.y }));
+        fields.add_field_method_set("dy", |_, this, val: f32| {
+            unsafe {
+                (*this.0).from_position.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("dz", |_, this| Ok(unsafe { (*this.0).from_position.z }));
+        fields.add_field_method_set("dz", |_, this, val: f32| {
+            unsafe {
+                (*this.0).from_position.z = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<DirectionalLightRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+impl LuaUserData for CameraRef {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("x", |_, this| Ok(unsafe { (*this.0).position.x }));
+        fields.add_field_method_set("x", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.x = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("y", |_, this| Ok(unsafe { (*this.0).position.y }));
+        fields.add_field_method_set("y", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.y = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("z", |_, this| Ok(unsafe { (*this.0).position.z }));
+        fields.add_field_method_set("z", |_, this, val: f32| {
+            unsafe {
+                (*this.0).position.z = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("pitch", |_, this| Ok(unsafe { (*this.0).pitch }));
+        fields.add_field_method_set("pitch", |_, this, val: f32| {
+            unsafe {
+                (*this.0).pitch = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("yaw", |_, this| Ok(unsafe { (*this.0).yaw }));
+        fields.add_field_method_set("yaw", |_, this, val: f32| {
+            unsafe {
+                (*this.0).yaw = val;
+            }
+            Ok(())
+        });
+        fields.add_field_method_get("fov", |_, this| Ok(unsafe { (*this.0).fov_rads }));
+        fields.add_field_method_set("fov", |_, this, val: f32| {
+            unsafe {
+                (*this.0).fov_rads = val;
+            }
+            Ok(())
+        });
+    }
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<CameraRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+// opaque refs — set only
+impl LuaUserData for MeshRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<MeshRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for MaterialRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<MaterialRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for TextureRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<TextureRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for SkyboxRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<SkyboxRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for SkeletonRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<SkeletonRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for AnimationRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<AnimationRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+impl LuaUserData for AnimatedRef {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("set", |_, this, val: LuaAnyUserData| {
+            unsafe {
+                std::ptr::copy_nonoverlapping(val.borrow::<AnimatedRef>()?.0, this.0, 1);
+            }
+            Ok(())
+        });
+    }
+}
+
+// ── Owned variants (returned from ResourceManager, not ECS pointers) ─────────
+
+impl LuaUserData for Mesh {}
+impl LuaUserData for Texture {}
+
+impl LuaUserData for Animated {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("time", |_, this| Ok(this.time));
+        fields.add_field_method_set("time", |_, this, val: f32| {
+            this.time = val;
+            Ok(())
+        });
+    }
+}
+
+// ── Unchanged impls ───────────────────────────────────────────────────────────
+
+impl LuaUserData for ResourceManager {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("create_texture", |_, this, path: String| {
+            Ok(this.create_texture(&path))
+        });
+        methods.add_method_mut("create_cubemap", |_, this, paths: Vec<String>| {
+            let paths_str: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+            Ok(this.create_cubemap(&paths_str))
+        });
+        methods.add_method_mut("load_gltf_asset", |_, this, path: String| {
+            let (mesh, animated) = this.load_gltf_asset(&path);
+            Ok((mesh, animated))
+        });
+    }
+}
+
+impl LuaUserData for EntityId {}
+
+impl LuaUserData for Keyboard {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("is_down", |_, this, key: String| {
+            Ok(this.is_down(parse_keycode(&key)))
+        });
+    }
+}
+
+fn parse_keycode(s: &str) -> KeyCode {
+    match s {
+        "w" => KeyCode::KeyW,
+        "a" => KeyCode::KeyA,
+        "s" => KeyCode::KeyS,
+        "d" => KeyCode::KeyD,
+        "space" => KeyCode::Space,
+        "shift" => KeyCode::ShiftLeft,
+        _ => KeyCode::F35,
+    }
+}
+
+impl LuaUserData for MouseState {
+    fn add_fields<F: LuaUserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("x", |_, this| Ok(this.x));
+        fields.add_field_method_get("y", |_, this| Ok(this.y));
+        fields.add_field_method_get("locked", |_, this| Ok(this.locked));
+    }
+}
+
+impl LuaUserData for LuaWorld {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("spawn", |_, this, ()| Ok(unsafe { (*this.world).spawn() }));
+        methods.add_method_mut("destroy", |_, this, val: LuaAnyUserData| {
+            unsafe { (*this.world).destroy(*val.borrow::<EntityId>()?).ok() };
+            Ok(())
+        });
+        methods.add_method_mut("query", |lua, this, val: LuaTable| -> LuaResult<LuaTable> {
+            let req = val
+                .get::<LuaTable>("req")
+                .map(|t| {
+                    t.sequence_values::<String>()
+                        .collect::<LuaResult<Vec<String>>>()
+                })
+                .unwrap_or(Ok(vec![]))?;
+            let opt = val
+                .get::<LuaTable>("opt")
+                .map(|t| {
+                    t.sequence_values::<String>()
+                        .collect::<LuaResult<Vec<String>>>()
+                })
+                .unwrap_or(Ok(vec![]))?;
+            let without = val
+                .get::<LuaTable>("without")
+                .map(|t| {
+                    t.sequence_values::<String>()
+                        .collect::<LuaResult<Vec<String>>>()
+                })
+                .unwrap_or(Ok(vec![]))?;
+
+            let registry = &this.registry;
+            let query_info = QueryInfo {
+                req_typeids: req
+                    .iter()
+                    .filter_map(|n| registry.typeids.get(n).copied())
+                    .collect(),
+                opt_typeids: opt
+                    .iter()
+                    .filter_map(|n| registry.typeids.get(n).copied())
+                    .collect(),
+                not_typeids: without
+                    .iter()
+                    .filter_map(|n| registry.typeids.get(n).copied())
+                    .collect(),
+            };
+
+            let raw = unsafe { &mut *this.world }.dyn_query_mut(&query_info);
+            let rows = lua.create_table()?;
+            for (i, (entity, req_ptrs, opt_ptrs)) in raw.into_iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("entity", entity)?;
+
+                // req components — always present
+                for (j, name) in req.iter().enumerate() {
+                    if let Some(maker) = registry.to_lua.get(name) {
+                        row.set(name.as_str(), maker(req_ptrs[j], lua)?)?;
+                    }
+                }
+
+                // opt components — may be None
+                for (j, name) in opt.iter().enumerate() {
+                    if let Some(maker) = registry.to_lua.get(name) {
+                        match opt_ptrs[j] {
+                            Some(ptr) => row.set(name.as_str(), maker(ptr, lua)?)?,
+                            None => row.set(name.as_str(), LuaNil)?,
+                        }
+                    }
+                }
+
+                rows.set(i + 1, row)?;
+            }
+
+            Ok(rows)
+        });
+    }
 }

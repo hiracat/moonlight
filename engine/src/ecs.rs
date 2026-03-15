@@ -230,21 +230,21 @@ macro_rules! impl_fetch_mut {
                         $(
                             world.get_storage_mut::<$req_ty>()
                                 .map(|x|CursorMut::new(x))
-                                .unwrap_or_else(|| CursorMut::empty::<$req_ty>()),
+                                .unwrap_or_else(|| CursorMut::empty()),
                         )*
                     ];
                     let opt_cursors = vec![
                         $(
                             world.get_storage_mut::<$opt_ty>()
                                 .map(|x|CursorMut::new(x))
-                                .unwrap_or_else(|| CursorMut::empty::<$opt_ty>()),
+                                .unwrap_or_else(|| CursorMut::empty()),
                         )*
                     ];
                     let not_cursors = vec![
                         $(
                             world.get_storage_mut::<$not_ty>()
                                 .map(|x|CursorMut::new(x))
-                                .unwrap_or_else(|| CursorMut::empty::<$not_ty>()),
+                                .unwrap_or_else(|| CursorMut::empty()),
                         )*
                     ];
 
@@ -776,7 +776,8 @@ struct CursorMut<'a> {
 }
 
 impl<'a> CursorMut<'a> {
-    fn empty<T: 'static>() -> Self {
+    // type doesnt matter, will never yield anything
+    fn empty() -> Self {
         let first_entity = EntityId(u32::MAX);
         let storage = &mut [];
 
@@ -784,9 +785,9 @@ impl<'a> CursorMut<'a> {
             current_index: 0,
             current_entity: first_entity,
             data: storage,
-            stride: size_of::<(EntityId, T)>(),
-            entityid_offset: offset_of!((EntityId, T), 0),
-            val_offset: offset_of!((EntityId, T), 1),
+            stride: size_of::<(EntityId, u32)>(),
+            entityid_offset: offset_of!((EntityId, u32), 0),
+            val_offset: offset_of!((EntityId, u32), 1),
         }
     }
     fn new<T: 'static>(storage: &mut ComponentStorage<T>) -> Self {
@@ -895,9 +896,13 @@ trait ErasedComponentStorage: Any {
     fn remove_entity(&mut self, entity: EntityId);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn to_cursor_mut(&mut self) -> CursorMut;
 }
 
 impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
+    fn to_cursor_mut(&mut self) -> CursorMut {
+        CursorMut::new(self)
+    }
     fn remove_entity(&mut self, entity: EntityId) {
         let _ = self.remove(entity);
     }
@@ -909,7 +914,77 @@ impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
     }
 }
 
+pub struct QueryInfo {
+    pub req_typeids: Vec<TypeId>,
+    pub opt_typeids: Vec<TypeId>,
+    pub not_typeids: Vec<TypeId>,
+}
+
 impl World {
+    pub(crate) fn dyn_query_mut<'w>(
+        &'w mut self,
+        query_info: &QueryInfo,
+    ) -> Vec<(EntityId, Vec<*mut [u8]>, Vec<Option<*mut [u8]>>)> {
+        let mut req_cursors: Vec<CursorMut> = Vec::new();
+        let mut opt_cursors: Vec<CursorMut> = Vec::new();
+        let mut not_cursors: Vec<CursorMut> = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        // get raw pointer to component_storages to bypass borrow checker
+        // safe because we manually ensure no two cursors point to the same storage
+        let storages =
+            &mut self.component_storages as *mut HashMap<TypeId, Box<dyn ErasedComponentStorage>>;
+
+        for typeid in &query_info.req_typeids {
+            if !seen_ids.insert(typeid) {
+                panic!("repeated typeid in lua query");
+            }
+            let cursor = unsafe {
+                (*storages)
+                    .get_mut(typeid)
+                    .map(|x| x.to_cursor_mut())
+                    .unwrap_or(CursorMut::empty())
+            };
+            req_cursors.push(cursor);
+        }
+
+        for typeid in &query_info.opt_typeids {
+            if !seen_ids.insert(typeid) {
+                panic!("repeated typeid in lua query");
+            }
+            let cursor = unsafe {
+                (*storages)
+                    .get_mut(typeid)
+                    .map(|x| x.to_cursor_mut())
+                    .unwrap_or(CursorMut::empty())
+            };
+            opt_cursors.push(cursor);
+        }
+
+        for typeid in &query_info.not_typeids {
+            if !seen_ids.insert(typeid) {
+                panic!("repeated typeid in lua query");
+            }
+            let cursor = unsafe {
+                (*storages)
+                    .get_mut(typeid)
+                    .map(|x| x.to_cursor_mut())
+                    .unwrap_or(CursorMut::empty())
+            };
+            not_cursors.push(cursor);
+        }
+
+        let mut dyn_query = DynQueryMut::new(req_cursors, opt_cursors, not_cursors);
+        let mut results = Vec::new();
+
+        while let Some((entity, req_ptrs, opt_ptrs)) = dyn_query.next() {
+            let req_ptrs: Vec<*mut [u8]> = req_ptrs.iter().copied().collect();
+            let opt_ptrs: Vec<Option<*mut [u8]>> = opt_ptrs.iter().copied().collect();
+            results.push((entity, req_ptrs, opt_ptrs));
+        }
+
+        results
+    }
     pub fn init() -> Self {
         Self {
             entities: HashSet::new(),
