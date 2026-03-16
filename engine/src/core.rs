@@ -14,6 +14,7 @@ use winit::{
 use crate::{
     components::Camera,
     ecs::World,
+    lua::LuaVM,
     renderers::{
         ui::UIRenderer,
         world::{
@@ -21,16 +22,9 @@ use crate::{
             swapchain::{create_semaphores, SwapchainResources},
         },
     },
-    resources::ResourceManager,
+    resources::{ResourceManager, Time},
     vulkan::VulkanContext,
 };
-
-pub trait Game {
-    fn on_start(&mut self, world: &mut World, engine: &mut Engine);
-    fn on_update(&mut self, world: &mut World, engine: &mut Engine, delta_time: f32);
-    fn on_close(&mut self, world: &mut World, engine: &mut Engine);
-    fn on_ui(&mut self, world: &mut World, context: &egui::Context);
-}
 
 pub struct Engine {
     vulkan_context: Arc<VulkanContext>,
@@ -47,7 +41,6 @@ pub struct Engine {
     pub resource_manager: ResourceManager,
 
     pub prev_frame_end: Instant,
-    pub delta_time: f32,
     pub frame_count: u64,
     pub window_size: (u32, u32),
 }
@@ -76,7 +69,6 @@ impl Engine {
             render_finished: render_finished,
             resource_manager: resource_manager,
             prev_frame_end: Instant::now(),
-            delta_time: 0.0,
             frame_in_flight: 0,
             per_frame: per_frame,
             frame_count: 0,
@@ -444,33 +436,46 @@ impl Keyboard {
         return self.keys.contains(&key);
     }
 }
+#[derive(Default)]
+pub struct Game {
+    pub on_start: Vec<System>,
+    pub on_update: Vec<System>,
+    pub on_close: Vec<System>,
+    pub on_ui: Vec<fn(&mut World, &egui::Context)>,
+}
 
-pub struct App<T: Game> {
+pub enum System {
+    Rust(fn(&mut World, &mut Engine)),
+    Lua(String),
+}
+
+pub struct App {
+    pub game: Game,
     engine: Option<Engine>,
-    game: Option<T>,
+    lua: LuaVM,
     world: World,
 }
 
-impl<T: Game> App<T> {
-    pub fn run(&mut self, game: T) {
+impl App {
+    pub fn run(&mut self, lua_script: &str) {
+        // we dont care about missing script file
+        let _ = self.lua.load_script(lua_script).unwrap();
         let event_loop = EventLoop::new().expect("failed to init event loop");
         event_loop.set_control_flow(ControlFlow::Poll);
-        self.game = Some(game);
         event_loop.run_app(self).unwrap();
     }
-}
 
-impl<T: Game> Default for App<T> {
-    fn default() -> Self {
+    pub fn new() -> Self {
         App {
             engine: None,
-            game: None,
+            game: Game::default(),
             world: World::init(),
+            lua: LuaVM::new(),
         }
     }
 }
 
-impl<T: Game> ApplicationHandler for App<T> {
+impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // ───────────────────────────────────────────────────────
@@ -501,14 +506,23 @@ impl<T: Game> ApplicationHandler for App<T> {
             200.0,
             window_size.height as f32 / window_size.width as f32,
         );
+        let time = Time::default();
         self.world.add_resource(camera).unwrap();
         self.world.add_resource(keyboard).unwrap();
         self.world.add_resource(mouse_movement).unwrap();
+        self.world.add_resource(time).unwrap();
 
-        self.game
-            .as_mut()
-            .unwrap()
-            .on_start(&mut self.world, self.engine.as_mut().unwrap());
+        for sys in &self.game.on_start {
+            match sys {
+                System::Lua(l) => {
+                    let _ = self
+                        .lua
+                        .run_script(&mut self.world, self.engine.as_mut().unwrap(), l);
+                }
+                System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
+            }
+        }
+
         self.engine.as_mut().unwrap().prev_frame_end = Instant::now();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -521,6 +535,7 @@ impl<T: Game> ApplicationHandler for App<T> {
             .ui_renderer
             .winit_egui_state
             .on_window_event(&window, &event);
+
         if response.consumed == true {
             return;
         }
@@ -532,17 +547,28 @@ impl<T: Game> ApplicationHandler for App<T> {
                 .window
                 .request_redraw();
         }
-        let delta_time = self.engine.as_ref().unwrap().delta_time;
-        let game = self.game.as_mut().unwrap();
-        let engine = self.engine.as_mut().unwrap();
         let world = &mut self.world;
 
         match event {
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
+                for sys in &self.game.on_update {
+                    match sys {
+                        System::Lua(l) => {
+                            let _ = self.lua.run_script(
+                                &mut self.world,
+                                self.engine.as_mut().unwrap(),
+                                l,
+                            );
+                        }
+                        System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
+                    }
+                }
+
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
+                let engine = self.engine.as_mut().unwrap();
                 engine.framebuffer_resized = true;
                 let PhysicalSize { width, height } = window.inner_size();
                 engine.window_size = (width, height);
@@ -550,16 +576,32 @@ impl<T: Game> ApplicationHandler for App<T> {
                     width as f32 / height as f32;
             }
             WindowEvent::RedrawRequested => {
-                game.on_update(world, engine, delta_time);
+                for sys in &self.game.on_update {
+                    match sys {
+                        System::Lua(l) => {
+                            let _ = self.lua.run_script(
+                                &mut self.world,
+                                self.engine.as_mut().unwrap(),
+                                l,
+                            );
+                        }
+                        System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
+                    }
+                }
+                let engine = self.engine.as_mut().unwrap();
+
                 let raw_input = engine.ui_renderer.winit_egui_state.take_egui_input(&window);
                 let full_output = engine.ui_renderer.ui_ctx.run(raw_input, |ctx| {
-                    game.on_ui(world, ctx);
+                    for sys in &self.game.on_ui {
+                        sys(&mut self.world, ctx);
+                    }
                 });
 
                 engine.ui_renderer.full_output = Some(full_output);
-                engine.draw(world);
-                engine.delta_time = engine.prev_frame_end.elapsed().as_secs_f32();
+                engine.draw(&mut self.world);
 
+                self.world.get_mut_resource::<Time>().unwrap().delta_time =
+                    engine.prev_frame_end.elapsed().as_secs_f32();
                 engine.prev_frame_end = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -604,7 +646,8 @@ impl<T: Game> ApplicationHandler for App<T> {
             }
             WindowEvent::Focused(focused) => {
                 if focused {
-                    engine.delta_time = 0.0;
+                    let engine = self.engine.as_mut().unwrap();
+                    self.world.get_mut_resource::<Time>().unwrap().delta_time = 0.0;
                     engine.prev_frame_end = Instant::now();
                 }
             }

@@ -1,14 +1,16 @@
-function Update(world, dt)
-	local results = world:query({ req = { "Transform" }, opt = { "RigidBody" } })
-	print("results type:", type(results))
-	print("results length:", #results)
+local Run = false
+local cube_mesh = nil
 
-	for _, row in ipairs(results) do
-		local t = row.Transform.z
-		print(t)
-		row.Transform.y = 0
-		local t = row.Transform.z
-		print(t)
-		print(row.RigidBody)
+function Update(world, engine)
+	if not Run then
+		Run = true
+		local mesh, _ = engine:load_gltf_asset("data/models/large_cube.glb")
+		for i = 1, 5 do
+			print(mesh)
+			world:spawn({
+				Transform = { x = i * 3.0, y = i * 2.0, z = 0.0 },
+				Mesh = mesh,
+			})
+		end
 	end
 end

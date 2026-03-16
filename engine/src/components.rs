@@ -3,6 +3,11 @@
 use ultraviolet as uv;
 
 #[derive(Debug, Clone, Copy)]
+pub struct Time {
+    delta_time: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: uv::Vec3,
     pub rotation: uv::Rotor3,

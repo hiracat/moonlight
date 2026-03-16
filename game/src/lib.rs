@@ -1,321 +1,313 @@
 use std::f32::consts::PI;
 
-use mlua::{Function, Lua};
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
-    core::{Game, Keyboard, MouseState},
+    core::{App, Engine, Keyboard, MouseState, System},
     ecs::{OptM, Req, ReqM, World},
-    lua::LuaWorld,
     physics::{Aabb, Collider, RigidBody},
-    resources::{Material, Skybox},
+    resources::{self, Material, Skybox},
 };
 use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::keyboard::KeyCode;
 
-// ai generated test game, will be replaced, just wanted an interesting test scene to have
-#[derive(Default)]
-pub struct GameImpl {
-    pub camera_offset: Vec3,
-    pub time: f32,
-    pub gem_collected: bool,
-    pub platform_entities: Vec<moonlight::ecs::EntityId>,
-    pub gem_entity: moonlight::ecs::EntityId,
+// ── Resources ────────────────────────────────────────────
+struct GameTime(f32);
+struct GemCollected(bool);
+struct GemEntity(moonlight::ecs::EntityId);
+struct PlatformEntities(Vec<moonlight::ecs::EntityId>);
+struct CameraOffset(Vec3);
+
+pub fn setup_game() -> App {
+    let mut app = App::new();
+    app.game.on_start.push(System::Rust(start));
+    app.game.on_update.push(System::Rust(game_update));
+    app.game.on_update.push(System::Lua("Update".to_string()));
+    app.game.on_ui.push(ui);
+    app
 }
-impl Game for GameImpl {
-    fn on_close(&mut self, world: &mut World, engine: &mut moonlight::core::Engine) {}
-    fn on_start(
-        &mut self,
-        world: &mut moonlight::ecs::World,
-        engine: &mut moonlight::core::Engine,
-    ) {
-        let (width, height) = engine.window_size;
-        let camera = Camera::create(
-            Vec3::new(0.0, 5.0, -10.0),
-            60.0,
-            1.0,
-            200.0,
-            height as f32 / width as f32,
-        );
-        let directional =
-            DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.6, 0.2, 0.2));
-        let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.05);
 
-        world.name("platformer");
-        *world.get_mut_resource().unwrap() = camera;
-        world.add_resource(directional).unwrap();
-        world.add_resource(ambient).unwrap();
+fn start(world: &mut World, engine: &mut Engine) {
+    let (width, height) = engine.window_size;
+    let camera = Camera::create(
+        Vec3::new(0.0, 5.0, -10.0),
+        60.0,
+        1.0,
+        200.0,
+        height as f32 / width as f32,
+    );
+    let directional =
+        DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.6, 0.2, 0.2));
+    let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.05);
 
-        let skybox = engine.resource_manager.create_cubemap(&[
-            "data/skybox/px.png",
-            "data/skybox/nx.png",
-            "data/skybox/py.png",
-            "data/skybox/ny.png",
-            "data/skybox/pz.png",
-            "data/skybox/nz.png",
-        ]);
-        world.add_resource(Skybox::new(skybox)).unwrap();
+    world.name("platformer");
+    *world.get_mut_resource().unwrap() = camera;
+    world.add_resource(directional).unwrap();
+    world.add_resource(ambient).unwrap();
+    world.add_resource(GameTime(0.0)).unwrap();
+    world.add_resource(GemCollected(false)).unwrap();
+    world.add_resource(CameraOffset(Vec3::zero())).unwrap();
 
-        // ── Fox ──────────────────────────────────────────────────
-        let fox = world.spawn();
+    let skybox = engine.resource_manager.create_cubemap(&[
+        "data/skybox/px.png",
+        "data/skybox/nx.png",
+        "data/skybox/py.png",
+        "data/skybox/ny.png",
+        "data/skybox/pz.png",
+        "data/skybox/nz.png",
+    ]);
+    world.add_resource(Skybox::new(skybox)).unwrap();
+
+    // ── Fox ──────────────────────────────────────────────────
+    let fox = world.spawn();
+    world
+        .add(
+            fox,
+            Transform::from(
+                Some(Vec3::new(0.0, 1.0, 0.0)),
+                Some(Rotor3::identity()),
+                Some(Vec3::new(1.0, 1.0, 1.0)),
+            ),
+        )
+        .unwrap();
+    world.add(fox, Controllable).unwrap();
+    world
+        .add(
+            fox,
+            Collider::Aabb(Aabb::new(
+                Vec3::new(0.4, 0.588, 0.4),
+                Vec3::new(0.0, 0.588, 0.0),
+            )),
+        )
+        .unwrap();
+    world.add(fox, RigidBody::new()).unwrap();
+
+    let (fox_model, fox_animations) = engine
+        .resource_manager
+        .load_gltf_asset("data/models/animated_fox.glb");
+    let mut fox_animations = fox_animations.unwrap();
+    fox_animations.current_playing = Some(fox_animations.animations[0].clone());
+    world.add(fox, fox_model).unwrap();
+    world.add(fox, fox_animations).unwrap();
+    let fox_albedo = engine
+        .resource_manager
+        .create_texture("data/models/textures/animated_fox_texture.png");
+    world.add(fox, Material::create(fox_albedo)).unwrap();
+
+    // ── Ground ───────────────────────────────────────────────
+    let ground = world.spawn();
+    let ground_tex = engine
+        .resource_manager
+        .create_texture("data/models/textures/ground_roots.png");
+    world.add(ground, Material::create(ground_tex)).unwrap();
+    world
+        .add(
+            ground,
+            Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
+        )
+        .unwrap();
+    world
+        .add(
+            ground,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/ground_plane.glb")
+                .0,
+        )
+        .unwrap();
+    world
+        .add(
+            ground,
+            Collider::Aabb(Aabb::new(
+                Vec3::new(1.0, 4.0, 1.0),
+                Vec3::new(0.0, -4.0, 0.0),
+            )),
+        )
+        .unwrap();
+
+    // ── Platforms ────────────────────────────────────────────
+    let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
+        (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),
+        (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),
+        (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),
+        (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),
+        (10.0, 9.0, -3.0, 1.1, 3.0, 1.0),
+        (7.0, 11.0, -6.0, 0.6, 1.5, 1.8),
+        (4.0, 13.0, -4.0, 2.0, 0.0, 0.5),
+        (1.0, 15.0, -2.0, 1.0, 4.0, 1.0),
+    ];
+
+    let cube = engine
+        .resource_manager
+        .load_gltf_asset("data/models/large_cube.glb")
+        .0;
+    let platform_tex = engine
+        .resource_manager
+        .create_texture("data/models/textures/ground.jpg");
+    let mut platform_entities = Vec::new();
+
+    for &(x, base_y, z, _speed, _phase, _amp) in platform_defs {
+        let e = world.spawn();
         world
             .add(
-                fox,
+                e,
                 Transform::from(
-                    Some(Vec3::new(0.0, 1.0, 0.0)),
-                    Some(Rotor3::identity()),
-                    Some(Vec3::new(1.0, 1.0, 1.0)),
-                ),
-            )
-            .unwrap();
-        world.add(fox, Controllable).unwrap();
-        world
-            .add(
-                fox,
-                Collider::Aabb(Aabb::new(
-                    Vec3::new(0.4, 0.588, 0.4),
-                    Vec3::new(0.0, 0.588, 0.0),
-                )),
-            )
-            .unwrap();
-        world.add(fox, RigidBody::new()).unwrap();
-
-        let (fox_model, fox_animations) = engine
-            .resource_manager
-            .load_gltf_asset("data/models/animated_fox.glb");
-        let mut fox_animations = fox_animations.unwrap();
-        fox_animations.current_playing = Some(fox_animations.animations[0].clone());
-        world.add(fox, fox_model).unwrap();
-        world.add(fox, fox_animations).unwrap();
-        let fox_albedo = engine
-            .resource_manager
-            .create_texture("data/models/textures/animated_fox_texture.png");
-        world.add(fox, Material::create(fox_albedo)).unwrap();
-
-        // ── Ground ───────────────────────────────────────────────
-        let ground = world.spawn();
-        let ground_tex = engine
-            .resource_manager
-            .create_texture("data/models/textures/ground_roots.png");
-        world.add(ground, Material::create(ground_tex)).unwrap();
-        world
-            .add(
-                ground,
-                Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
-            )
-            .unwrap();
-        world
-            .add(
-                ground,
-                engine
-                    .resource_manager
-                    .load_gltf_asset("data/models/ground_plane.glb")
-                    .0,
-            )
-            .unwrap();
-        world
-            .add(
-                ground,
-                Collider::Aabb(Aabb::new(
-                    Vec3::new(1.0, 4.0, 1.0),
-                    Vec3::new(0.0, -4.0, 0.0),
-                )),
-            )
-            .unwrap();
-
-        // ── Platforms ────────────────────────────────────────────
-        // Each entry: (x, base_y, z, bob_speed, bob_phase, bob_amplitude)
-        let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
-            (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),   // easy first hop
-            (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),   // starts rising
-            (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),   // slow, high amplitude
-            (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),  // fast, small bob
-            (10.0, 9.0, -3.0, 1.1, 3.0, 1.0), // turn left
-            (7.0, 11.0, -6.0, 0.6, 1.5, 1.8), // big slow swing
-            (4.0, 13.0, -4.0, 2.0, 0.0, 0.5), // fast small
-            (1.0, 15.0, -2.0, 1.0, 4.0, 1.0), // final approach
-        ];
-
-        let cube = engine
-            .resource_manager
-            .load_gltf_asset("data/models/large_cube.glb")
-            .0;
-        let platform_tex = engine
-            .resource_manager
-            .create_texture("data/models/textures/ground.jpg");
-
-        for &(x, base_y, z, _speed, _phase, _amp) in platform_defs {
-            let e = world.spawn();
-            world
-                .add(
-                    e,
-                    Transform::from(
-                        Some(Vec3::new(x, base_y, z)),
-                        None,
-                        Some(Vec3::new(2.5, 0.3, 2.5)),
-                    ),
-                )
-                .unwrap();
-            world
-                .add(
-                    e,
-                    Collider::Aabb(Aabb::new(Vec3::new(1.0, 0.15, 1.0), Vec3::zero())),
-                )
-                .unwrap();
-            world.add(e, cube).unwrap();
-            world.add(e, Material::create(platform_tex)).unwrap();
-            self.platform_entities.push(e);
-        }
-
-        // ── Gem (goal) ───────────────────────────────────────────
-        let gem = world.spawn();
-        world
-            .add(
-                gem,
-                Transform::from(
-                    Some(Vec3::new(1.0, 17.0, -2.0)),
+                    Some(Vec3::new(x, base_y, z)),
                     None,
-                    Some(Vec3::new(0.5, 0.5, 0.5)),
+                    Some(Vec3::new(2.5, 0.3, 2.5)),
                 ),
             )
             .unwrap();
-        let gem_model = engine
-            .resource_manager
-            .load_gltf_asset("data/models/diamond.glb")
-            .0;
-        let gem_tex = engine
-            .resource_manager
-            .create_texture("data/models/textures/diamond.png");
-        world.add(gem, gem_model).unwrap();
-        world.add(gem, Material::create(gem_tex)).unwrap();
-        self.gem_entity = gem;
-
-        // ── Lights ───────────────────────────────────────────────
-        let blue_light = world.spawn();
         world
             .add(
-                blue_light,
-                PointLight::new(Vec3::new(0.1, 0.4, 1.0), 60.0, Some(1.2), Some(0.4)),
+                e,
+                Collider::Aabb(Aabb::new(Vec3::new(1.0, 0.15, 1.0), Vec3::zero())),
             )
             .unwrap();
-        world
-            .add(
-                blue_light,
-                Transform::from(Some(Vec3::new(1.0, 18.0, -2.0)), None, None),
-            )
-            .unwrap();
-
-        let warm_light = world.spawn();
-        world
-            .add(
-                warm_light,
-                PointLight::new(Vec3::new(1.0, 0.6, 0.2), 40.0, None, Some(1.5)),
-            )
-            .unwrap();
-        world
-            .add(
-                warm_light,
-                Transform::from(Some(Vec3::new(0.0, 3.0, 0.0)), None, None),
-            )
-            .unwrap();
+        world.add(e, cube).unwrap();
+        world.add(e, Material::create(platform_tex)).unwrap();
+        platform_entities.push(e);
     }
-    fn on_update(
-        &mut self,
-        world: &mut moonlight::ecs::World,
-        engine: &mut moonlight::core::Engine,
-        _delta_time: f32,
-    ) {
-        let delta_time = engine.delta_time;
-        self.time += delta_time;
+    world
+        .add_resource(PlatformEntities(platform_entities))
+        .unwrap();
 
-        let lua = Lua::new();
-        let chunk = std::fs::read_to_string("data/scripts/main.lua").expect("should have script");
-        if let Err(e) = lua.load(chunk).exec() {
-            eprintln!("script error: {}", e);
+    // ── Gem ──────────────────────────────────────────────────
+    let gem = world.spawn();
+    world
+        .add(
+            gem,
+            Transform::from(
+                Some(Vec3::new(1.0, 17.0, -2.0)),
+                None,
+                Some(Vec3::new(0.5, 0.5, 0.5)),
+            ),
+        )
+        .unwrap();
+    let gem_model = engine
+        .resource_manager
+        .load_gltf_asset("data/models/diamond.glb")
+        .0;
+    let gem_tex = engine
+        .resource_manager
+        .create_texture("data/models/textures/diamond.png");
+    world.add(gem, gem_model).unwrap();
+    world.add(gem, Material::create(gem_tex)).unwrap();
+    world.add_resource(GemEntity(gem)).unwrap();
+
+    // ── Lights ───────────────────────────────────────────────
+    let blue_light = world.spawn();
+    world
+        .add(
+            blue_light,
+            PointLight::new(Vec3::new(0.1, 0.4, 1.0), 60.0, Some(1.2), Some(0.4)),
+        )
+        .unwrap();
+    world
+        .add(
+            blue_light,
+            Transform::from(Some(Vec3::new(1.0, 18.0, -2.0)), None, None),
+        )
+        .unwrap();
+
+    let warm_light = world.spawn();
+    world
+        .add(
+            warm_light,
+            PointLight::new(Vec3::new(1.0, 0.6, 0.2), 40.0, None, Some(1.5)),
+        )
+        .unwrap();
+    world
+        .add(
+            warm_light,
+            Transform::from(Some(Vec3::new(0.0, 3.0, 0.0)), None, None),
+        )
+        .unwrap();
+}
+
+fn game_update(world: &mut World, engine: &mut Engine) {
+    let delta_time = world.get_resource::<resources::Time>().unwrap().delta_time;
+    let time = {
+        let t = world.get_mut_resource::<GameTime>().unwrap();
+        t.0 += delta_time;
+        t.0
+    };
+
+    // ── Bob platforms ────────────────────────────────────────
+    let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
+        (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),
+        (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),
+        (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),
+        (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),
+        (10.0, 9.0, -3.0, 1.1, 3.0, 1.0),
+        (7.0, 11.0, -6.0, 0.6, 1.5, 1.8),
+        (4.0, 13.0, -4.0, 2.0, 0.0, 0.5),
+        (1.0, 15.0, -2.0, 1.0, 4.0, 1.0),
+    ];
+
+    let platform_entities: Vec<_> = world.get_resource::<PlatformEntities>().unwrap().0.clone();
+    for (i, &entity) in platform_entities.iter().enumerate() {
+        let (x, base_y, z, speed, phase, amp) = platform_defs[i];
+        let new_y = base_y + (time * speed + phase).sin() * amp;
+        if let Ok(transform) = world.get_mut::<(Transform,)>(entity) {
+            transform.position = Vec3::new(x, new_y, z);
         }
-        let function: Option<mlua::Function> = lua.globals().get("Update").ok();
-        let lua_world = LuaWorld {
-            world: world as *mut World,
-            registry: moonlight::lua::LuaComponentRegistry::new(),
-        };
-
-        function.and_then(|x| Some(x.call::<()>((lua_world, delta_time))));
-
-        // ── Bob platforms ────────────────────────────────────────
-        let platform_defs: &[(f32, f32, f32, f32, f32, f32)] = &[
-            (3.0, 2.0, 3.0, 1.0, 0.0, 0.8),
-            (6.0, 4.0, 5.0, 1.3, 1.0, 1.2),
-            (9.0, 5.0, 3.0, 0.8, 2.5, 1.5),
-            (12.0, 7.0, 1.0, 1.8, 0.5, 0.6),
-            (10.0, 9.0, -3.0, 1.1, 3.0, 1.0),
-            (7.0, 11.0, -6.0, 0.6, 1.5, 1.8),
-            (4.0, 13.0, -4.0, 2.0, 0.0, 0.5),
-            (1.0, 15.0, -2.0, 1.0, 4.0, 1.0),
-        ];
-
-        for (i, &entity) in self.platform_entities.iter().enumerate() {
-            let (x, base_y, z, speed, phase, amp) = platform_defs[i];
-            let new_y = base_y + (self.time * speed + phase).sin() * amp;
-
-            if let Ok(transform) = world.get_mut::<(Transform,)>(entity) {
-                transform.position = Vec3::new(x, new_y, z);
-            }
-        }
-
-        // ── Spin gem and check collection ────────────────────────
-        if !self.gem_collected {
-            if let Ok(gem_transform) = world.get_mut::<(Transform,)>(self.gem_entity) {
-                // spin
-                gem_transform.rotation = Rotor3::from_rotation_xz(self.time * 2.0);
-
-                // check if fox is close enough
-                let gem_pos = gem_transform.position;
-                // get fox position via query
-            }
-
-            // need fox pos separately since we already borrowed gem
-            let mut fox_pos = Vec3::zero();
-            for (_, (t, c)) in world.query::<(Req<Transform>, Req<Controllable>)>() {
-                fox_pos = t.position;
-            }
-            if let Ok(gem_transform) = world.get_mut::<(Transform,)>(self.gem_entity) {
-                let dist = (gem_transform.position - fox_pos).mag();
-                if dist < 1.5 {
-                    self.gem_collected = true;
-                    // hide gem by scaling to zero
-                    gem_transform.scale = Vec3::zero();
-                    println!("🦊 Gem collected! You win!");
-                }
-            }
-        }
-
-        player_update(world, delta_time);
-        physics_update(world, delta_time);
-        camera_update(world, delta_time, self.camera_offset);
-        world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
-        world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
     }
-    fn on_ui(&mut self, _world: &mut moonlight::ecs::World, context: &egui::Context) {
-        egui::CentralPanel::default().show(context, |_ui| {
-            if self.gem_collected {
-                egui::Window::new("🦊 You Win!")
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(context, |ui| {
-                        ui.heading("You collected the gem!");
-                        ui.label("Jump across the platforms to reach the top.");
-                    });
-            } else {
-                egui::Window::new("Goal").show(context, |ui| {
-                    ui.label("Reach the glowing gem at the top!");
+
+    // ── Spin gem and check collection ────────────────────────
+    let gem_collected = world.get_resource::<GemCollected>().unwrap().0;
+    if !gem_collected {
+        let gem_entity = world.get_resource::<GemEntity>().unwrap().0;
+        if let Ok(gem_transform) = world.get_mut::<(Transform,)>(gem_entity) {
+            gem_transform.rotation = Rotor3::from_rotation_xz(time * 2.0);
+        }
+
+        let mut fox_pos = Vec3::zero();
+        for (_, (t, _)) in world.query::<(Req<Transform>, Req<Controllable>)>() {
+            fox_pos = t.position;
+        }
+
+        let dist = world
+            .get_mut::<(Transform,)>(gem_entity)
+            .map(|t| (t.position - fox_pos).mag())
+            .unwrap_or(f32::MAX);
+
+        if dist < 1.5 {
+            world.get_mut::<(Transform,)>(gem_entity).unwrap().scale = Vec3::zero();
+            world.get_mut_resource::<GemCollected>().unwrap().0 = true;
+            println!("🦊 Gem collected! You win!");
+        }
+    }
+
+    player_update(world, delta_time);
+    physics_update(world, delta_time);
+    let camera_offset = world.get_resource::<CameraOffset>().unwrap().0;
+    camera_update(world, delta_time, camera_offset);
+}
+
+fn ui(world: &mut World, context: &egui::Context) {
+    let gem_collected = world.get_resource::<GemCollected>().unwrap().0;
+    let camera_offset = &mut world.get_mut_resource::<CameraOffset>().unwrap().0;
+
+    egui::CentralPanel::default().show(context, |_ui| {
+        if gem_collected {
+            egui::Window::new("🦊 You Win!")
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(context, |ui| {
+                    ui.heading("You collected the gem!");
+                    ui.label("Jump across the platforms to reach the top.");
                 });
-            }
-
-            egui::Window::new("Camera").show(context, |ui| {
-                ui.add(egui::Slider::new(&mut self.camera_offset.x, -10.0..=10.0).text("x"));
-                ui.add(egui::Slider::new(&mut self.camera_offset.y, -10.0..=10.0).text("y"));
-                ui.add(egui::Slider::new(&mut self.camera_offset.z, -10.0..=10.0).text("z"));
+        } else {
+            egui::Window::new("Goal").show(context, |ui| {
+                ui.label("Reach the glowing gem at the top!");
             });
+        }
+
+        egui::Window::new("Camera").show(context, |ui| {
+            ui.add(egui::Slider::new(&mut camera_offset.x, -10.0..=10.0).text("x"));
+            ui.add(egui::Slider::new(&mut camera_offset.y, -10.0..=10.0).text("y"));
+            ui.add(egui::Slider::new(&mut camera_offset.z, -10.0..=10.0).text("z"));
         });
-    }
+    });
 }
 
 // this on down is human written code though
@@ -435,6 +427,8 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
 
     let offset = backward * target_distance;
     camera.position = target + offset;
+    world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
+    world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
 }
 
 fn player_update(world: &mut World, delta_time: f32) {

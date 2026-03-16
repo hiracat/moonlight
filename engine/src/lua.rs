@@ -5,16 +5,104 @@ use winit::keyboard::KeyCode;
 
 use crate::{
     components::*,
-    core::{Keyboard, MouseState},
-    ecs::{EntityId, QueryInfo, World},
+    core::{Engine, Keyboard, MouseState},
+    ecs::{DynamicComponent, EntityId, QueryInfo, World},
     physics::RigidBody,
-    resources::{Animated, Animation, Material, Mesh, ResourceManager, Skeleton, Skybox, Texture},
+    resources::{Animated, Animation, Material, Mesh, Skeleton, Skybox, Texture},
 };
 use ultraviolet as uv;
 
+#[derive(Default)]
+struct LuaComponents {
+    components: HashMap<String, LuaValue>,
+}
+
+pub struct LuaVM {
+    lua: Lua,
+    path: String,
+    last_modified: std::time::SystemTime,
+}
+impl LuaVM {
+    pub fn new() -> LuaVM {
+        Self {
+            lua: Lua::new(),
+            path: String::new(),
+            last_modified: std::time::SystemTime::now(),
+        }
+    }
+    pub fn load_script(&mut self, path: &str) -> Result<(), mlua::Error> {
+        let src = std::fs::read_to_string(path)?;
+        self.last_modified = std::time::SystemTime::now();
+        self.lua.load(src).exec()?;
+        self.path = path.to_string();
+        Ok(())
+    }
+
+    pub fn run_script(
+        &mut self,
+        world: &mut World,
+        engine: &mut Engine,
+        entry_point: &str,
+    ) -> Result<(), mlua::Error> {
+        self.maybe_reload()?;
+        let function: mlua::Function = self.lua.globals().get(entry_point)?;
+        // make the lua user data
+        let lua_world_ud = self.lua.create_userdata(LuaWorld {
+            world: world as *mut World,
+            registry: LuaComponentRegistry::new(),
+            spawn_commands: Vec::new(),
+        })?;
+        let lua_engine_ud = self.lua.create_userdata(LuaEngine {
+            engine: engine as *mut Engine,
+        })?;
+        function.call::<()>((lua_world_ud.clone(), lua_engine_ud))?;
+        let mut lua_world = lua_world_ud.take::<LuaWorld>()?;
+        lua_world.flush_commands();
+        Ok(())
+    }
+
+    pub fn maybe_reload(&mut self) -> Result<(), mlua::Error> {
+        let modified = std::fs::metadata(&self.path)?.modified()?;
+        if modified > self.last_modified {
+            let src = std::fs::read_to_string(&self.path)?;
+            self.lua.load(src).exec()?;
+            self.last_modified = modified;
+        }
+
+        Ok(())
+    }
+}
+
 pub struct LuaWorld {
     pub world: *mut World,
+    pub spawn_commands: Vec<SpawnCommand>,
     pub registry: LuaComponentRegistry,
+}
+pub struct LuaEngine {
+    pub engine: *mut Engine,
+}
+
+impl LuaWorld {
+    fn flush_commands(&mut self) {
+        for command in self.spawn_commands.drain(..) {
+            match command {
+                SpawnCommand::Add(components) => {
+                    let entity = unsafe { &mut *self.world }.spawn();
+                    for component in components {
+                        component.add_to_world(unsafe { &mut *self.world }, entity);
+                    }
+                }
+                SpawnCommand::Despawn(entity) => {
+                    unsafe { &mut *self.world }.despawn(entity).ok();
+                }
+            }
+        }
+    }
+}
+
+enum SpawnCommand {
+    Add(Vec<Box<dyn DynamicComponent>>),
+    Despawn(EntityId),
 }
 
 // ── Ref wrappers (ECS query results) ─────────────────────────────────────────
@@ -38,6 +126,14 @@ struct AnimatedRef(*mut Animated);
 pub struct LuaComponentRegistry {
     pub typeids: HashMap<String, TypeId>,
     pub to_lua: HashMap<String, fn(*mut [u8], &Lua) -> LuaResult<LuaAnyUserData>>,
+    pub from_lua_table: HashMap<String, fn(&LuaTable) -> LuaResult<Box<dyn DynamicComponent>>>,
+    pub from_userdata: HashMap<String, fn(&LuaAnyUserData) -> LuaResult<Box<dyn DynamicComponent>>>,
+}
+
+trait FromLuaTable {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self>
+    where
+        Self: Sized;
 }
 
 impl LuaComponentRegistry {
@@ -45,31 +141,64 @@ impl LuaComponentRegistry {
         let mut typeids = HashMap::new();
         let mut to_lua: HashMap<String, fn(*mut [u8], &Lua) -> LuaResult<LuaAnyUserData>> =
             HashMap::new();
+        let mut from_lua: HashMap<String, fn(&LuaTable) -> LuaResult<Box<dyn DynamicComponent>>> =
+            HashMap::new();
+        let mut from_userdata: HashMap<
+            String,
+            fn(&LuaAnyUserData) -> LuaResult<Box<dyn DynamicComponent>>,
+        > = HashMap::new();
 
         macro_rules! reg {
             ($name:literal, $t:ty, $ref:ident) => {
                 typeids.insert($name.to_string(), TypeId::of::<$t>());
                 to_lua.insert($name.to_string(), |ptr, lua| {
-                    lua.create_userdata($ref(ptr as *mut u8 as *mut $t))
+                    lua.create_userdata($ref(ptr as *mut $t))
+                });
+                from_lua.insert($name.to_string(), |table| {
+                    let val = <$t>::from_lua_table(table)?;
+                    Ok(Box::new(val) as Box<dyn DynamicComponent>)
+                });
+            };
+            (opaque, $name:literal, $t:ty, $ref:ident) => {
+                typeids.insert($name.to_string(), TypeId::of::<$t>());
+                to_lua.insert($name.to_string(), |ptr, lua| {
+                    lua.create_userdata($ref(ptr as *mut $t))
+                });
+                from_userdata.insert($name.to_string(), |ud| {
+                    Ok(Box::new(ud.borrow::<$t>()?.clone()) as Box<dyn DynamicComponent>)
                 });
             };
         }
 
+        // components constructable from a lua table
         reg!("Transform", Transform, TransformRef);
         reg!("RigidBody", RigidBody, RigidBodyRef);
         reg!("PointLight", PointLight, PointLightRef);
         reg!("AmbientLight", AmbientLight, AmbientLightRef);
         reg!("DirectionalLight", DirectionalLight, DirectionalLightRef);
         reg!("Camera", Camera, CameraRef);
-        reg!("Mesh", Mesh, MeshRef);
-        reg!("Material", Material, MaterialRef);
-        reg!("Texture", Texture, TextureRef);
-        reg!("Skybox", Skybox, SkyboxRef);
-        reg!("Skeleton", Skeleton, SkeletonRef);
-        reg!("Animation", Animation, AnimationRef);
-        reg!("Animated", Animated, AnimatedRef);
 
-        Self { typeids, to_lua }
+        // components with gpu state, are not constructable from a lua table
+        typeids.insert("Mesh".to_string(), TypeId::of::<Mesh>());
+        to_lua.insert("Mesh".to_string(), |ptr, lua| {
+            lua.create_userdata(MeshRef(ptr as *mut u8 as *mut Mesh))
+        });
+        from_userdata.insert("Mesh".to_string(), |ud| {
+            Ok(Box::new(ud.borrow::<Mesh>()?.clone()) as Box<dyn DynamicComponent>)
+        });
+        reg!(opaque, "Material", Material, MaterialRef);
+        reg!(opaque, "Texture", Texture, TextureRef);
+        reg!(opaque, "Skybox", Skybox, SkyboxRef);
+        reg!(opaque, "Skeleton", Skeleton, SkeletonRef);
+        reg!(opaque, "Animation", Animation, AnimationRef);
+        reg!(opaque, "Animated", Animated, AnimatedRef);
+
+        Self {
+            typeids,
+            to_lua,
+            from_lua_table: from_lua,
+            from_userdata: from_userdata,
+        }
     }
 }
 
@@ -464,19 +593,18 @@ impl LuaUserData for Animated {
     }
 }
 
-// ── Unchanged impls ───────────────────────────────────────────────────────────
-
-impl LuaUserData for ResourceManager {
+impl LuaUserData for LuaEngine {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("create_texture", |_, this, path: String| {
-            Ok(this.create_texture(&path))
+            Ok(unsafe { (*this.engine).resource_manager.create_texture(&path) })
         });
         methods.add_method_mut("create_cubemap", |_, this, paths: Vec<String>| {
             let paths_str: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-            Ok(this.create_cubemap(&paths_str))
+            Ok(unsafe { (*this.engine).resource_manager.create_cubemap(&paths_str) })
         });
         methods.add_method_mut("load_gltf_asset", |_, this, path: String| {
-            let (mesh, animated) = this.load_gltf_asset(&path);
+            let (mesh, animated) =
+                unsafe { (*this.engine).resource_manager.load_gltf_asset(&path) };
             Ok((mesh, animated))
         });
     }
@@ -486,7 +614,7 @@ impl LuaUserData for EntityId {}
 
 impl LuaUserData for Keyboard {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("is_down", |_, this, key: String| {
+        methods.add_method("is_down", |_, this: &Keyboard, key: String| {
             Ok(this.is_down(parse_keycode(&key)))
         });
     }
@@ -514,9 +642,36 @@ impl LuaUserData for MouseState {
 
 impl LuaUserData for LuaWorld {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("spawn", |_, this, ()| Ok(unsafe { (*this.world).spawn() }));
-        methods.add_method_mut("destroy", |_, this, val: LuaAnyUserData| {
-            unsafe { (*this.world).destroy(*val.borrow::<EntityId>()?).ok() };
+        methods.add_method_mut("spawn", |_, this, table: LuaTable| {
+            let mut components = Vec::new();
+            for pair in table.pairs::<String, LuaValue>() {
+                let (k, val) = pair?;
+                match val {
+                    LuaValue::Table(val) => {
+                        let from_lua = this
+                            .registry
+                            .from_lua_table
+                            .get(&k)
+                            .ok_or(mlua::Error::runtime(format!("unknown component: {}", k)))?;
+                        components.push(from_lua(&val)?);
+                    }
+                    LuaValue::UserData(op) => {
+                        let from_userdata = this
+                            .registry
+                            .from_userdata
+                            .get(&k)
+                            .ok_or(mlua::Error::runtime(format!("unknown component {}", k)))?;
+                        components.push(from_userdata(&op)?);
+                    }
+                    _ => return Err(mlua::Error::runtime(format!("invalid component {}", k))),
+                }
+            }
+            this.spawn_commands.push(SpawnCommand::Add(components));
+            Ok(())
+        });
+        methods.add_method_mut("despawn", |_, this, val: LuaAnyUserData| {
+            this.spawn_commands
+                .push(SpawnCommand::Despawn(*val.borrow::<EntityId>()?));
             Ok(())
         });
         methods.add_method_mut("query", |lua, this, val: LuaTable| -> LuaResult<LuaTable> {
@@ -586,5 +741,75 @@ impl LuaUserData for LuaWorld {
 
             Ok(rows)
         });
+    }
+}
+impl FromLuaTable for Transform {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        Ok(Transform::from(
+            Some(uv::Vec3::new(
+                table.get("x")?,
+                table.get("y")?,
+                table.get("z")?,
+            )),
+            None,
+            Some(uv::Vec3::new(
+                table.get("sx").unwrap_or(1.0),
+                table.get("sy").unwrap_or(1.0),
+                table.get("sz").unwrap_or(1.0),
+            )),
+        ))
+    }
+}
+
+impl FromLuaTable for RigidBody {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        let mut rb = RigidBody::new();
+        rb.velocity = uv::Vec3::new(
+            table.get("vx").unwrap_or(0.0),
+            table.get("vy").unwrap_or(0.0),
+            table.get("vz").unwrap_or(0.0),
+        );
+        Ok(rb)
+    }
+}
+
+impl FromLuaTable for PointLight {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        Ok(PointLight::new(
+            uv::Vec3::new(table.get("r")?, table.get("g")?, table.get("b")?),
+            table.get("brightness")?,
+            table.get("linear").ok(),
+            table.get("quadratic").ok(),
+        ))
+    }
+}
+
+impl FromLuaTable for AmbientLight {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        Ok(AmbientLight::create(
+            uv::Vec3::new(table.get("r")?, table.get("g")?, table.get("b")?),
+            table.get("intensity")?,
+        ))
+    }
+}
+
+impl FromLuaTable for DirectionalLight {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        Ok(DirectionalLight::create(
+            uv::Vec4::new(table.get("dx")?, table.get("dy")?, table.get("dz")?, 1.0),
+            uv::Vec3::new(table.get("r")?, table.get("g")?, table.get("b")?),
+        ))
+    }
+}
+
+impl FromLuaTable for Camera {
+    fn from_lua_table(table: &LuaTable) -> LuaResult<Self> {
+        Ok(Camera::create(
+            uv::Vec3::new(table.get("x")?, table.get("y")?, table.get("z")?),
+            table.get("fov")?,
+            table.get("near")?,
+            table.get("far")?,
+            table.get("aspect")?,
+        ))
     }
 }

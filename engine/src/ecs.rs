@@ -353,6 +353,16 @@ impl_fetch_mut!(req: [T], opt: [U, V], not: [W]);
 impl_fetch_mut!(req: [T], opt: [U], not: [V, W]);
 impl_fetch_mut!(req: [T], opt: [], not: [U, V, W]);
 
+pub trait DynamicComponent {
+    fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId);
+}
+
+impl<T: 'static> DynamicComponent for T {
+    fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId) {
+        world.add(entity, *self);
+    }
+}
+
 #[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct EntityId(u32);
 impl Default for EntityId {
@@ -1013,7 +1023,7 @@ impl World {
 
         EntityId(free)
     }
-    pub fn destroy(&mut self, entity: EntityId) -> Result<(), WorldError> {
+    pub fn despawn(&mut self, entity: EntityId) -> Result<(), WorldError> {
         //HACK: this needs to be replaced with a proper id allocator later, maybe a list of
         //preallocated ids that grows when reaches max capacity, and shrinks when < 50% is full
 
@@ -1295,7 +1305,7 @@ fn benchmark() {
         // 7) Destroy all entities in reverse
         bench(&format!("destroy all rev x{}", n), 1, || {
             for e in (0..n).rev() {
-                let _ = world.destroy(EntityId(e as u32));
+                let _ = world.despawn(EntityId(e as u32));
             }
         });
     }
@@ -1542,7 +1552,7 @@ fn correctness() {
         let mut destroyed = HashSet::new();
         for (i, &e) in entities.iter().enumerate() {
             if i % 3 == 0 {
-                world.destroy(e).unwrap();
+                world.despawn(e).unwrap();
                 destroyed.insert(e);
             }
         }
@@ -2194,7 +2204,7 @@ fn not_filter_with_entity_destruction() {
     assert_eq!(results1.len(), 2);
 
     // Destroy e1
-    world.destroy(e1).unwrap();
+    world.despawn(e1).unwrap();
 
     // Now query should only find e3
     let results2: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();
@@ -2202,7 +2212,7 @@ fn not_filter_with_entity_destruction() {
     assert_eq!(results2[0].0, e3);
 
     // Destroy e2 (the excluded one)
-    world.destroy(e2).unwrap();
+    world.despawn(e2).unwrap();
 
     // Still only e3
     let results3: Vec<_> = world.query::<(Req<u32>, Not<String>)>().collect();

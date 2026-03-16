@@ -14,6 +14,10 @@ use crate::{
 };
 
 const MAX_SCENE_BONES: usize = 2048;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Time {
+    pub delta_time: f32,
+}
 
 pub struct ResourceManager {
     context: Arc<VulkanContext>,

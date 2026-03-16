@@ -1,9 +1,6 @@
-use corruption::GameImpl;
-
-use moonlight::core::App;
-use ultraviolet::Vec3;
+use corruption::setup_game;
 
 fn main() {
-    let mut app = App::default();
-    app.run(GameImpl::default());
+    let mut app = setup_game();
+    app.run("data/scripts/main.lua");
 }
