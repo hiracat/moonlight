@@ -1,12 +1,15 @@
 use std::{
-    ffi::CStr,
+    ffi::{c_void, CStr},
     marker::PhantomData,
     ptr,
     sync::{Arc, Mutex},
 };
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
+use gpu_allocator::{
+    vulkan::{Allocator, AllocatorCreateDesc},
+    AllocatorDebugSettings,
+};
 #[allow(deprecated)]
 use winit::{
     event_loop::ActiveEventLoop,
@@ -22,9 +25,10 @@ pub struct VulkanContext {
     // needs to be kept alive, dont forget is very important
     // anything that starts with ash:: and not vk:: impliments drop
     pub entry: ash::Entry,
-    pub instance: ash::Instance,
-    pub device: ash::Device,
+    pub instance: Arc<ash::Instance>,
+    pub device: Arc<ash::Device>,
     pub physical_device: vk::PhysicalDevice,
+    surface_loader: ash::khr::surface::Instance,
 
     debug_messenger: vk::DebugUtilsMessengerEXT,
     debug_utils_loader: ash::ext::debug_utils::Instance,
@@ -45,6 +49,7 @@ impl VulkanContext {
         let entry = unsafe { ash::Entry::load().unwrap() };
         let window = create_window(event_loop);
         let instance = create_instance(&entry, event_loop);
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = unsafe {
             let surface = ash_window::create_surface(
                 &entry,
@@ -85,9 +90,9 @@ impl VulkanContext {
             instance: instance.clone(),
             device: device.clone(),
             physical_device,
-            debug_settings: Default::default(),
-            buffer_device_address: false, // Ideally, check the BufferDeviceAddressFeatures struct.
+            buffer_device_address: false,
             allocation_sizes: Default::default(),
+            debug_settings: AllocatorDebugSettings::default(),
         })
         .unwrap();
 
@@ -109,11 +114,12 @@ impl VulkanContext {
             unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] };
 
         Self {
+            surface_loader: surface_loader,
             one_time_submit_pool: one_time_command_pool,
             one_time_submit_buffer,
             entry: entry,
-            instance: instance,
-            device: device,
+            instance: Arc::new(instance),
+            device: Arc::new(device),
             physical_device: physical_device,
             queue: queue,
             queue_family_index: queue_family_index,
@@ -127,7 +133,18 @@ impl VulkanContext {
 }
 impl Drop for VulkanContext {
     fn drop(&mut self) {
-        todo!()
+        unsafe {
+            let allocator = std::ptr::read(&self.allocator);
+            drop(allocator);
+            self.device
+                .destroy_command_pool(self.one_time_submit_pool, None);
+            self.device.destroy_device(None);
+
+            self.debug_utils_loader
+                .destroy_debug_utils_messenger(self.debug_messenger, None);
+            self.surface_loader.destroy_surface(self.surface, None);
+            self.instance.destroy_instance(None);
+        }
     }
 }
 pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Instance {
@@ -320,12 +337,23 @@ pub fn create_device(
         .map(|cstr| cstr.as_ptr())
         .collect();
 
+    let mut sync2_features = vk::PhysicalDeviceSynchronization2Features {
+        synchronization2: vk::TRUE,
+        ..Default::default()
+    };
+    let mut dynamic_rendering_features = vk::PhysicalDeviceDynamicRenderingFeatures {
+        dynamic_rendering: vk::TRUE,
+        p_next: &mut sync2_features as *mut _ as *mut c_void,
+        ..Default::default()
+    };
+
     let create_info = vk::DeviceCreateInfo {
         p_enabled_features: &enabled_features,
         pp_enabled_extension_names: required_extensions.as_ptr(),
         enabled_extension_count: required_extensions.len() as u32,
         p_queue_create_infos: queue_create_infos.as_ptr(),
         queue_create_info_count: queue_create_infos.len() as u32,
+        p_next: &mut dynamic_rendering_features as *mut _ as *mut std::ffi::c_void,
 
         ..Default::default()
     };

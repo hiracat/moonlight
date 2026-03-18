@@ -1,15 +1,16 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use super::pipelines::{PipelineBundle, PipelineKey, create_builtin_graphics_pipelines};
-use super::swapchain::{framebuffers::GBufferResources, renderpass::create_renderpass};
+use super::pipelines::{create_builtin_graphics_pipelines, PipelineBundle, PipelineKey};
+use super::swapchain::image_attachments::GBufferResources;
 use crate::ecs::World;
-use crate::renderers::world::swapchain::framebuffers::create_gbuffer_resources;
+use crate::renderers::world::swapchain::image_attachments::create_gbuffer_resources;
 use crate::renderers::world::swapchain::update_attachment_descriptor_sets;
-use crate::renderers::world::swapchain::{SwapchainResources, create_attachment_descriptor_sets};
+use crate::renderers::world::swapchain::{create_attachment_descriptor_sets, SwapchainResources};
 use crate::resources::{Mesh, ResourceManager};
 use crate::vulkan::{SharedAllocator, VulkanContext};
 use ash::vk::{self};
 use gpu_allocator::vulkan::*;
+use std::sync::Arc;
 use std::{io::Write, ptr};
 
 pub const GEOMETRY_SUBPASS: u32 = 0;
@@ -18,14 +19,14 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 
 pub struct WorldRenderer {
     // indexed by pipelineHandle
-    pub render_pass: vk::RenderPass,
     pub pipelines: Vec<PipelineBundle>,
 
     pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
     pub per_swapchain_image_set_layout: vk::DescriptorSetLayout,
     pub image_descriptor_set_pool: vk::DescriptorPool,
-    pub framebuffers: Vec<vk::Framebuffer>,
     pub gbuffers: GBufferResources,
+    pub sampler: vk::Sampler,
+    device: Arc<ash::Device>,
 }
 
 #[derive(Debug)]
@@ -37,7 +38,15 @@ pub struct DrawJob {
 
 impl Drop for WorldRenderer {
     fn drop(&mut self) {
-        todo!();
+        unsafe {
+            self.device
+                .destroy_descriptor_pool(self.image_descriptor_set_pool, None);
+            self.device.destroy_sampler(self.sampler, None);
+            // this is destroyed by pipelienbundle::drop, because its a random index that happens
+            // to correspond with the final color output, but is really owned by them
+            // self.device
+            //     .destroy_descriptor_set_layout(self.per_swapchain_image_set_layout, None);
+        }
     }
 }
 
@@ -52,6 +61,7 @@ impl WorldRenderer {
         window_size: vk::Extent2D,
         resource_manager: &mut ResourceManager,
         swapchain_image_index: usize,
+        swapchain_image_view: vk::ImageView,
     ) {
         let jobs = self.setup_gpu_build_draw_jobs(
             device,
@@ -72,50 +82,140 @@ impl WorldRenderer {
             max_depth: 1.0,
             min_depth: 0.0,
         };
-        let clear_values = vec![
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
+        //HACK: this is a magic array, because i store color normal and position, need
+        //to do something else to fix this
+        let color_images = vec![
+            vk::RenderingAttachmentInfo {
+                image_view: self.gbuffers.color_images[swapchain_image_index].view,
+                load_op: vk::AttachmentLoadOp::CLEAR,
+                store_op: vk::AttachmentStoreOp::STORE,
+                clear_value: vk::ClearValue::default(),
+                image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ..Default::default()
             },
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
+            vk::RenderingAttachmentInfo {
+                image_view: self.gbuffers.normal_images[swapchain_image_index].view,
+                load_op: vk::AttachmentLoadOp::CLEAR,
+                store_op: vk::AttachmentStoreOp::STORE,
+                clear_value: vk::ClearValue::default(),
+                image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ..Default::default()
             },
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
+            vk::RenderingAttachmentInfo {
+                image_view: self.gbuffers.position_images[swapchain_image_index].view,
+                load_op: vk::AttachmentLoadOp::CLEAR,
+                store_op: vk::AttachmentStoreOp::STORE,
+                clear_value: vk::ClearValue::default(),
+                image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ..Default::default()
             },
-            vk::ClearValue {
+        ];
+        let depth_info = vk::RenderingAttachmentInfo {
+            image_view: self.gbuffers.depth_images[swapchain_image_index].view,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            clear_value: vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 1.0,
                     stencil: 0,
                 },
             },
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
+            image_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            ..Default::default()
+        };
+        let image_barriers = [
+            vk::ImageMemoryBarrier2 {
+                image: self.gbuffers.depth_images[swapchain_image_index].image,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                src_access_mask: vk::AccessFlags2::empty(),
+                dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    level_count: 1,
+                    layer_count: 1,
+                    base_mip_level: 0,
+                    base_array_layer: 0,
                 },
+                ..Default::default()
+            },
+            vk::ImageMemoryBarrier2 {
+                image: self.gbuffers.color_images[swapchain_image_index].image,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                src_access_mask: vk::AccessFlags2::empty(),
+                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    base_mip_level: 0,
+                    base_array_layer: 0,
+                },
+                ..Default::default()
+            },
+            vk::ImageMemoryBarrier2 {
+                image: self.gbuffers.normal_images[swapchain_image_index].image,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                src_access_mask: vk::AccessFlags2::empty(),
+                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    base_mip_level: 0,
+                    base_array_layer: 0,
+                },
+                ..Default::default()
+            },
+            vk::ImageMemoryBarrier2 {
+                image: self.gbuffers.position_images[swapchain_image_index].image,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                src_access_mask: vk::AccessFlags2::empty(),
+                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    base_mip_level: 0,
+                    base_array_layer: 0,
+                },
+                ..Default::default()
             },
         ];
+        let dependancy_info = vk::DependencyInfo {
+            dependency_flags: vk::DependencyFlags::BY_REGION,
+            p_image_memory_barriers: image_barriers.as_ptr(),
+            image_memory_barrier_count: image_barriers.len() as u32,
+            ..Default::default()
+        };
         unsafe {
-            device.cmd_begin_render_pass2(
+            device.cmd_pipeline_barrier2(command_buffer, &dependancy_info);
+        }
+        unsafe {
+            device.cmd_begin_rendering(
                 command_buffer,
-                &vk::RenderPassBeginInfo {
-                    render_pass: self.render_pass,
-                    framebuffer: self.framebuffers[swapchain_image_index],
-                    p_clear_values: clear_values.as_ptr(),
-                    clear_value_count: clear_values.len() as u32,
+                &vk::RenderingInfo {
                     render_area: vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
                         extent: window_size,
+                        offset: vk::Offset2D { x: 0, y: 0 },
                     },
-                    ..Default::default()
-                },
-                &vk::SubpassBeginInfo {
-                    contents: vk::SubpassContents::INLINE,
+                    flags: vk::RenderingFlags::empty(),
+                    layer_count: 1,
+                    color_attachment_count: color_images.len() as u32,
+                    p_color_attachments: color_images.as_ptr(),
+                    p_depth_attachment: &depth_info as *const _,
+                    p_stencil_attachment: ptr::null(),
                     ..Default::default()
                 },
             );
@@ -176,19 +276,128 @@ impl WorldRenderer {
             }
             if pipeline_index == PipelineKey::AnimatedGeometry as usize {
                 unsafe {
-                    device.cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+                    device.cmd_end_rendering(command_buffer);
                 }
-            }
-            unsafe {
-                device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipelines[pipeline_index as usize].pipeline,
-                );
+
+                let image_barriers = [
+                    vk::ImageMemoryBarrier2 {
+                        image: self.gbuffers.depth_images[swapchain_image_index].image,
+                        old_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        new_layout: vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+                        src_stage_mask: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        src_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                        dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            level_count: 1,
+                            layer_count: 1,
+                            base_mip_level: 0,
+                            base_array_layer: 0,
+                        },
+                        ..Default::default()
+                    },
+                    vk::ImageMemoryBarrier2 {
+                        image: self.gbuffers.color_images[swapchain_image_index].image,
+                        old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        dst_stage_mask: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                        dst_access_mask: vk::AccessFlags2::SHADER_READ,
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            level_count: 1,
+                            layer_count: 1,
+                            base_mip_level: 0,
+                            base_array_layer: 0,
+                        },
+                        ..Default::default()
+                    },
+                    vk::ImageMemoryBarrier2 {
+                        image: self.gbuffers.normal_images[swapchain_image_index].image,
+                        old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        dst_stage_mask: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                        dst_access_mask: vk::AccessFlags2::SHADER_READ,
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            level_count: 1,
+                            layer_count: 1,
+                            base_mip_level: 0,
+                            base_array_layer: 0,
+                        },
+                        ..Default::default()
+                    },
+                    vk::ImageMemoryBarrier2 {
+                        image: self.gbuffers.position_images[swapchain_image_index].image,
+                        old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        dst_stage_mask: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                        dst_access_mask: vk::AccessFlags2::SHADER_READ,
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            level_count: 1,
+                            layer_count: 1,
+                            base_mip_level: 0,
+                            base_array_layer: 0,
+                        },
+                        ..Default::default()
+                    },
+                ];
+                let dependancy_info = vk::DependencyInfo {
+                    dependency_flags: vk::DependencyFlags::BY_REGION,
+                    p_image_memory_barriers: image_barriers.as_ptr(),
+                    image_memory_barrier_count: image_barriers.len() as u32,
+                    ..Default::default()
+                };
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &dependancy_info);
+                }
+                let lighting_attachments = [vk::RenderingAttachmentInfo {
+                    image_view: swapchain_image_view,
+                    image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    load_op: vk::AttachmentLoadOp::CLEAR,
+                    store_op: vk::AttachmentStoreOp::STORE,
+                    clear_value: vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    },
+                    ..Default::default()
+                }];
+                let mut depth_attachment = vk::RenderingAttachmentInfo {
+                    image_view: self.gbuffers.depth_images[swapchain_image_index].view,
+                    image_layout: vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+                    load_op: vk::AttachmentLoadOp::LOAD,
+                    store_op: vk::AttachmentStoreOp::NONE,
+                    ..Default::default()
+                };
+                unsafe {
+                    device.cmd_begin_rendering(
+                        command_buffer,
+                        &vk::RenderingInfo {
+                            render_area: vk::Rect2D {
+                                extent: window_size,
+                                offset: vk::Offset2D { x: 0, y: 0 },
+                            },
+                            layer_count: 1,
+                            color_attachment_count: 1,
+                            p_color_attachments: lighting_attachments.as_ptr(),
+                            p_depth_attachment: &mut depth_attachment as *mut _,
+                            p_stencil_attachment: ptr::null(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
         unsafe {
-            device.cmd_end_render_pass(command_buffer);
+            device.cmd_end_rendering(command_buffer); // end lighting pass
         }
     }
 
@@ -220,21 +429,40 @@ impl WorldRenderer {
 
     #[allow(clippy::too_many_lines)]
     pub fn init(context: &VulkanContext, swapchain_resources: &SwapchainResources) -> Self {
-        let render_pass = create_renderpass(
-            &context.device,
+        let color_formats = [
+            vk::Format::A2B10G10R10_UNORM_PACK32,
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::Format::R32G32B32A32_SFLOAT,
+        ];
+        let pipelines = create_builtin_graphics_pipelines(
+            context.device.clone(),
             swapchain_resources.swapchain_image_format.format,
+            vk::Format::D32_SFLOAT,
+            &color_formats,
         );
-        let pipelines = create_builtin_graphics_pipelines(&context.device, render_pass);
         //HACK: yes this is a magic number, but its defined in the shader, so not resonable to fix
         // Index 2 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
         let per_swapchain_image_set_layout = pipelines[2].descriptor_set_layouts[0];
+        let sampler = unsafe {
+            context.device.create_sampler(
+                &vk::SamplerCreateInfo {
+                    mag_filter: vk::Filter::NEAREST,
+                    min_filter: vk::Filter::NEAREST,
+                    mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+                    address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    ..Default::default()
+                },
+                None,
+            )
+        }
+        .unwrap();
 
-        let (framebuffers, gbuffer_resources) = create_gbuffer_resources(
+        let gbuffer_resources = create_gbuffer_resources(
             &context.device,
             &swapchain_resources.swapchain_images,
-            render_pass,
             context.allocator.clone(),
-            &swapchain_resources.swapchain_image_views,
             swapchain_resources.image_size,
         );
 
@@ -246,7 +474,7 @@ impl WorldRenderer {
             // per uniform buffer, so six descriptors per
             // set(2x what is needed for safety
             descriptor_count: 6 * required_sets,
-            ty: vk::DescriptorType::INPUT_ATTACHMENT,
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         }];
 
         let input_descriptor_pool = unsafe {
@@ -266,6 +494,7 @@ impl WorldRenderer {
 
         let descriptor_sets = create_attachment_descriptor_sets(
             &context.device,
+            sampler,
             input_descriptor_pool,
             per_swapchain_image_set_layout,
             &[
@@ -277,13 +506,13 @@ impl WorldRenderer {
         );
 
         WorldRenderer {
-            render_pass,
+            device: context.device.clone(),
             pipelines,
             per_swapchain_image_descriptor_sets: descriptor_sets,
             image_descriptor_set_pool: input_descriptor_pool,
             per_swapchain_image_set_layout,
-            framebuffers: framebuffers,
             gbuffers: gbuffer_resources,
+            sampler: sampler,
         }
     }
 
@@ -292,15 +521,12 @@ impl WorldRenderer {
         context: &VulkanContext,
         swapchain_resources: &SwapchainResources,
     ) {
-        let (framebuffers, gbuffer_resources) = create_gbuffer_resources(
+        let gbuffer_resources = create_gbuffer_resources(
             &context.device,
             &swapchain_resources.swapchain_images,
-            self.render_pass,
             context.allocator.clone(),
-            &swapchain_resources.swapchain_image_views,
             swapchain_resources.image_size,
         );
-        self.framebuffers = framebuffers;
 
         update_attachment_descriptor_sets(
             &context.device,
@@ -311,6 +537,7 @@ impl WorldRenderer {
                 gbuffer_resources.position_images.as_slice(),
             ],
             &[0, 1, 2],
+            self.sampler,
         );
         self.gbuffers = gbuffer_resources;
     }

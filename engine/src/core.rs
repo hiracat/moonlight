@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
 
 use ash::vk;
 use ultraviolet::Vec3;
@@ -12,9 +12,9 @@ use winit::{
 };
 
 use crate::{
-    components::Camera,
+    components::{Camera, Time},
     ecs::World,
-    lua::LuaVM,
+    lua::{LuaVM, PrintOnError},
     renderers::{
         ui::UIRenderer,
         world::{
@@ -22,12 +22,13 @@ use crate::{
             swapchain::{create_semaphores, SwapchainResources},
         },
     },
-    resources::{ResourceManager, Time},
+    resources::ResourceManager,
     vulkan::VulkanContext,
 };
+#[derive(Debug, Copy, Clone)]
+pub struct Controllable;
 
 pub struct Engine {
-    vulkan_context: Arc<VulkanContext>,
     world_renderer: WorldRenderer,
     ui_renderer: UIRenderer,
 
@@ -36,23 +37,53 @@ pub struct Engine {
     per_frame: Vec<PerFrame>,
     swapchain_image_index: usize,
     frame_in_flight: usize,
-    framebuffer_resized: bool,
+    swapchain_resized: bool,
 
     pub resource_manager: ResourceManager,
 
     pub prev_frame_end: Instant,
     pub frame_count: u64,
     pub window_size: (u32, u32),
+
+    vulkan_context: VulkanContext,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        unsafe {
+            self.vulkan_context.device.device_wait_idle().unwrap();
+        }
+
+        // renderers first (framebuffers, pipelines, etc)
+        // world_renderer and ui_renderer drop here via field order, but we need
+        // semaphores gone before vulkan_context, so be explicit
+
+        for semaphore in &self.render_finished {
+            unsafe {
+                self.vulkan_context
+                    .device
+                    .destroy_semaphore(*semaphore, None);
+            }
+        }
+
+        // per_frame drops itself (PerFrame::drop handles semaphores, fences, pools)
+        // swapchain drops itself (SwapchainResources::drop handles imageviews, swapchain)
+        // world_renderer drops itself
+        // ui_renderer drops itself
+        // resource_manager drops itself
+
+        // vulkan_context must be last — device, instance, surface all live here
+    }
 }
 
 impl Engine {
     fn init(event_loop: &ActiveEventLoop) -> Self {
-        let context = Arc::new(VulkanContext::init(event_loop));
+        let context = VulkanContext::init(event_loop);
 
         let swapchain = SwapchainResources::create(&context, None);
         let world_renderer = WorldRenderer::init(&context, &swapchain);
         let ui_renderer = UIRenderer::init(&context, &swapchain);
-        let resource_manager = ResourceManager::init(context.clone());
+        let resource_manager = ResourceManager::init(&context);
         let mut per_frame = Vec::new();
         for _ in 0..FRAMES_IN_FLIGHT {
             per_frame.push(PerFrame::create(&context));
@@ -73,7 +104,7 @@ impl Engine {
             per_frame: per_frame,
             frame_count: 0,
             swapchain_image_index: 0,
-            framebuffer_resized: false,
+            swapchain_resized: false,
             window_size: window_size,
         }
     }
@@ -110,15 +141,13 @@ impl Engine {
 
         self.frame_count += 1;
 
-        if self.framebuffer_resized {
+        if self.swapchain_resized {
             unsafe {
                 self.vulkan_context.device.device_wait_idle().unwrap();
             }
             // Use the new dimensions of the window.
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
-            self.ui_renderer
-                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
             self.world_renderer
                 .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
         }
@@ -133,14 +162,14 @@ impl Engine {
             ) {
                 Ok((index, suboptimal)) => (index as usize, suboptimal),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.framebuffer_resized = true;
+                    self.swapchain_resized = true;
                     return;
                 }
                 Err(e) => panic!("failed to acquire next image: {e}"),
             }
         };
         if is_suboptimal {
-            self.framebuffer_resized = true;
+            self.swapchain_resized = true;
         }
 
         // NOTE: RENDERING START
@@ -171,24 +200,40 @@ impl Engine {
                 .begin_command_buffer(
                     frame.command_buffer,
                     &vk::CommandBufferBeginInfo {
-                        p_inheritance_info: &vk::CommandBufferInheritanceInfo {
-                            pipeline_statistics: vk::QueryPipelineStatisticFlags::empty(),
-                            subpass: 0, // ingored
-                            render_pass: self.world_renderer.render_pass,
-                            framebuffer: self.world_renderer.framebuffers
-                                [self.swapchain_image_index as usize],
-                            query_flags: vk::QueryControlFlags::empty(),
-                            occlusion_query_enable: vk::FALSE,
-                            ..Default::default()
-                        },
                         flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
                         ..Default::default()
                     },
                 )
                 .unwrap()
         };
-
-        let gui_clear_values = vec![];
+        let mut swapchain_barrier = vk::ImageMemoryBarrier2 {
+            image: self.swapchain.swapchain_images[self.swapchain_image_index],
+            old_layout: vk::ImageLayout::UNDEFINED,
+            new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags2::empty(),
+            dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                level_count: 1,
+                layer_count: 1,
+                base_mip_level: 0,
+                base_array_layer: 0,
+            },
+            ..Default::default()
+        };
+        unsafe {
+            self.vulkan_context.device.cmd_pipeline_barrier2(
+                frame.command_buffer,
+                &vk::DependencyInfo {
+                    dependency_flags: vk::DependencyFlags::BY_REGION,
+                    image_memory_barrier_count: 1,
+                    p_image_memory_barriers: &mut swapchain_barrier as *mut _,
+                    ..Default::default()
+                },
+            );
+        };
 
         let viewport = vk::Viewport {
             x: 0.0,
@@ -206,23 +251,34 @@ impl Engine {
             window_size_v,
             &mut self.resource_manager,
             self.swapchain_image_index,
+            self.swapchain.swapchain_image_views[self.swapchain_image_index],
         );
 
+        let swapchain_image_view = self.swapchain.swapchain_image_views[self.swapchain_image_index];
+
+        let ui_attachment = vk::RenderingAttachmentInfo {
+            image_view: swapchain_image_view,
+            image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            load_op: vk::AttachmentLoadOp::LOAD, // LOAD not CLEAR, UI draws on top of world
+            store_op: vk::AttachmentStoreOp::STORE,
+            ..Default::default()
+        };
+
         unsafe {
-            self.vulkan_context.device.cmd_begin_render_pass(
+            self.vulkan_context.device.cmd_begin_rendering(
                 frame.command_buffer,
-                &vk::RenderPassBeginInfo {
-                    render_pass: self.ui_renderer.renderpass,
-                    framebuffer: self.ui_renderer.framebuffers[self.swapchain_image_index as usize],
+                &vk::RenderingInfo {
                     render_area: vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: window_size_v,
                     },
-                    p_clear_values: gui_clear_values.as_ptr(),
-                    clear_value_count: gui_clear_values.len() as u32,
+                    layer_count: 1,
+                    color_attachment_count: 1,
+                    p_color_attachments: &ui_attachment,
+                    p_depth_attachment: ptr::null(),
+                    p_stencil_attachment: ptr::null(),
                     ..Default::default()
                 },
-                vk::SubpassContents::INLINE,
             );
             self.vulkan_context
                 .device
@@ -233,6 +289,7 @@ impl Engine {
                 self.ui_renderer.pipeline,
             );
         }
+
         self.ui_renderer.draw_meshes(
             &geometry,
             &self.vulkan_context.device,
@@ -244,7 +301,37 @@ impl Engine {
         unsafe {
             self.vulkan_context
                 .device
-                .cmd_end_render_pass(frame.command_buffer);
+                .cmd_end_rendering(frame.command_buffer);
+        }
+        let mut swapchain_barrier = vk::ImageMemoryBarrier2 {
+            image: self.swapchain.swapchain_images[self.swapchain_image_index],
+            // you need the vk::Image handle here, not just the view
+            old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+            dst_access_mask: vk::AccessFlags2::empty(),
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                level_count: 1,
+                layer_count: 1,
+                base_mip_level: 0,
+                base_array_layer: 0,
+            },
+            ..Default::default()
+        };
+
+        unsafe {
+            self.vulkan_context.device.cmd_pipeline_barrier2(
+                frame.command_buffer,
+                &vk::DependencyInfo {
+                    dependency_flags: vk::DependencyFlags::BY_REGION,
+                    p_image_memory_barriers: &mut swapchain_barrier as *mut _,
+                    image_memory_barrier_count: 1,
+                    ..Default::default()
+                },
+            );
             self.vulkan_context
                 .device
                 .end_command_buffer(frame.command_buffer)
@@ -290,21 +377,19 @@ impl Engine {
                 .queue_present(self.vulkan_context.queue, &present_info)
         };
         let is_resized = match result {
-            Ok(_) => self.framebuffer_resized,
+            Ok(_) => self.swapchain_resized,
             Err(vk_result) => match vk_result {
                 vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
                 _ => panic!("Failed to execute queue present."),
             },
         };
         if is_resized {
-            self.framebuffer_resized = false;
+            self.swapchain_resized = false;
             unsafe {
                 self.vulkan_context.device.device_wait_idle().unwrap();
             }
             self.swapchain =
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
-            self.ui_renderer
-                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
             self.world_renderer
                 .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
         }
@@ -324,6 +409,20 @@ pub struct PerFrame {
     pub in_flight: vk::Fence,
 
     pub transient_pool: vk::DescriptorPool,
+    device: Arc<ash::Device>,
+}
+impl Drop for PerFrame {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_semaphore(self.image_available, None);
+            self.device.destroy_fence(self.in_flight, None);
+            self.device
+                .destroy_descriptor_pool(self.transient_pool, None);
+            self.device
+                .free_command_buffers(self.command_pool, &[self.command_buffer]);
+            self.device.destroy_command_pool(self.command_pool, None);
+        }
+    }
 }
 
 impl PerFrame {
@@ -405,6 +504,7 @@ impl PerFrame {
                 .unwrap()
         };
         Self {
+            device: context.device.clone(),
             command_pool,
             command_buffer,
             in_flight,
@@ -457,20 +557,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn run(&mut self, lua_script: &str) {
-        // we dont care about missing script file
-        let _ = self.lua.load_script(lua_script).unwrap();
+    pub fn run(&mut self) {
         let event_loop = EventLoop::new().expect("failed to init event loop");
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(self).unwrap();
     }
 
-    pub fn new() -> Self {
+    pub fn new(lua_path: &str) -> Self {
         App {
             engine: None,
             game: Game::default(),
             world: World::init(),
-            lua: LuaVM::new(),
+            lua: LuaVM::new(lua_path),
         }
     }
 }
@@ -515,9 +613,10 @@ impl ApplicationHandler for App {
         for sys in &self.game.on_start {
             match sys {
                 System::Lua(l) => {
-                    let _ = self
-                        .lua
-                        .run_script(&mut self.world, self.engine.as_mut().unwrap(), l);
+                    let err =
+                        self.lua
+                            .run_script(&mut self.world, self.engine.as_mut().unwrap(), l);
+                    err.print_on_error();
                 }
                 System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
             }
@@ -555,11 +654,12 @@ impl ApplicationHandler for App {
                 for sys in &self.game.on_update {
                     match sys {
                         System::Lua(l) => {
-                            let _ = self.lua.run_script(
+                            let err = self.lua.run_script(
                                 &mut self.world,
                                 self.engine.as_mut().unwrap(),
                                 l,
                             );
+                            err.print_on_error();
                         }
                         System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
                     }
@@ -569,7 +669,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(_) => {
                 let engine = self.engine.as_mut().unwrap();
-                engine.framebuffer_resized = true;
+                engine.swapchain_resized = true;
                 let PhysicalSize { width, height } = window.inner_size();
                 engine.window_size = (width, height);
                 world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
@@ -579,11 +679,12 @@ impl ApplicationHandler for App {
                 for sys in &self.game.on_update {
                     match sys {
                         System::Lua(l) => {
-                            let _ = self.lua.run_script(
+                            let err = self.lua.run_script(
                                 &mut self.world,
                                 self.engine.as_mut().unwrap(),
                                 l,
                             );
+                            err.print_on_error();
                         }
                         System::Rust(r) => r(&mut self.world, self.engine.as_mut().unwrap()),
                     }

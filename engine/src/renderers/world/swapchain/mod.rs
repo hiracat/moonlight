@@ -1,7 +1,8 @@
-use crate::{renderers::world::swapchain::framebuffers::Image, vulkan::VulkanContext};
+use std::sync::Arc;
+
+use crate::{renderers::world::swapchain::image_attachments::Image, vulkan::VulkanContext};
 use ash::vk;
-pub mod framebuffers;
-pub mod renderpass;
+pub mod image_attachments;
 
 pub struct SwapchainResources {
     pub swapchain: vk::SwapchainKHR,
@@ -13,6 +14,19 @@ pub struct SwapchainResources {
     pub swapchain_image_views: Vec<vk::ImageView>,
 
     pub image_size: vk::Extent2D,
+
+    device: Arc<ash::Device>,
+}
+impl Drop for SwapchainResources {
+    fn drop(&mut self) {
+        unsafe {
+            for view in &self.swapchain_image_views {
+                self.device.destroy_image_view(*view, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+    }
 }
 
 impl SwapchainResources {
@@ -103,6 +117,7 @@ impl SwapchainResources {
         }
 
         Self {
+            device: context.device.clone(),
             image_size: window_size,
             swapchain,
             swapchain_image_format: swapchain_image_format,
@@ -155,6 +170,7 @@ pub fn create_semaphores(device: &ash::Device, count: usize) -> Vec<vk::Semaphor
 
 pub fn create_attachment_descriptor_sets(
     device: &ash::Device,
+    sampler: vk::Sampler,
     descriptor_pool: vk::DescriptorPool,
     attachment_layout: vk::DescriptorSetLayout,
     attachments: &[&[Image]],
@@ -179,7 +195,13 @@ pub fn create_attachment_descriptor_sets(
             .unwrap()
     };
 
-    update_attachment_descriptor_sets(device, &descriptor_sets, attachments, binding_indices);
+    update_attachment_descriptor_sets(
+        device,
+        &descriptor_sets,
+        attachments,
+        binding_indices,
+        sampler,
+    );
 
     descriptor_sets
 }
@@ -189,6 +211,7 @@ pub fn update_attachment_descriptor_sets(
     descriptor_sets: &[vk::DescriptorSet],
     attachments: &[&[Image]],
     binding_indices: &[u32],
+    sampler: vk::Sampler,
 ) {
     let frame_count = attachments[0].len();
     let mut descriptor_writes = Vec::new();
@@ -199,7 +222,7 @@ pub fn update_attachment_descriptor_sets(
         let mut image_infos = Vec::with_capacity(frame_count);
         for frame_index in 0..attachments[binding_index].len() {
             image_infos.push(vk::DescriptorImageInfo {
-                sampler: vk::Sampler::null(),
+                sampler: sampler,
                 image_view: attachments[binding_index][frame_index].view,
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             });
@@ -209,8 +232,9 @@ pub fn update_attachment_descriptor_sets(
                 p_image_info: &image_infos[frame_index],
                 descriptor_count: 1,
                 dst_binding: binding_indices[binding_index],
-                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 dst_array_element: 0,
+
                 ..Default::default()
             })
         }

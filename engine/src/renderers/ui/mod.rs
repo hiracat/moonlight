@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 
 use ash::vk;
 use ash::vk::{
@@ -9,14 +10,15 @@ use ash::vk::{
     VertexInputBindingDescription,
 };
 use bytemuck::cast_slice;
-use egui::{ClippedPrimitive, TextureId, epaint};
+use egui::{epaint, ClippedPrimitive, TextureId};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use winit::dpi::PhysicalSize;
 
 use crate::renderers::world::pipelines::{
-    ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
-    RasterState, VertexInputState, create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
+    create_graphics_pipeline, create_pipeline_layout_from_vert_frag, ColorBlendState,
+    DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState, RasterState,
+    VertexInputState,
 };
 use crate::renderers::world::swapchain::SwapchainResources;
 use crate::resources::GpuTexture;
@@ -27,7 +29,6 @@ pub struct UIRenderer {
     pub winit_egui_state: egui_winit::State,
     pub full_output: Option<egui::FullOutput>,
 
-    pub renderpass: vk::RenderPass,
     pub pipeline: vk::Pipeline,
 
     pipeline_layout: vk::PipelineLayout,
@@ -35,7 +36,6 @@ pub struct UIRenderer {
     index_buffer: vk::Buffer,
     vertex_memory: Allocation,
     index_memory: Allocation,
-    pub framebuffers: Vec<vk::Framebuffer>,
 
     descriptor_set_layout: vk::DescriptorSetLayout,
 
@@ -49,6 +49,33 @@ pub struct UIRenderer {
     queue: vk::Queue,
     one_time_submit: vk::CommandBuffer,
     one_time_submit_pool: vk::CommandPool,
+    device: Arc<ash::Device>,
+}
+
+impl Drop for UIRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            // descriptor sets are freed when pool is destroyed, no need to free individually
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.destroy_buffer(self.index_buffer, None);
+        }
+        // textures drop themselves via GpuTexture::drop
+        self.textures.clear();
+
+        let vertex_memory =
+            std::mem::replace(&mut self.vertex_memory, unsafe { std::mem::zeroed() });
+        let index_memory = std::mem::replace(&mut self.index_memory, unsafe { std::mem::zeroed() });
+        let mut allocator = self.allocator.lock().unwrap();
+        allocator.free(vertex_memory).unwrap();
+        allocator.free(index_memory).unwrap();
+    }
 }
 struct UIDrawJob {
     vertex_offset: usize,
@@ -236,7 +263,15 @@ impl UIRenderer {
 
                 let dynamic_image = image::DynamicImage::ImageRgba8(image_buffer);
 
-                let gpu_texture = GpuTexture::create_2d(context, &dynamic_image);
+                let gpu_texture = GpuTexture::create_2d(
+                    self.allocator.clone(),
+                    self.device.clone(),
+                    &dynamic_image,
+                    self.queue_family_index,
+                    self.queue,
+                    self.one_time_submit_pool,
+                    self.one_time_submit,
+                );
                 let allocate_info = vk::DescriptorSetAllocateInfo {
                     descriptor_pool: self.descriptor_pool,
                     p_set_layouts: &self.descriptor_set_layout,
@@ -268,112 +303,16 @@ impl UIRenderer {
         }
     }
 
-    pub fn update_swapchain_resources(
-        &mut self,
-        context: &VulkanContext,
-        swapchain_resources: &SwapchainResources,
-    ) {
-        self.framebuffers = Self::create_ui_framebuffers(
-            &context.device,
-            &swapchain_resources.swapchain_image_views,
-            self.renderpass,
-            swapchain_resources.image_size,
-        );
-    }
-
-    pub fn create_ui_framebuffers(
-        device: &ash::Device,
-        swapchain_image_views: &[vk::ImageView],
-        render_pass: vk::RenderPass,
-        swapchain_image_extent: vk::Extent2D,
-    ) -> Vec<vk::Framebuffer> {
-        let mut framebuffers = Vec::new();
-
-        for i in 0..swapchain_image_views.len() {
-            let attachments = vec![swapchain_image_views[i]];
-            let framebuffer = unsafe {
-                device
-                    .create_framebuffer(
-                        &vk::FramebufferCreateInfo {
-                            render_pass,
-                            p_attachments: attachments.as_ptr(),
-                            attachment_count: attachments.len() as u32,
-                            width: swapchain_image_extent.width,
-                            height: swapchain_image_extent.height,
-                            layers: 1,
-                            ..Default::default()
-                        },
-                        None,
-                    )
-                    .unwrap()
-            };
-            framebuffers.push(framebuffer);
-        }
-        framebuffers
-    }
-
-    fn create_ui_renderpass(device: &ash::Device, swapchain_format: vk::Format) -> vk::RenderPass {
-        let subpass_dependancies = vec![vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
-                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dependency_flags: vk::DependencyFlags::BY_REGION,
-        }];
-        let attachments = vec![vk::AttachmentDescription {
-            format: swapchain_format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::LOAD,
-            store_op: vk::AttachmentStoreOp::STORE,
-            initial_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            stencil_load_op: vk::AttachmentLoadOp::LOAD,
-            stencil_store_op: vk::AttachmentStoreOp::STORE,
-            flags: vk::AttachmentDescriptionFlags::default(),
-        }];
-        let color_attachment_reference = vec![vk::AttachmentReference {
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            attachment: 0,
-        }];
-
-        let subpasses = vec![vk::SubpassDescription {
-            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
-            p_color_attachments: color_attachment_reference.as_ptr(),
-            color_attachment_count: color_attachment_reference.len() as u32,
-
-            p_input_attachments: ptr::null(),
-            input_attachment_count: 0,
-            p_preserve_attachments: ptr::null(),
-            preserve_attachment_count: 0,
-            p_resolve_attachments: ptr::null(),
-            p_depth_stencil_attachment: ptr::null(),
-            ..Default::default()
-        }];
-        let create_info = vk::RenderPassCreateInfo {
-            dependency_count: subpass_dependancies.len() as u32,
-            p_dependencies: subpass_dependancies.as_ptr(),
-            p_attachments: attachments.as_ptr(),
-            attachment_count: attachments.len() as u32,
-            p_subpasses: subpasses.as_ptr(),
-            subpass_count: subpasses.len() as u32,
-            ..Default::default()
-        };
-        unsafe { device.create_render_pass(&create_info, None).unwrap() }
-    }
-
     fn create_ui_render_pipeline(
-        device: &ash::Device,
-        renderpass: vk::RenderPass,
+        device: Arc<ash::Device>,
+        swapchain_format: vk::Format,
     ) -> (
         vk::Pipeline,
         vk::PipelineLayout,
         Vec<vk::DescriptorSetLayout>,
     ) {
         let shaders = create_pipeline_layout_from_vert_frag(
-            device,
+            device.clone(),
             Path::new("shaders/egui_vert.spv"),
             Path::new("shaders/egui_frag.spv"),
         );
@@ -460,11 +399,11 @@ impl UIRenderer {
             dynamic_state: vec![DynamicState::VIEWPORT, DynamicState::SCISSOR],
             tesselation_state: None,
             pipeline_layout: shaders.1,
-            renderpass: renderpass,
-            subpass_index: 0,
+            color_attachment_formats: vec![swapchain_format],
+            depth_attachment_format: None,
         };
         (
-            create_graphics_pipeline(device, desc).unwrap(),
+            create_graphics_pipeline(&device, desc).unwrap(),
             shaders.1,
             shaders.2,
         )
@@ -479,12 +418,11 @@ impl UIRenderer {
             None,
             Some(4096),
         );
-        let renderpass = Self::create_ui_renderpass(
-            &context.device,
-            swapchain_resources.swapchain_image_format.format,
-        );
         let (render_pipeline, pipeline_layout, descriptor_set_layouts) =
-            Self::create_ui_render_pipeline(&context.device, renderpass);
+            Self::create_ui_render_pipeline(
+                context.device.clone(),
+                swapchain_resources.swapchain_image_format.format,
+            );
 
         let index_buffer_create_info = vk::BufferCreateInfo {
             size: 0xFFFFF,
@@ -578,14 +516,9 @@ impl UIRenderer {
                 .bind_buffer_memory(index_buffer, index_memory.memory(), index_memory.offset())
                 .unwrap();
         }
-        let framebuffers = Self::create_ui_framebuffers(
-            &context.device,
-            &swapchain_resources.swapchain_image_views,
-            renderpass,
-            swapchain_resources.image_size,
-        );
 
         UIRenderer {
+            device: context.device.clone(),
             ui_ctx,
             full_output: None,
             winit_egui_state,
@@ -598,10 +531,8 @@ impl UIRenderer {
             descriptor_sets: HashMap::new(),
             pipeline: render_pipeline,
             pipeline_layout,
-            renderpass,
             index_buffer,
             index_memory,
-            framebuffers,
             vertex_buffer,
             vertex_memory,
             descriptor_pool,

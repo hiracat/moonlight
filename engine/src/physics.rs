@@ -144,9 +144,9 @@ impl Ray {
 }
 
 impl Aabb {
-    pub fn new(half_extent: Vec3, offset: Vec3) -> Aabb {
-        let local_max = offset + half_extent;
-        let local_min = offset - half_extent;
+    pub fn new(extent: Vec3, offset: Vec3) -> Aabb {
+        let local_max = offset + extent * 0.5;
+        let local_min = offset - extent * 0.5;
 
         Aabb {
             min: local_min,

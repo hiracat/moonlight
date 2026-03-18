@@ -359,7 +359,8 @@ pub trait DynamicComponent {
 
 impl<T: 'static> DynamicComponent for T {
     fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId) {
-        world.add(entity, *self);
+        //HACK: i dont feel like fixing this rn
+        world.add(entity, *self).unwrap();
     }
 }
 
@@ -903,18 +904,23 @@ impl<T: 'static> ComponentStorage<T> {
 }
 
 trait ErasedComponentStorage: Any {
-    fn remove_entity(&mut self, entity: EntityId);
+    fn remove_entity(&mut self, entity: EntityId) -> Result<(), WorldError>;
+    fn get_component_dyn_mut(&mut self, entity: EntityId) -> Option<&mut dyn Any>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn to_cursor_mut(&mut self) -> CursorMut;
+    fn to_cursor_mut(&'_ mut self) -> CursorMut<'_>;
 }
 
 impl<T: 'static> ErasedComponentStorage for ComponentStorage<T> {
-    fn to_cursor_mut(&mut self) -> CursorMut {
+    fn get_component_dyn_mut(&mut self, entity: EntityId) -> Option<&mut dyn Any> {
+        self.get_mut(entity).map(|x| x as &mut dyn Any)
+    }
+
+    fn to_cursor_mut(&'_ mut self) -> CursorMut<'_> {
         CursorMut::new(self)
     }
-    fn remove_entity(&mut self, entity: EntityId) {
-        let _ = self.remove(entity);
+    fn remove_entity(&mut self, entity: EntityId) -> Result<(), WorldError> {
+        self.remove(entity)
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -1033,7 +1039,7 @@ impl World {
                     self.last_dead.push(entity.0);
                 }
                 for storage in &mut self.component_storages {
-                    storage.1.remove_entity(entity);
+                    storage.1.remove_entity(entity)?;
                 }
                 Ok(())
             }
@@ -1065,12 +1071,22 @@ impl World {
                 x.remove(entity)
             })
     }
+    pub fn remove_dyn(&mut self, entity: EntityId, typeid: TypeId) -> Result<(), WorldError> {
+        self.get_storage_dyn_mut(typeid)
+            .ok_or(WorldError::EntityMissingComponent)?
+            .remove_entity(entity)
+    }
 
     pub fn get<T: 'static + Fetch>(&self, entity: EntityId) -> T::LookupResult<'_> {
         T::get(entity, self)
     }
     pub fn get_mut<T: 'static + FetchMut>(&mut self, entity: EntityId) -> T::LookupResult<'_> {
         T::get_mut(entity, self)
+    }
+    pub fn get_component_dyn(&mut self, entity: EntityId, typeid: TypeId) -> Option<*mut u8> {
+        self.get_storage_dyn_mut(typeid)?
+            .get_component_dyn_mut(entity)
+            .map(|x| x as *mut dyn Any as *mut u8)
     }
     pub fn add_resource<T: 'static>(&mut self, resource: T) -> Result<(), WorldError> {
         let resource: Box<dyn Any> = Box::new(resource);
@@ -1094,7 +1110,7 @@ impl World {
             ),
         }
     }
-    pub fn get_resource<T: 'static>(&mut self) -> Option<&T> {
+    pub fn get_resource<T: 'static>(&self) -> Option<&T> {
         Some(
             self.resource_storage
                 .get(&TypeId::of::<T>())?
@@ -1109,6 +1125,9 @@ impl World {
                 .downcast_mut::<T>()
                 .expect("incorrect type in storage"),
         )
+    }
+    pub fn get_mut_resource_dyn(&mut self, typeid: &TypeId) -> Option<&mut Box<dyn Any>> {
+        self.resource_storage.get_mut(&typeid)
     }
 
     /// Panics: panics if any of the queried types are identical
@@ -1163,6 +1182,12 @@ impl World {
                     .downcast_mut::<ComponentStorage<T>>()
                     .expect("should be able to downcast if it exists")
             })
+    }
+    fn get_storage_dyn_mut<'s>(
+        &'s mut self,
+        typeid: TypeId,
+    ) -> Option<&'s mut dyn ErasedComponentStorage> {
+        self.component_storages.get_mut(&typeid).map(|x| x.as_mut())
     }
 }
 

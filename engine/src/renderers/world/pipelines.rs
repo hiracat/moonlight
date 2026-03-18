@@ -1,5 +1,6 @@
 use std::ffi::{self, c_void};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::{fs, marker};
 use std::{
     path::{self, Path},
@@ -7,7 +8,7 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
+use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 use ultraviolet::Slerp;
 
 use crate::ecs::{Not, Opt, OptM, ReqM, World};
@@ -19,7 +20,7 @@ use crate::ubo::{
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     ecs::Req,
-    renderers::world::draw::{DrawJob, GEOMETRY_SUBPASS, LIGHTING_SUBPASS},
+    renderers::world::draw::DrawJob,
 };
 pub struct PipelineBundle {
     pub pipeline: vk::Pipeline,
@@ -40,6 +41,18 @@ pub struct PipelineBundle {
             &vk::DescriptorSet,
         ) -> Vec<DrawJob>,
     >,
+    device: Arc<ash::Device>,
+}
+impl Drop for PipelineBundle {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline_layout(self.layout, None);
+            for layout in &self.descriptor_set_layouts {
+                self.device.destroy_descriptor_set_layout(*layout, None);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
@@ -60,48 +73,48 @@ pub enum PipelineKey {
 // CREATE ALL THE ENGINES BUILTIN GRAPHICS PIPELINES(I want to extend to being able to add your
 // own)
 pub fn create_builtin_graphics_pipelines(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
+    device: Arc<ash::Device>,
+    swapchain_image_format: vk::Format,
+    depth_format: vk::Format,
+    color_attachment_formats: &[vk::Format],
 ) -> Vec<PipelineBundle> {
     let static_geometry = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/static_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
     let animated_geometry = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/animated_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
 
     let directional_layouts = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/directional_vert.spv"),
         Path::new("shaders/directional_frag.spv"),
     );
 
     let ambient = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/ambient_vert.spv"),
         Path::new("shaders/ambient_frag.spv"),
     );
 
     let point = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/point_vert.spv"),
         Path::new("shaders/point_frag.spv"),
     );
     let skybox = create_pipeline_layout_from_vert_frag(
-        device,
+        device.clone(),
         Path::new("shaders/skybox_vert.spv"),
         Path::new("shaders/skybox_frag.spv"),
     );
 
     let static_geometry_desc = GraphicsPipelineDesc {
-        renderpass: render_pass,
         pipeline_layout: static_geometry.1,
         shaders: &static_geometry.0,
-        subpass_index: GEOMETRY_SUBPASS,
         tesselation_state: None,
         dynamic_state: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
         multisample_state: MultisampleState {
@@ -160,8 +173,11 @@ pub fn create_builtin_graphics_pipelines(
             max_depth_bounds: 0.0,
         },
         viewport_state: None,
+        depth_attachment_format: Some(depth_format),
+        color_attachment_formats: color_attachment_formats.to_vec(),
     };
-    let static_geometry_pipeline = create_graphics_pipeline(device, &static_geometry_desc).unwrap();
+    let static_geometry_pipeline =
+        create_graphics_pipeline(&device, &static_geometry_desc).unwrap();
 
     let mut animated_geometry_desc = static_geometry_desc;
     animated_geometry_desc
@@ -177,10 +193,10 @@ pub fn create_builtin_graphics_pipelines(
     animated_geometry_desc.pipeline_layout = animated_geometry.1;
     animated_geometry_desc.shaders = &animated_geometry.0;
     let animated_geometry_pipeline =
-        create_graphics_pipeline(device, &animated_geometry_desc).unwrap();
+        create_graphics_pipeline(&device, &animated_geometry_desc).unwrap();
 
     let mut ambient_desc = animated_geometry_desc;
-    ambient_desc.subpass_index = LIGHTING_SUBPASS;
+    ambient_desc.color_attachment_formats = vec![swapchain_image_format];
     ambient_desc.depth_stencil_state.depth_write_enable = false;
     ambient_desc.color_blend_state = ColorBlendState {
         logic_op: None,
@@ -211,22 +227,24 @@ pub fn create_builtin_graphics_pipelines(
         }];
     ambient_desc.pipeline_layout = ambient.1;
     ambient_desc.shaders = &ambient.0;
-    let ambient_pipeline = create_graphics_pipeline(device, &ambient_desc).unwrap();
+    let ambient_pipeline = create_graphics_pipeline(&device, &ambient_desc).unwrap();
 
     let mut directional_desc = ambient_desc;
 
     directional_desc.pipeline_layout = directional_layouts.1;
     directional_desc.shaders = &directional_layouts.0;
-    let directional_pipeline = create_graphics_pipeline(device, &directional_desc).unwrap();
+    let directional_pipeline = create_graphics_pipeline(&device, &directional_desc).unwrap();
 
     let mut point_desc = directional_desc;
 
     point_desc.pipeline_layout = point.1;
     point_desc.shaders = &point.0;
-    let point_pipeline = create_graphics_pipeline(device, &point_desc).unwrap();
+    let point_pipeline = create_graphics_pipeline(&device, &point_desc).unwrap();
 
     let mut skybox_desc = point_desc;
 
+    skybox_desc.depth_attachment_format = Some(depth_format); // add this
+    skybox_desc.pipeline_layout = skybox.1;
     skybox_desc.pipeline_layout = skybox.1;
     skybox_desc.shaders = &skybox.0;
     skybox_desc.depth_stencil_state.depth_test_enable = true;
@@ -245,10 +263,11 @@ pub fn create_builtin_graphics_pipelines(
         blend_constants: [0.0; 4],
     };
 
-    let skybox_pipeline = create_graphics_pipeline(device, &skybox_desc).unwrap();
+    let skybox_pipeline = create_graphics_pipeline(&device, &skybox_desc).unwrap();
 
     let mut pipelines = Vec::new();
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: static_geometry_pipeline,
         layout: static_geometry.1,
         descriptor_set_layouts: static_geometry.2,
@@ -314,6 +333,7 @@ pub fn create_builtin_graphics_pipelines(
     });
 
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: animated_geometry_pipeline,
         layout: animated_geometry.1,
         descriptor_set_layouts: animated_geometry.2,
@@ -506,6 +526,7 @@ pub fn create_builtin_graphics_pipelines(
     });
 
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: ambient_pipeline,
         layout: ambient.1,
         descriptor_set_layouts: ambient.2,
@@ -535,6 +556,7 @@ pub fn create_builtin_graphics_pipelines(
         ),
     });
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: directional_pipeline,
         layout: directional_layouts.1,
         descriptor_set_layouts: directional_layouts.2,
@@ -564,6 +586,7 @@ pub fn create_builtin_graphics_pipelines(
         ),
     });
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: point_pipeline,
         layout: point.1,
         descriptor_set_layouts: point.2,
@@ -600,6 +623,7 @@ pub fn create_builtin_graphics_pipelines(
         ),
     });
     pipelines.push(PipelineBundle {
+        device: device.clone(),
         pipeline: skybox_pipeline,
         layout: skybox.1,
         descriptor_set_layouts: skybox.2,
@@ -664,6 +688,16 @@ pub struct ShaderStage {
     //recompiling shader
     pub entry_point: ffi::CString,
     pub specalization_info: Option<SpecalizationInfo>,
+
+    device: Arc<ash::Device>,
+}
+
+impl Drop for ShaderStage {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_shader_module(self.shader, None);
+        }
+    }
 }
 
 pub struct RasterState {
@@ -721,8 +755,8 @@ pub struct GraphicsPipelineDesc<'a> {
     pub dynamic_state: Vec<vk::DynamicState>,
     pub tesselation_state: Option<TesselationState>,
     pub pipeline_layout: vk::PipelineLayout,
-    pub renderpass: vk::RenderPass,
-    pub subpass_index: u32,
+    pub color_attachment_formats: Vec<vk::Format>,
+    pub depth_attachment_format: Option<vk::Format>,
 }
 
 pub fn create_graphics_pipeline(
@@ -867,7 +901,20 @@ pub fn create_graphics_pipeline(
         }),
         None => None,
     };
+    let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo {
+        color_attachment_count: desc.color_attachment_formats.len() as u32,
+        p_color_attachment_formats: desc.color_attachment_formats.as_ptr(),
+        depth_attachment_format: desc
+            .depth_attachment_format
+            .unwrap_or(vk::Format::UNDEFINED),
+        ..Default::default()
+    };
 
+    let tessellation_state_info =
+        tesselation_state.map(|x| vk::PipelineTessellationStateCreateInfo {
+            patch_control_points: x.patch_control_points,
+            ..Default::default()
+        });
     let create_info = vk::GraphicsPipelineCreateInfo {
         p_stages: stages.as_ptr(),
         stage_count: stages.len() as u32,
@@ -896,18 +943,17 @@ pub fn create_graphics_pipeline(
         // recording the command buffer, before we perform drawing. Here, we specify
         // that the viewport should be dynamic.
         p_dynamic_state: &dynamic_state,
-        p_tessellation_state: tesselation_state.map_or(ptr::null(), |x| &x),
+        p_tessellation_state: tessellation_state_info
+            .as_ref()
+            .map_or(ptr::null(), |x| x as *const _),
 
         layout: desc.pipeline_layout,
-        // the renderpass this graphics pipeline is one
-        render_pass: desc.renderpass,
-        // the subpass index
-        subpass: desc.subpass_index,
 
         // if deriving from a graphics pipeline, the index
         base_pipeline_index: 0,
         // and the handle to that pipeline
         base_pipeline_handle: vk::Pipeline::null(),
+        p_next: &mut pipeline_rendering_info as *mut _ as *const c_void,
         ..Default::default()
     };
 
@@ -931,7 +977,7 @@ pub fn create_graphics_pipeline(
 const ASM_ENTRY_POINT_EXECUTION_MODEL_IDX: usize = 0;
 const ASM_ENTRY_POINT_NAME_IDX: usize = 2;
 pub fn create_pipeline_layout_from_vert_frag(
-    device: &ash::Device,
+    device: Arc<ash::Device>,
     vertex_path: &path::Path,
     fragment_path: &path::Path,
 ) -> (
@@ -969,6 +1015,7 @@ pub fn create_pipeline_layout_from_vert_frag(
         kind: get_shader_kind(&vertex_reflection),
         entry_point: get_entry_name(&vertex_reflection),
         specalization_info: None,
+        device: device.clone(),
     };
 
     let code = fragment_reflection.0.assemble();
@@ -987,6 +1034,7 @@ pub fn create_pipeline_layout_from_vert_frag(
         kind: get_shader_kind(&fragment_reflection),
         entry_point: get_entry_name(&fragment_reflection),
         specalization_info: None,
+        device: device.clone(),
     };
 
     let vertex_descriptor_sets = vertex_reflection.get_descriptor_sets().unwrap();

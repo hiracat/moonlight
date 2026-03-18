@@ -1,9 +1,10 @@
 #version 450
 
 // can use the same set number since this is a different pipeline that uses a different pipeline layout
-layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput u_color;
-layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput u_normals;
-layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput u_position;
+// had to replace subpassinput with sampler2d for dynamic rendering
+layout(set = 0, binding = 0) uniform sampler2D u_color;
+layout(set = 0, binding = 1) uniform sampler2D u_normals;
+layout(set = 0, binding = 2) uniform sampler2D u_position;
 // this needs a different set since it is rebound per object, since it is in a different grahpics pipeline it still uses set index one because different pipeline layout
 layout(set = 1, binding = 0) uniform PointLight {
     vec3 position;
@@ -13,6 +14,8 @@ layout(set = 1, binding = 0) uniform PointLight {
     float linear;      // Controls linear distance falloff
     float quadratic;   // Controls quadratic distance falloff
 } point;
+// the place on the sampler2d to look,
+layout(location = 0) in vec2 in_uv;
 layout(location = 0) out vec4 f_color;
 // Simple Reinhard tonemapping function
 vec3 toneMap(vec3 color, float exposure) {
@@ -30,17 +33,17 @@ vec3 toneMap(vec3 color, float exposure) {
 
 
 void main() {
-    vec3 fragPos = subpassLoad(u_position).xyz;
+    vec3 fragPos = texture(u_position, in_uv).xyz;
     vec3 lightDirection = normalize(point.position - fragPos);
     float distance = length(point.position - fragPos);
     float attenuation = 1.0 / (1 + point.linear * distance + point.quadratic * distance * distance);
 
-    float diffuseIntensity = max(dot(normalize(subpassLoad(u_normals).rgb), lightDirection), 0.0);
+    float diffuseIntensity = max(dot(normalize(texture(u_normals, in_uv).rgb), lightDirection), 0.0);
     vec3 diffuseColor = diffuseIntensity * point.color;
 
     diffuseColor *= attenuation * point.brightness;
 
-    vec3 combinedColor = diffuseColor * subpassLoad(u_color).rgb;
+    vec3 combinedColor = diffuseColor * texture(u_color, in_uv).rgb;
     f_color = vec4(combinedColor, 1);
     // f_color = vec4(toneMap(combinedColor, 1.0), 1.0); // Adjust exposure value as needed
 }

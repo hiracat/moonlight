@@ -2,9 +2,9 @@
 
 use ultraviolet as uv;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Time {
-    delta_time: f32,
+    pub delta_time: f32,
 }
 
 #[derive(Debug, Clone, Copy)]

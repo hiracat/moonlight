@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 
@@ -7,26 +9,44 @@ pub struct GBufferResources {
     pub color_images: Vec<Image>,
     pub normal_images: Vec<Image>,
     pub position_images: Vec<Image>,
+
+    pub depth_images: Vec<Image>,
 }
 
-#[derive(Debug)]
 pub struct Image {
     pub image: vk::Image,
     pub view: vk::ImageView,
-    pub memory: Allocation,
+    // always exists, but required to satisfy the borrow checker
+    pub memory: Option<Allocation>,
+
+    device: Arc<ash::Device>,
+    allocator: SharedAllocator,
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image_view(self.view, None);
+            self.device.destroy_image(self.image, None);
+        }
+        self.allocator
+            .lock()
+            .unwrap()
+            .free(
+                self.memory
+                    .take()
+                    .expect("memory should always be some til drop"),
+            )
+            .unwrap();
+    }
 }
 
 pub fn create_gbuffer_resources(
-    device: &ash::Device,
+    device: &Arc<ash::Device>,
     swapchain_images: &[vk::Image],
-    render_pass: vk::RenderPass,
     allocator: SharedAllocator,
-    swapchain_image_views: &Vec<vk::ImageView>,
     swapchain_image_extent: vk::Extent2D,
-    // HACK: the vec of allocations is to keep the allocatiosn from dropping and freeing underlying
-    // memory, this should be replaced with some kind of wrapper or just one allocation per
-    // framebuffer
-) -> (Vec<vk::Framebuffer>, GBufferResources) {
+) -> GBufferResources {
     let extent = vk::Extent3D {
         width: swapchain_image_extent.width,
         height: swapchain_image_extent.height,
@@ -37,12 +57,12 @@ pub fn create_gbuffer_resources(
     let normal_format = vk::Format::R16G16B16A16_SFLOAT;
     let position_format = vk::Format::R32G32B32A32_SFLOAT;
 
-    let mut framebuffers = Vec::new();
     let mut colors = Vec::new();
     let mut normals = Vec::new();
     let mut positions = Vec::new();
+    let mut depths = Vec::new();
 
-    for i in 0..swapchain_images.len() {
+    for _ in 0..swapchain_images.len() {
         let color_subresource_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             level_count: 1,
@@ -74,7 +94,7 @@ pub fn create_gbuffer_resources(
             "color image",
             extent,
             color_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             color_subresource_range,
         );
         let normal = create_image(
@@ -83,7 +103,7 @@ pub fn create_gbuffer_resources(
             "color image",
             extent,
             normal_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             color_subresource_range,
         );
         // HACK: needs to be removed, you can reconstruct the worldspace coordinates from the depth
@@ -94,50 +114,25 @@ pub fn create_gbuffer_resources(
             "color image",
             extent,
             position_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             color_subresource_range,
         );
 
-        let attachments = vec![
-            swapchain_image_views[i],
-            color.view,
-            normal.view,
-            depth.view,
-            position.view,
-        ];
-        let framebuffer = unsafe {
-            device
-                .create_framebuffer(
-                    &vk::FramebufferCreateInfo {
-                        render_pass,
-                        p_attachments: attachments.as_ptr(),
-                        attachment_count: attachments.len() as u32,
-                        width: swapchain_image_extent.width,
-                        height: swapchain_image_extent.height,
-                        layers: 1,
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .unwrap()
-        };
-        framebuffers.push(framebuffer);
         colors.push(color);
         normals.push(normal);
         positions.push(position);
+        depths.push(depth);
     }
-    (
-        framebuffers,
-        GBufferResources {
-            color_images: colors,
-            normal_images: normals,
-            position_images: positions,
-        },
-    )
+    GBufferResources {
+        color_images: colors,
+        normal_images: normals,
+        position_images: positions,
+        depth_images: depths,
+    }
 }
 
 fn create_image(
-    device: &ash::Device,
+    device: &Arc<ash::Device>,
     allocator: &SharedAllocator,
     name: &str,
     extent: vk::Extent3D,
@@ -192,6 +187,8 @@ fn create_image(
     Image {
         image,
         view,
-        memory: allocation,
+        memory: Some(allocation),
+        allocator: allocator.clone(),
+        device: device.clone(),
     }
 }
