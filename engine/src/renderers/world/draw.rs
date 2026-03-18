@@ -462,7 +462,7 @@ impl WorldRenderer {
         let gbuffer_resources = create_gbuffer_resources(
             &context.device,
             &swapchain_resources.swapchain_images,
-            context.allocator.clone(),
+            context.allocator().clone(),
             swapchain_resources.image_size,
         );
 
@@ -524,7 +524,7 @@ impl WorldRenderer {
         let gbuffer_resources = create_gbuffer_resources(
             &context.device,
             &swapchain_resources.swapchain_images,
-            context.allocator.clone(),
+            context.allocator().clone(),
             swapchain_resources.image_size,
         );
 

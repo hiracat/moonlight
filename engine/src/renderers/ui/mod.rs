@@ -463,7 +463,7 @@ impl UIRenderer {
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
         let vertex_memory = context
-            .allocator
+            .allocator()
             .lock()
             .unwrap()
             .allocate(&vertex_alloc_desc)
@@ -480,7 +480,7 @@ impl UIRenderer {
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         };
         let index_memory = context
-            .allocator
+            .allocator()
             .lock()
             .unwrap()
             .allocate(&index_alloc_desc)
@@ -526,7 +526,7 @@ impl UIRenderer {
             one_time_submit_pool: context.one_time_submit_pool,
             one_time_submit: context.one_time_submit_buffer,
             queue: context.queue,
-            allocator: context.allocator.clone(),
+            allocator: context.allocator().clone(),
             queue_family_index: context.queue_family_index,
             descriptor_sets: HashMap::new(),
             pipeline: render_pipeline,

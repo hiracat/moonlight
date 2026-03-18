@@ -670,12 +670,12 @@ impl Vertex {
 impl ResourceManager {
     pub(crate) fn init(context: &VulkanContext) -> Self {
         let ring_buffer =
-            UniformRingBuffer::create(context.allocator.clone(), &context.device, 0xFFFFF);
+            UniformRingBuffer::create(context.allocator().clone(), &context.device, 0xFFFFF);
         let pixel = Rgba::from([255, 255, 255, 0]);
         let mut image = DynamicImage::new_rgb8(1, 1);
         image.put_pixel(0, 0, pixel);
         let default = GpuTexture::create_2d(
-            context.allocator.clone(),
+            context.allocator().clone(),
             context.device.clone(),
             &image,
             context.queue_family_index,
@@ -690,14 +690,14 @@ impl ResourceManager {
             one_time_submit_pool: context.one_time_submit_pool,
             queue: context.queue,
             device: context.device.clone(),
-            allocator: context.allocator.clone(),
+            allocator: context.allocator().clone(),
             ubo_ring_buffer: ring_buffer,
             default_texture: default,
             meshes: Vec::new(),
             textures: Vec::new(),
             animation_resources: AnimationResources::create(
                 context.device.clone(),
-                context.allocator.clone(),
+                context.allocator().clone(),
             ),
         }
     }

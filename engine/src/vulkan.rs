@@ -33,7 +33,7 @@ pub struct VulkanContext {
     debug_messenger: vk::DebugUtilsMessengerEXT,
     debug_utils_loader: ash::ext::debug_utils::Instance,
 
-    pub allocator: SharedAllocator,
+    pub allocator: Option<SharedAllocator>,
     pub queue: vk::Queue,
     pub queue_family_index: QueueFamilyIndex,
 
@@ -45,6 +45,9 @@ pub struct VulkanContext {
 }
 
 impl VulkanContext {
+    pub fn allocator(&self) -> SharedAllocator {
+        self.allocator.as_ref().unwrap().clone()
+    }
     pub fn init(event_loop: &ActiveEventLoop) -> Self {
         let entry = unsafe { ash::Entry::load().unwrap() };
         let window = create_window(event_loop);
@@ -123,7 +126,7 @@ impl VulkanContext {
             physical_device: physical_device,
             queue: queue,
             queue_family_index: queue_family_index,
-            allocator: Arc::new(Mutex::new(memory_allocator)),
+            allocator: Some(Arc::new(Mutex::new(memory_allocator))),
             debug_messenger: debug_messenger,
             debug_utils_loader: debug_utils_loader,
             window: window,
@@ -134,7 +137,7 @@ impl VulkanContext {
 impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
-            let allocator = std::ptr::read(&self.allocator);
+            let allocator = self.allocator.take().unwrap();
             drop(allocator);
             self.device
                 .destroy_command_pool(self.one_time_submit_pool, None);
