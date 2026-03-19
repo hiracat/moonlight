@@ -35,6 +35,12 @@ pub struct ResourceManager {
     one_time_submit_buffer: vk::CommandBuffer,
 }
 
+pub enum TextureFormat {
+    Srgba,
+    LinearRgba,
+    HeightF32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Skeleton {
     // TODO:just the index into the skeletons array(need to find a way to remove, but might just have to
@@ -675,6 +681,7 @@ impl ResourceManager {
         let mut image = DynamicImage::new_rgb8(1, 1);
         image.put_pixel(0, 0, pixel);
         let default = GpuTexture::create_2d(
+            TextureFormat::Srgba,
             context.allocator().clone(),
             context.device.clone(),
             &image,
@@ -837,12 +844,13 @@ impl ResourceManager {
     pub(crate) fn default_texture(&mut self) -> &GpuTexture {
         &self.default_texture
     }
-    pub fn create_texture(&mut self, path: &str) -> Texture {
+    pub fn create_texture(&mut self, path: &str, format: TextureFormat) -> Texture {
         let image = ImageReader::open(Path::new(path))
             .unwrap()
             .decode()
             .unwrap();
         self.textures.push(Some(GpuTexture::create_2d(
+            format,
             self.allocator.clone(),
             self.device.clone(),
             &image,
@@ -1501,6 +1509,7 @@ impl GpuTexture {
         }
     }
     pub fn create_2d(
+        format: TextureFormat,
         allocator: SharedAllocator,
         device: Arc<ash::Device>,
         image: &DynamicImage,
@@ -1509,11 +1518,15 @@ impl GpuTexture {
         one_time_submit_pool: vk::CommandPool,
         one_time_submit_buffer: vk::CommandBuffer,
     ) -> Self {
-        let image = image.to_rgba8();
+        let image_pixel_size = match format {
+            TextureFormat::Srgba => 4,
+            TextureFormat::LinearRgba => 4,
+            TextureFormat::HeightF32 => 16,
+        };
         let create_info = vk::BufferCreateInfo {
             p_queue_family_indices: &queue_family_index,
             queue_family_index_count: 1,
-            size: (image.width() * image.height() * 4) as u64,
+            size: (image.width() * image.height() * image_pixel_size) as u64,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             flags: vk::BufferCreateFlags::empty(),
@@ -1542,7 +1555,11 @@ impl GpuTexture {
                 .unwrap()
         }
 
-        let image_format = vk::Format::R8G8B8A8_SRGB;
+        let image_format = match format {
+            TextureFormat::Srgba => vk::Format::R8G8B8A8_SRGB,
+            TextureFormat::LinearRgba => vk::Format::R8G8B8A8_UNORM,
+            TextureFormat::HeightF32 => vk::Format::R32G32B32A32_SFLOAT,
+        };
 
         let create_info = vk::ImageCreateInfo {
             p_queue_family_indices: &queue_family_index,

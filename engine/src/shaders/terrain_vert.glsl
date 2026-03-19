@@ -59,8 +59,16 @@ void main() {
 
     out_normal = normalize(vec3(hL - hR, 2.0, hD - hU));
     out_uv = uv;
-    out_color = vec3(1.0, 1.0, 1.0);
     out_position = world_pos;
+
+
+
+    float real_height = (texture(heightmap, uv).r - .5) * 2;
+    float red = real_height * 0.4;
+    float green = real_height;
+    float blue = -real_height;
+
+    out_color = vec3(red, green, blue);
 
     // camera project
     gl_Position = vp_uniforms.projection * vp_uniforms.view * world_pos;

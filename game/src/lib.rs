@@ -34,18 +34,20 @@ fn start(world: &mut World, engine: &mut Engine) {
         height as f32 / width as f32,
     );
     let directional =
-        DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.6, 0.2, 0.2));
-    let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.05);
+        DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(2.0, 1.6, 1.5));
+    let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.35);
 
     let heightmap = TerrainMap {
-        map: engine.resource_manager.create_texture("data/heightmap.exr"),
+        map: engine
+            .resource_manager
+            .create_texture("data/heightmap.exr", resources::TextureFormat::HeightF32),
         cpu_map: ImageReader::open("data/heightmap.exr")
             .unwrap()
             .decode()
             .unwrap()
             .to_luma32f(),
-        size: 200.0,
-        height: 20.0,
+        size: 2000.0,
+        height: 300.0,
         resolution: 1000,
     };
 
@@ -92,49 +94,51 @@ fn start(world: &mut World, engine: &mut Engine) {
         .resource_manager
         .load_gltf_asset("data/models/animated_fox.glb");
     let mut fox_animations = fox_animations.unwrap();
-    // fox_animations.current_playing = Some(fox_animations.animations[0].clone());
-    fox_animations.current_playing = None;
+    fox_animations.current_playing = Some(fox_animations.animations[0].clone());
+    // fox_animations.current_playing = None;
     world.add(fox, fox_model).unwrap();
     world.add(fox, fox_animations).unwrap();
-    let fox_albedo = engine
-        .resource_manager
-        .create_texture("data/models/textures/animated_fox_texture.png");
+    let fox_albedo = engine.resource_manager.create_texture(
+        "data/models/textures/animated_fox_texture.png",
+        resources::TextureFormat::Srgba,
+    );
     world.add(fox, Material::create(fox_albedo)).unwrap();
 
     // ground — stays Rust because Collider can't be constructed from Lua yet
-    let ground = world.spawn();
-    let ground_tex = engine
-        .resource_manager
-        .create_texture("data/models/textures/ground_roots.png");
-    world.add(ground, Material::create(ground_tex)).unwrap();
-    world
-        .add(
-            ground,
-            Transform::from(
-                None,
-                Some(Rotor3::from_rotation_yz(0.3)),
-                Some(Vec3::new(100.0, 1.0, 100.0)),
-            ),
-        )
-        .unwrap();
-    world
-        .add(
-            ground,
-            engine
-                .resource_manager
-                .load_gltf_asset("data/models/ground_plane.glb")
-                .0,
-        )
-        .unwrap();
-    world
-        .add(
-            ground,
-            Collider::Obb(Obb::new(
-                Vec3::new(2.0, 8.0, 2.0),
-                Vec3::new(0.0, -4.0, 0.0),
-            )),
-        )
-        .unwrap();
+    // let ground = world.spawn();
+    // let ground_tex = engine.resource_manager.create_texture(
+    //     "data/models/textures/ground_roots.png",
+    //     resources::TextureFormat::Srgba,
+    // );
+    // world.add(ground, Material::create(ground_tex)).unwrap();
+    // world
+    //     .add(
+    //         ground,
+    //         Transform::from(
+    //             None,
+    //             Some(Rotor3::from_rotation_yz(0.3)),
+    //             Some(Vec3::new(100.0, 1.0, 100.0)),
+    //         ),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         ground,
+    //         engine
+    //             .resource_manager
+    //             .load_gltf_asset("data/models/ground_plane.glb")
+    //             .0,
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         ground,
+    //         Collider::Obb(Obb::new(
+    //             Vec3::new(2.0, 8.0, 2.0),
+    //             Vec3::new(0.0, -4.0, 0.0),
+    //         )),
+    //     )
+    //     .unwrap();
 
     // lights — could move to Lua but no reason to
     let blue_light = world.spawn();

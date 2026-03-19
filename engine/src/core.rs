@@ -825,6 +825,12 @@ impl TerrainMap {
         let bot = h01 * (1.0 - tx) + h11 * tx;
         let t = top * (1.0 - tz) + bot * tz;
 
+        println!(
+            "terrain size: {}, height: {}, resolution: {}",
+            self.size, self.height, self.resolution
+        );
+        println!("fox position: {}, {}", x, z);
+        println!("computed height: {}", t * self.height);
         t * self.height
     }
 }

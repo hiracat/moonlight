@@ -11,7 +11,7 @@ use crate::{
     core::{Controllable, Engine, Keyboard, MouseState},
     ecs::{DynamicComponent, EntityId, QueryInfo, World},
     physics::{Aabb, Collider, RigidBody},
-    resources::{Animated, Animation, Material, Mesh, Skeleton, Skybox, Texture},
+    resources::{self, Animated, Animation, Material, Mesh, Skeleton, Skybox, Texture},
 };
 pub trait PrintOnError {
     fn print_on_error(self);
@@ -597,7 +597,11 @@ impl LuaUserData for Animated {
 impl LuaUserData for LuaEngine {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("create_texture", |_, this, path: String| {
-            Ok(unsafe { (*this.engine).resource_manager.create_texture(&path) })
+            Ok(unsafe {
+                (*this.engine)
+                    .resource_manager
+                    .create_texture(&path, resources::TextureFormat::Srgba)
+            })
         });
         methods.add_method_mut("create_cubemap", |_, this, paths: Vec<String>| {
             let paths_str: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();

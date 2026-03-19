@@ -21,7 +21,7 @@ use crate::renderers::world::pipelines::{
     VertexInputState,
 };
 use crate::renderers::world::swapchain::SwapchainResources;
-use crate::resources::GpuTexture;
+use crate::resources::{self, GpuTexture};
 use crate::vulkan::{QueueFamilyIndex, SharedAllocator, VulkanContext};
 
 pub struct UIRenderer {
@@ -264,6 +264,7 @@ impl UIRenderer {
                 let dynamic_image = image::DynamicImage::ImageRgba8(image_buffer);
 
                 let gpu_texture = GpuTexture::create_2d(
+                    resources::TextureFormat::Srgba,
                     self.allocator.clone(),
                     self.device.clone(),
                     &dynamic_image,
