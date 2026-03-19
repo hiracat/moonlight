@@ -31,9 +31,15 @@ pub struct WorldRenderer {
 
 #[derive(Debug)]
 pub struct DrawJob {
-    pub mesh: Option<Mesh>,
+    pub mesh: DrawStyle,
     // shaders set indices are required to be contiguous
     pub descriptor_sets: Vec<vk::DescriptorSet>,
+}
+
+#[derive(Debug)]
+pub enum DrawStyle {
+    Mesh(Mesh),
+    VertexCount(u32),
 }
 
 impl Drop for WorldRenderer {
@@ -250,28 +256,29 @@ impl WorldRenderer {
                         &[],
                     );
                 }
-                if let Some(mesh) = job.mesh {
-                    let mesh = resource_manager.get_mesh(mesh).unwrap();
+                match job.mesh {
+                    DrawStyle::Mesh(x) => {
+                        let mesh = resource_manager.get_mesh(x).unwrap();
 
-                    unsafe {
-                        device.cmd_bind_vertex_buffers(
-                            command_buffer,
-                            0,
-                            &[mesh.vertex_buffer],
-                            &[0],
-                        );
-                        device.cmd_bind_index_buffer(
-                            command_buffer,
-                            mesh.index_buffer,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                        device.cmd_draw_indexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
+                        unsafe {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                0,
+                                &[mesh.vertex_buffer],
+                                &[0],
+                            );
+                            device.cmd_bind_index_buffer(
+                                command_buffer,
+                                mesh.index_buffer,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            device.cmd_draw_indexed(command_buffer, mesh.index_count, 1, 0, 0, 0);
+                        }
                     }
-                } else {
-                    unsafe {
-                        device.cmd_draw(command_buffer, 3, 1, 0, 0);
-                    }
+                    DrawStyle::VertexCount(count) => unsafe {
+                        device.cmd_draw(command_buffer, count, 1, 0, 0);
+                    },
                 }
             }
             if pipeline_index == PipelineKey::AnimatedGeometry as usize {
@@ -442,7 +449,8 @@ impl WorldRenderer {
         );
         //HACK: yes this is a magic number, but its defined in the shader, so not resonable to fix
         // Index 2 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
-        let per_swapchain_image_set_layout = pipelines[2].descriptor_set_layouts[0];
+        let per_swapchain_image_set_layout =
+            pipelines[PipelineKey::Ambient as usize].descriptor_set_layouts[0];
         let sampler = unsafe {
             context.device.create_sampler(
                 &vk::SamplerCreateInfo {

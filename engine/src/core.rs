@@ -1,6 +1,7 @@
 use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
 
 use ash::vk;
+use image::{ImageBuffer, Luma, Rgb, Rgb32FImage};
 use ultraviolet::Vec3;
 use winit::{
     application::ApplicationHandler,
@@ -22,7 +23,7 @@ use crate::{
             swapchain::{create_semaphores, SwapchainResources},
         },
     },
-    resources::ResourceManager,
+    resources::{ResourceManager, Texture},
     vulkan::VulkanContext,
 };
 #[derive(Debug, Copy, Clone)]
@@ -471,7 +472,7 @@ impl PerFrame {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1000,
+                descriptor_count: 2000,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -779,5 +780,51 @@ impl ApplicationHandler for App {
                 state.y = delta.1 as f32;
             }
         }
+    }
+}
+
+pub struct TerrainMap {
+    pub size: f32,
+    pub height: f32,
+    pub resolution: u32,
+    pub map: Texture,
+    pub cpu_map: ImageBuffer<Luma<f32>, Vec<f32>>,
+}
+impl TerrainMap {
+    pub fn get_height_at(&self, x: f32, z: f32) -> f32 {
+        let w = self.cpu_map.width() as f32;
+        let h = self.cpu_map.height() as f32;
+
+        // map world position to pixel coordinates
+        // x/z are world coords, remap to 0..resolution
+        let px = ((x / self.size) + 0.5) * w;
+        let pz = ((z / self.size) + 0.5) * h;
+
+        // clamp to image bounds
+        let px = px.clamp(0.0, w - 1.0);
+        let pz = pz.clamp(0.0, h - 1.0);
+
+        // the 4 surrounding pixels
+        let x0 = px.floor() as u32;
+        let x1 = (px.ceil() as u32).min(self.cpu_map.width() - 1);
+        let z0 = pz.floor() as u32;
+        let z1 = (pz.ceil() as u32).min(self.cpu_map.height() - 1);
+
+        // fractional part for interpolation
+        let tx = px.fract();
+        let tz = pz.fract();
+
+        // sample red channel from all 4 corners
+        let h00 = self.cpu_map.get_pixel(x0, z0).0[0];
+        let h10 = self.cpu_map.get_pixel(x1, z0).0[0];
+        let h01 = self.cpu_map.get_pixel(x0, z1).0[0];
+        let h11 = self.cpu_map.get_pixel(x1, z1).0[0];
+
+        // bilinear interpolation
+        let top = h00 * (1.0 - tx) + h10 * tx;
+        let bot = h01 * (1.0 - tx) + h11 * tx;
+        let t = top * (1.0 - tz) + bot * tz;
+
+        t * self.height
     }
 }

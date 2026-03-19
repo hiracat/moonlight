@@ -1,8 +1,10 @@
-use std::f32::consts::PI;
+use std::{f32::consts::PI, io::Read};
 
+use egui::Image;
+use image::ImageReader;
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Time, Transform},
-    core::{App, Controllable, Engine, Keyboard, MouseState, System},
+    core::{App, Controllable, Engine, Keyboard, MouseState, System, TerrainMap},
     ecs::{OptM, Req, ReqM, World},
     physics::{Aabb, Collider, Obb, RigidBody},
     resources::{self, Material, Skybox},
@@ -34,6 +36,20 @@ fn start(world: &mut World, engine: &mut Engine) {
     let directional =
         DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(0.6, 0.2, 0.2));
     let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.05);
+
+    let heightmap = TerrainMap {
+        map: engine.resource_manager.create_texture("data/heightmap.exr"),
+        cpu_map: ImageReader::open("data/heightmap.exr")
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_luma32f(),
+        size: 200.0,
+        height: 20.0,
+        resolution: 1000,
+    };
+
+    world.add_resource(heightmap).unwrap();
 
     world.name("platformer");
     *world.get_mut_resource().unwrap() = camera;
@@ -225,6 +241,7 @@ fn physics_update(world: &mut World, delta_time: f32) {
         transform.position += velocity * delta_time;
     }
 
+    let world_ptr = world as *mut World;
     let mut collidable: Vec<_> = world
         .query_mut::<(ReqM<Transform>, ReqM<Collider>, OptM<RigidBody>)>()
         .collect();
@@ -260,6 +277,20 @@ fn physics_update(world: &mut World, delta_time: f32) {
             }
         }
     }
+    let terrain = unsafe { &mut *(world_ptr) }
+        .get_resource::<TerrainMap>()
+        .unwrap();
+    for i in 0..collidable.len() {
+        let distance = collidable[i].1 .0.position.y
+            - terrain.get_height_at(collidable[i].1 .0.position.x, collidable[i].1 .0.position.z);
+        if distance < 0.0 {
+            if collidable[i].1 .2.is_some() {
+                collidable[i].1 .0.position.y -= distance;
+                collision_penetrations.push((collidable[i].0, Vec3::new(0.0, distance, 0.0)));
+            }
+        }
+    }
+
     //NOTE: VELOCITY UPDATE
     for (entity, pen_vec) in collision_penetrations {
         let rigidbody = world

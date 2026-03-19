@@ -11,11 +11,14 @@ use ash::vk;
 use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
 use ultraviolet::Slerp;
 
+use crate::core::TerrainMap;
 use crate::ecs::{Not, Opt, OptM, ReqM, World};
+use crate::renderers::world::draw::DrawStyle;
 use crate::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Vertex};
 use crate::resources::{Material, Mesh, ResourceManager, Skybox};
 use crate::ubo::{
     AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, ModelUBO, PointLightUBO,
+    TerrainUBO,
 };
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
@@ -60,6 +63,7 @@ impl Drop for PipelineBundle {
 #[derive(Debug)]
 pub enum PipelineKey {
     Geometry = 0,
+    Terrain,
     AnimatedGeometry,
     Directional,
     Ambient,
@@ -83,12 +87,16 @@ pub fn create_builtin_graphics_pipelines(
         Path::new("shaders/static_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
+    let heightmap = create_pipeline_layout_from_vert_frag(
+        device.clone(),
+        Path::new("shaders/terrain_vert.spv"),
+        Path::new("shaders/terrain_frag.spv"),
+    );
     let animated_geometry = create_pipeline_layout_from_vert_frag(
         device.clone(),
         Path::new("shaders/animated_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
-
     let directional_layouts = create_pipeline_layout_from_vert_frag(
         device.clone(),
         Path::new("shaders/directional_vert.spv"),
@@ -179,7 +187,25 @@ pub fn create_builtin_graphics_pipelines(
     let static_geometry_pipeline =
         create_graphics_pipeline(&device, &static_geometry_desc).unwrap();
 
-    let mut animated_geometry_desc = static_geometry_desc;
+    let mut heightmap_desc = static_geometry_desc;
+
+    // need to replace vertex with an empty vertex type
+    heightmap_desc
+        .vertex_input_state
+        .vertex_attribute_descriptions = Vertex::get_vertex_attributes();
+    heightmap_desc
+        .vertex_input_state
+        .vertex_binding_descriptions = vec![vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: std::mem::size_of::<Vertex>() as u32,
+        input_rate: vk::VertexInputRate::VERTEX,
+    }];
+
+    heightmap_desc.pipeline_layout = heightmap.1;
+    heightmap_desc.shaders = &heightmap.0;
+    let heightmap_pipeline = create_graphics_pipeline(&device, &heightmap_desc).unwrap();
+
+    let mut animated_geometry_desc = heightmap_desc;
     animated_geometry_desc
         .vertex_input_state
         .vertex_attribute_descriptions = AnimatedVertex::get_vertex_attributes();
@@ -291,6 +317,7 @@ pub fn create_builtin_graphics_pipelines(
                     0,
                     &camera_ubo,
                 );
+                println!("static_geometry pool: {:?}", descriptor_pool);
 
                 //NOTE: defined in shader, 1 is the index of the camera set
                 for entity in
@@ -322,7 +349,7 @@ pub fn create_builtin_graphics_pipelines(
                     // Set 2: Material data (textures)
                     let descriptor_sets = vec![model_set, camera_set, image_set];
                     jobs.push(DrawJob {
-                        mesh: Some(*mesh),
+                        mesh: DrawStyle::Mesh(*mesh),
                         descriptor_sets,
                     });
                 }
@@ -515,10 +542,73 @@ pub fn create_builtin_graphics_pipelines(
                     // Set 2: Material data (textures)
                     let descriptor_sets = vec![model_set, camera_set, image_set, bones_set];
                     jobs.push(DrawJob {
-                        mesh: Some(*mesh),
+                        mesh: DrawStyle::Mesh(*mesh),
                         descriptor_sets,
                     });
                 }
+
+                builder.submit(device);
+                jobs
+            },
+        ),
+    });
+    pipelines.push(PipelineBundle {
+        device: device.clone(),
+        pipeline: heightmap_pipeline,
+        layout: heightmap.1,
+        descriptor_set_layouts: heightmap.2,
+        write_data_and_build_draw_jobs: Box::new(
+            |device,
+             resource_manager,
+             descriptor_pool,
+             world,
+             descriptor_set_layouts,
+             _swapchain_descriptor_set| {
+                let mut jobs = Vec::new();
+                let camera = world.get_resource::<Camera>().unwrap();
+                let heightmap = world.get_resource::<TerrainMap>().unwrap();
+
+                let mut builder = DescriptorWriteBuilder::new();
+
+                let heightmap_ubo: TerrainUBO = heightmap.into();
+                let camera_ubo: CameraUBO = camera.into();
+
+                let height_map_set = builder.add_uniform_buffer(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[0],
+                    0,
+                    &heightmap_ubo,
+                );
+                let camera_set = builder.add_uniform_buffer(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[1],
+                    0,
+                    &camera_ubo,
+                );
+                let height_texture_set = builder.add_texture(
+                    resource_manager,
+                    descriptor_pool,
+                    descriptor_set_layouts[2],
+                    0,
+                    Some(Material {
+                        albedo: heightmap.map,
+                    }),
+                );
+                println!("heightmap pool: {:?}", descriptor_pool);
+
+                // Allocate/update descriptor set for this draw call
+                // Set 0: Per-frame data (camera matrices)
+                // Set 1: Per-object data (model matrix)
+                // Set 2: Material data (textures)
+                let descriptor_sets = vec![height_map_set, camera_set, height_texture_set];
+                jobs.push(DrawJob {
+                    mesh: DrawStyle::VertexCount(
+                        (heightmap.resolution - 1) * (heightmap.resolution - 1) * 6,
+                    ),
+                    descriptor_sets,
+                });
 
                 builder.submit(device);
                 jobs
@@ -550,7 +640,7 @@ pub fn create_builtin_graphics_pipelines(
                 builder.submit(device);
 
                 vec![DrawJob {
-                    mesh: None,
+                    mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![*swapchain_descriptor_set, ambient_set],
                 }]
             },
@@ -580,7 +670,7 @@ pub fn create_builtin_graphics_pipelines(
                 builder.submit(device);
 
                 vec![DrawJob {
-                    mesh: None,
+                    mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![*swapchain_descriptor_set, directional_set],
                 }]
             },
@@ -613,7 +703,7 @@ pub fn create_builtin_graphics_pipelines(
 
                     let descriptor_sets = vec![*swapchain_descriptor_set, point_set];
                     jobs.push(DrawJob {
-                        mesh: None,
+                        mesh: DrawStyle::VertexCount(3),
                         descriptor_sets,
                     });
                 }
@@ -655,7 +745,7 @@ pub fn create_builtin_graphics_pipelines(
                 builder.submit(device);
 
                 vec![DrawJob {
-                    mesh: None,
+                    mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![camera_set, cubemap_set],
                 }]
             },

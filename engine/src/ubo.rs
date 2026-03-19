@@ -4,7 +4,10 @@
 use bytemuck as bm;
 use ultraviolet as uv;
 
-use crate::components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform};
+use crate::{
+    components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
+    core::TerrainMap,
+};
 
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
@@ -60,6 +63,24 @@ impl From<&Camera> for CameraUBO {
                 camera.aspect_ratio,
                 camera.near,
             ),
+        }
+    }
+}
+
+#[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct TerrainUBO {
+    size: f32,
+    height: f32,
+    resolution: u32,
+}
+
+impl From<&TerrainMap> for TerrainUBO {
+    fn from(map: &TerrainMap) -> Self {
+        Self {
+            resolution: map.resolution,
+            height: map.height,
+            size: map.size,
         }
     }
 }
