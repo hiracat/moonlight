@@ -164,7 +164,7 @@ pub fn create_builtin_graphics_pipelines(
         depth_stencil_state: DepthStencilState {
             depth_test_enable: true,
             depth_write_enable: true,
-            depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+            depth_compare_op: vk::CompareOp::GREATER_OR_EQUAL,
             depth_bounds_test_enable: false,
             stencil_test_enable: false,
             front: vk::StencilOpState::default(),
@@ -226,6 +226,7 @@ pub fn create_builtin_graphics_pipelines(
             input_rate: vk::VertexInputRate::VERTEX,
         }];
     ambient_desc.pipeline_layout = ambient.1;
+    ambient_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::ALWAYS;
     ambient_desc.shaders = &ambient.0;
     let ambient_pipeline = create_graphics_pipeline(&device, &ambient_desc).unwrap();
 
@@ -249,7 +250,7 @@ pub fn create_builtin_graphics_pipelines(
     skybox_desc.shaders = &skybox.0;
     skybox_desc.depth_stencil_state.depth_test_enable = true;
     skybox_desc.depth_stencil_state.depth_write_enable = false;
-    skybox_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::LESS_OR_EQUAL;
+    skybox_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::EQUAL;
     skybox_desc.color_blend_state = ColorBlendState {
         logic_op: None,
         attachments: vec![

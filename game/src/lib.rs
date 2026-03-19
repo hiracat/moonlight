@@ -4,14 +4,13 @@ use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Time, Transform},
     core::{App, Controllable, Engine, Keyboard, MouseState, System},
     ecs::{OptM, Req, ReqM, World},
-    physics::{Aabb, Collider, RigidBody},
+    physics::{Aabb, Collider, Obb, RigidBody},
     resources::{self, Material, Skybox},
 };
 use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::keyboard::KeyCode;
 
 // ── Resources ────────────────────────────────────────────
-struct GemCollected(bool);
 struct CameraOffset(Vec3);
 
 pub fn setup_game() -> App {
@@ -69,10 +68,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             fox,
-            Collider::Aabb(Aabb::new(
-                Vec3::new(1.7, 3.0, 1.7),
-                Vec3::new(0.0, 3.0 / 2.0, 0.0),
-            )),
+            Collider::Obb(Obb::new(Vec3::new(0.8, 3.0, 4.5), Vec3::new(0.0, 1.5, 0.0))),
         )
         .unwrap();
     world.add(fox, RigidBody::new()).unwrap();
@@ -98,7 +94,11 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             ground,
-            Transform::from(None, None, Some(Vec3::new(100.0, 1.0, 100.0))),
+            Transform::from(
+                None,
+                Some(Rotor3::from_rotation_yz(0.3)),
+                Some(Vec3::new(100.0, 1.0, 100.0)),
+            ),
         )
         .unwrap();
     world
@@ -113,7 +113,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             ground,
-            Collider::Aabb(Aabb::new(
+            Collider::Obb(Obb::new(
                 Vec3::new(2.0, 8.0, 2.0),
                 Vec3::new(0.0, -4.0, 0.0),
             )),
@@ -177,9 +177,21 @@ fn ui(world: &mut World, context: &egui::Context) {
         }
 
         egui::Window::new("Camera").show(context, |ui| {
-            ui.add(egui::Slider::new(&mut camera_offset.x, -10.0..=10.0).text("x"));
-            ui.add(egui::Slider::new(&mut camera_offset.y, -10.0..=10.0).text("y"));
-            ui.add(egui::Slider::new(&mut camera_offset.z, -10.0..=10.0).text("z"));
+            ui.add(
+                egui::Slider::new(&mut camera_offset.x, -10.0..=10.0)
+                    .text("x")
+                    .clamping(egui::SliderClamping::Never),
+            );
+            ui.add(
+                egui::Slider::new(&mut camera_offset.y, -10.0..=10.0)
+                    .text("y")
+                    .clamping(egui::SliderClamping::Never),
+            );
+            ui.add(
+                egui::Slider::new(&mut camera_offset.z, -10.0..=10.0)
+                    .text("z")
+                    .clamping(egui::SliderClamping::Never),
+            );
         });
     });
 }
@@ -254,7 +266,8 @@ fn physics_update(world: &mut World, delta_time: f32) {
             .get_mut::<(RigidBody,)>(entity)
             .expect("thing with collision regesterd should have rigidbody");
         let mut restitution = 0.3;
-        if rigidbody.velocity.y.abs() < 0.5 {
+        if rigidbody.velocity.mag_sq() < 0.3 {
+            rigidbody.velocity = Vec3::zero();
             restitution = 0.0;
         }
         rigidbody.velocity = set_axis_component(rigidbody.velocity, pen_vec, restitution);

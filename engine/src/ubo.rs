@@ -55,11 +55,10 @@ impl From<&Camera> for CameraUBO {
 
         CameraUBO {
             view: view,
-            proj: uv::projection::perspective_vk(
+            proj: uv::projection::perspective_reversed_infinite_z_vk(
                 camera.fov_rads,
                 camera.aspect_ratio,
                 camera.near,
-                camera.far,
             ),
         }
     }

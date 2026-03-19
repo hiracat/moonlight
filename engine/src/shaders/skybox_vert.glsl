@@ -16,6 +16,6 @@ void main() {
             vec2(0.0, 2.0)     // Top-left (past edge)
             );
 
-    gl_Position = vec4(positions[gl_VertexIndex], 1.0, 1.0);
+    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
     uv = uvs[gl_VertexIndex];
 }

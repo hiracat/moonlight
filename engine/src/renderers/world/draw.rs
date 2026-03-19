@@ -116,7 +116,7 @@ impl WorldRenderer {
             store_op: vk::AttachmentStoreOp::STORE,
             clear_value: vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
+                    depth: 0.0,
                     stencil: 0,
                 },
             },
