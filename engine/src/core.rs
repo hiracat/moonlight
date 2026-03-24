@@ -2,6 +2,7 @@ use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
 
 use ash::vk;
 use image::{ImageBuffer, Luma, Rgb, Rgb32FImage};
+use proc_macros::LuaRef;
 use ultraviolet::Vec3;
 use winit::{
     application::ApplicationHandler,
@@ -26,7 +27,7 @@ use crate::{
     resources::{ResourceManager, Texture},
     vulkan::VulkanContext,
 };
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default, LuaRef)]
 pub struct Controllable;
 
 pub struct Engine {
@@ -783,11 +784,14 @@ impl ApplicationHandler for App {
     }
 }
 
+#[derive(Debug, Clone, LuaRef)]
+#[lua(no_default)]
 pub struct TerrainMap {
     pub size: f32,
     pub height: f32,
     pub resolution: u32,
     pub map: Texture,
+    #[lua(skip)]
     pub cpu_map: ImageBuffer<Luma<f32>, Vec<f32>>,
 }
 impl TerrainMap {
@@ -825,12 +829,6 @@ impl TerrainMap {
         let bot = h01 * (1.0 - tx) + h11 * tx;
         let t = top * (1.0 - tz) + bot * tz;
 
-        println!(
-            "terrain size: {}, height: {}, resolution: {}",
-            self.size, self.height, self.resolution
-        );
-        println!("fox position: {}, {}", x, z);
-        println!("computed height: {}", t * self.height);
         t * self.height
     }
 }

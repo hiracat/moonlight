@@ -6,6 +6,7 @@ use ash::vk;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
+use proc_macros::LuaRef;
 use ultraviolet as uv;
 
 use crate::{
@@ -41,15 +42,19 @@ pub enum TextureFormat {
     HeightF32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug, Copy, Clone, LuaRef)]
+#[lua(no_default)]
 pub struct Skeleton {
     // TODO:just the index into the skeletons array(need to find a way to remove, but might just have to
     // waste some memory, or use option and waste some indices
+    #[lua(skip)]
     pub(crate) id: usize,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug, Copy, Clone, LuaRef)]
+#[lua(no_default)]
 pub struct Animation {
     // the index of the inner vec, so accessing an animation requires a skeleton and an animation
+    #[lua(skip)]
     pub(crate) id: usize,
 }
 pub(crate) struct AnimationResources {
@@ -164,7 +169,8 @@ impl AnimationResources {
 // marks a entity as having animations, and stores references to the animations(should be
 // reconstructable from a file path, but thats deferred til serialization)
 // referenced https://www.youtube.com/watch?v=da6d28IylL8 to make this, and https://whoisryosuke.com/blog/2022/importing-gltf-with-wgpu-and-rust
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, LuaRef)]
+#[lua(no_default)]
 pub struct Animated {
     //PERF: this could possible be put into the resource manager since it can be large, but not
     //necesary for now
@@ -174,7 +180,7 @@ pub struct Animated {
     pub skeleton: Skeleton,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SkeletonImpl {
     pub(crate) joints: Vec<Joint>,
 }
@@ -195,7 +201,7 @@ impl SkeletonImpl {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Joint {
     // set to usize::MAX for the root, but is really undefined
     parent_index: usize,
@@ -221,21 +227,21 @@ impl Joint {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Keyframes {
     Translation(Vec<uv::Vec3>),
     Rotation(Vec<uv::Rotor3>),
     Scale(Vec<uv::Vec3>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AnimationImpl {
     name: String,
 
     pub(crate) channels: Vec<AnimationChannel>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AnimationChannel {
     pub(crate) keyframes: Keyframes,
     pub(crate) timestamps: Vec<f32>,
@@ -369,16 +375,20 @@ fn build_hierarchy(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(LuaRef, Debug, Clone, Copy)]
+#[lua(no_default)]
 pub struct Material {
     pub albedo: Texture,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(LuaRef, Debug, Clone, Copy)]
+#[lua(no_default)]
 pub struct Texture {
+    #[lua(skip)]
     id: usize,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(LuaRef, Debug, Clone, Copy)]
+#[lua(no_default)]
 pub struct Skybox {
     pub(crate) material: Material,
 }
@@ -394,8 +404,10 @@ impl Material {
         Self { albedo }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(LuaRef, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[lua(no_default)]
 pub struct Mesh {
+    #[lua(skip)]
     id: usize,
     pub(crate) animated: bool,
 }
@@ -1757,51 +1769,6 @@ impl GpuTexture {
             sampler,
             device: device,
             allocator: allocator.clone(),
-        }
-    }
-}
-
-impl GpuMesh {
-    pub fn create<V: IsVertex + Pod>(
-        resource_manager: &mut ResourceManager,
-        vertices: &[V],
-        indices: &[u32],
-    ) -> Self {
-        let (mut vertex_buffers, mut vertex_allocs) = alloc_buffers(
-            resource_manager.allocator.clone(),
-            1,
-            vertices.len() as u64 * size_of::<Vertex>() as u64,
-            &resource_manager.device,
-            vk::SharingMode::EXCLUSIVE,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-            true,
-            bytemuck::cast_slice(vertices.as_ref()),
-            "vertex buffer",
-        );
-
-        let (mut index_buffers, mut index_allocs) = alloc_buffers(
-            resource_manager.allocator.clone(),
-            1,
-            indices.len() as u64 * 4,
-            &resource_manager.device,
-            vk::SharingMode::EXCLUSIVE,
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-            true,
-            bytemuck::cast_slice(indices.as_ref()),
-            "index buffer",
-        );
-
-        Self {
-            index_count: indices.len() as u32,
-            index_alloc: index_allocs.pop().unwrap(),
-            index_buffer: index_buffers.pop().unwrap(),
-            vertex_alloc: vertex_allocs.pop().unwrap(),
-            vertex_buffer: vertex_buffers.pop().unwrap(),
-            vertex_type: V::get_type(),
-            device: resource_manager.device.clone(),
-            allocator: resource_manager.allocator.clone(),
         }
     }
 }

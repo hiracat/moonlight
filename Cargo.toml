@@ -2,6 +2,7 @@
 members = [
     "game",
     "engine",
+    "proc-macros",
 ]
 resolver = "3"
 

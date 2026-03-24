@@ -20,6 +20,9 @@ egui = "0.33.0"
 egui-winit = "0.33.0"
 mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
 paste = "1.0.15"
+inventory = "0.3.22"
+proc-macros = { path = "../proc-macros", features = ["internal"] }
+
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -31,3 +34,6 @@ walkdir = "2"
 [[bench]]
 name = "ecs"
 harness = false
+
+[features]
+internal = []

@@ -179,7 +179,7 @@ pub struct DirectionalLightUBO {
 impl From<&DirectionalLight> for DirectionalLightUBO {
     fn from(light: &DirectionalLight) -> Self {
         DirectionalLightUBO {
-            position: light.from_position,
+            position: light.from_position.into_homogeneous_point(),
             color: light.color,
             _padding: 0.0,
         }

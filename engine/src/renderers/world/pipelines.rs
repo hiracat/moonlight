@@ -317,7 +317,6 @@ pub fn create_builtin_graphics_pipelines(
                     0,
                     &camera_ubo,
                 );
-                println!("static_geometry pool: {:?}", descriptor_pool);
 
                 //NOTE: defined in shader, 1 is the index of the camera set
                 for entity in
@@ -596,7 +595,6 @@ pub fn create_builtin_graphics_pipelines(
                         albedo: heightmap.map,
                     }),
                 );
-                println!("heightmap pool: {:?}", descriptor_pool);
 
                 // Allocate/update descriptor set for this draw call
                 // Set 0: Per-frame data (camera matrices)

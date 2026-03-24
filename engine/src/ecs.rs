@@ -354,13 +354,21 @@ impl_fetch_mut!(req: [T], opt: [U], not: [V, W]);
 impl_fetch_mut!(req: [T], opt: [], not: [U, V, W]);
 
 pub trait DynamicComponent {
-    fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId);
+    fn as_any(self: Box<Self>) -> Box<dyn Any>;
+    fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId)
+        -> Result<(), WorldError>;
 }
 
 impl<T: 'static> DynamicComponent for T {
-    fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId) {
-        //HACK: i dont feel like fixing this rn
-        world.add(entity, *self).unwrap();
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+    fn add_to_world(
+        self: Box<Self>,
+        world: &mut World,
+        entity: EntityId,
+    ) -> std::result::Result<(), WorldError> {
+        world.add(entity, *self)
     }
 }
 

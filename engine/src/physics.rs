@@ -1,8 +1,9 @@
+use proc_macros::{LuaRef, LuaUnion};
 use ultraviolet::{Rotor3, Vec3};
 
 use crate::components::Transform;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, LuaRef)]
 pub struct RigidBody {
     pub velocity: Vec3,
 }
@@ -15,19 +16,35 @@ impl RigidBody {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(LuaUnion, Clone, Copy, Debug)]
 pub enum Collider {
     Aabb(Aabb),
     Obb(Obb),
 }
+impl Default for Collider {
+    fn default() -> Self {
+        Self::Aabb(Aabb::default())
+    }
+}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, LuaRef)]
 pub struct Aabb {
     pub min: Vec3,
     pub max: Vec3,
 }
+impl Default for Aabb {
+    fn default() -> Self {
+        Self::new(Vec3::one(), Vec3::zero())
+    }
+}
 
-#[derive(Debug, Clone, Copy)]
+impl Default for Obb {
+    fn default() -> Self {
+        Self::new(Vec3::one(), Vec3::zero())
+    }
+}
+
+#[derive(Debug, Clone, Copy, LuaRef)]
 pub struct Obb {
     pub center_offset: Vec3,
     pub half_extents: Vec3,

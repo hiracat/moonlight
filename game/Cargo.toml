@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 moonlight = { path = "../engine" }
+proc-macros = { path = "../proc-macros" }
 bytemuck = "1.20.0"
 thiserror = "2.0.12"
 ultraviolet = { version = "0.10.0", features = ["bytemuck"] }
@@ -15,3 +16,4 @@ gltf = "1.4.1"
 egui-winit = "0.33.0"
 egui = "0.33.0"
 mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
+inventory = "0.3.22"

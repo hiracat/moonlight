@@ -1,3 +1,6 @@
+use moonlight::ecs;
+use moonlight::lua;
+use proc_macros::LuaVal;
 use std::{f32::consts::PI, io::Read};
 
 use egui::Image;
@@ -9,6 +12,7 @@ use moonlight::{
     physics::{Aabb, Collider, Obb, RigidBody},
     resources::{self, Material, Skybox},
 };
+use proc_macros::LuaRef;
 use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
 use winit::keyboard::KeyCode;
 
@@ -24,6 +28,18 @@ pub fn setup_game() -> App {
     app
 }
 
+#[derive(LuaVal, Default, Clone)]
+struct Slider {
+    label: String,
+    value: f32,
+    min: f32,
+    max: f32,
+}
+#[derive(LuaRef, Default, Clone)]
+struct UIStuff {
+    sliders: Vec<Slider>,
+}
+
 fn start(world: &mut World, engine: &mut Engine) {
     let (width, height) = engine.window_size;
     let camera = Camera::create(
@@ -34,7 +50,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         height as f32 / width as f32,
     );
     let directional =
-        DirectionalLight::create(Vec4::new(200.0, 10.0, 0.0, 1.0), Vec3::new(2.0, 1.6, 1.5));
+        DirectionalLight::create(Vec3::new(200.0, 10.0, 0.0), Vec3::new(2.0, 1.6, 1.5));
     let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.35);
 
     let heightmap = TerrainMap {
@@ -51,9 +67,9 @@ fn start(world: &mut World, engine: &mut Engine) {
         resolution: 1000,
     };
 
+    world.add_resource(UIStuff::default()).unwrap();
     world.add_resource(heightmap).unwrap();
 
-    world.name("platformer");
     *world.get_mut_resource().unwrap() = camera;
     world.add_resource(directional).unwrap();
     world.add_resource(ambient).unwrap();
@@ -104,41 +120,36 @@ fn start(world: &mut World, engine: &mut Engine) {
     );
     world.add(fox, Material::create(fox_albedo)).unwrap();
 
-    // ground — stays Rust because Collider can't be constructed from Lua yet
-    // let ground = world.spawn();
-    // let ground_tex = engine.resource_manager.create_texture(
-    //     "data/models/textures/ground_roots.png",
-    //     resources::TextureFormat::Srgba,
-    // );
-    // world.add(ground, Material::create(ground_tex)).unwrap();
-    // world
-    //     .add(
-    //         ground,
-    //         Transform::from(
-    //             None,
-    //             Some(Rotor3::from_rotation_yz(0.3)),
-    //             Some(Vec3::new(100.0, 1.0, 100.0)),
-    //         ),
-    //     )
-    //     .unwrap();
-    // world
-    //     .add(
-    //         ground,
-    //         engine
-    //             .resource_manager
-    //             .load_gltf_asset("data/models/ground_plane.glb")
-    //             .0,
-    //     )
-    //     .unwrap();
-    // world
-    //     .add(
-    //         ground,
-    //         Collider::Obb(Obb::new(
-    //             Vec3::new(2.0, 8.0, 2.0),
-    //             Vec3::new(0.0, -4.0, 0.0),
-    //         )),
-    //     )
-    //     .unwrap();
+    let ground = world.spawn();
+    let ground_tex = engine.resource_manager.create_texture(
+        "data/models/textures/ground_roots.png",
+        resources::TextureFormat::Srgba,
+    );
+    world.add(ground, Material::create(ground_tex)).unwrap();
+    world
+        .add(
+            ground,
+            Transform::from(None, None, Some(Vec3::new(5.0, 1.0, 5.0))),
+        )
+        .unwrap();
+    world
+        .add(
+            ground,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/ground_plane.glb")
+                .0,
+        )
+        .unwrap();
+    world
+        .add(
+            ground,
+            Collider::Obb(Obb::new(
+                Vec3::new(2.0, 8.0, 2.0),
+                Vec3::new(0.0, -4.0, 0.0),
+            )),
+        )
+        .unwrap();
 
     // lights — could move to Lua but no reason to
     let blue_light = world.spawn();
@@ -179,7 +190,6 @@ fn game_update(world: &mut World, engine: &mut Engine) {
 }
 
 fn ui(world: &mut World, context: &egui::Context) {
-    let camera_offset = &mut world.get_mut_resource::<CameraOffset>().unwrap().0;
     let gem_collected = false;
 
     egui::CentralPanel::default().show(context, |_ui| {
@@ -196,23 +206,17 @@ fn ui(world: &mut World, context: &egui::Context) {
             });
         }
 
-        egui::Window::new("Camera").show(context, |ui| {
-            ui.add(
-                egui::Slider::new(&mut camera_offset.x, -10.0..=10.0)
-                    .text("x")
-                    .clamping(egui::SliderClamping::Never),
-            );
-            ui.add(
-                egui::Slider::new(&mut camera_offset.y, -10.0..=10.0)
-                    .text("y")
-                    .clamping(egui::SliderClamping::Never),
-            );
-            ui.add(
-                egui::Slider::new(&mut camera_offset.z, -10.0..=10.0)
-                    .text("z")
-                    .clamping(egui::SliderClamping::Never),
-            );
-        });
+        if let Some(ui_stuff) = world.get_mut_resource::<UIStuff>() {
+            for slider in &mut ui_stuff.sliders {
+                egui::Window::new(&slider.label).show(context, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut slider.value, slider.min..=slider.max)
+                            .text(&slider.label)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                });
+            }
+        }
     });
 }
 

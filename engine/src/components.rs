@@ -1,17 +1,27 @@
 #![allow(dead_code)]
 
-use ultraviolet as uv;
+use proc_macros::LuaRef;
+use ultraviolet::{self as uv, Vec3};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct Time {
     pub delta_time: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(LuaRef, Debug, Clone, Copy)]
 pub struct Transform {
     pub position: uv::Vec3,
     pub rotation: uv::Rotor3,
     pub scale: uv::Vec3,
+}
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            position: Default::default(),
+            rotation: Default::default(),
+            scale: Vec3::one(),
+        }
+    }
 }
 
 impl Transform {
@@ -36,7 +46,7 @@ impl Transform {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct Camera {
     pub position: uv::Vec3,
     pub rotation: uv::Rotor3,
@@ -65,7 +75,7 @@ impl Camera {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct AmbientLight {
     pub color: uv::Vec3,
     pub intensity: f32,
@@ -77,13 +87,12 @@ impl AmbientLight {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct PointLight {
     pub color: uv::Vec3,
     pub brightness: f32,
     pub linear: f32,
     pub quadratic: f32,
-    pub dirty: bool,
 }
 
 impl PointLight {
@@ -98,19 +107,18 @@ impl PointLight {
             brightness,
             linear: linear.unwrap_or(3.00),
             quadratic: quadratic.unwrap_or(0.00),
-            dirty: true,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct DirectionalLight {
-    pub from_position: uv::Vec4,
+    pub from_position: uv::Vec3,
     pub color: uv::Vec3,
 }
 
 impl DirectionalLight {
-    pub fn create(position: uv::Vec4, color: uv::Vec3) -> Self {
+    pub fn create(position: uv::Vec3, color: uv::Vec3) -> Self {
         Self {
             from_position: position,
             color,

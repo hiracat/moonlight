@@ -1,79 +1,75 @@
-Time = Time or 0.0
-Gem_collected = Gem_collected or false
-Platform_entities = Platform_entities or {}
-Gem_entity = Gem_entity or nil
-Initialized = Initialized or false
-local platform_defs = {
-	{ x = 3, base_y = 2, z = 3, speed = 1.0, phase = 0.0, amp = 0.8 },
-	{ x = 6, base_y = 4, z = 5, speed = 1.3, phase = 1.0, amp = 1.2 },
-	{ x = 9, base_y = 5, z = 3, speed = 0.8, phase = 2.5, amp = 1.5 },
-	{ x = 12, base_y = 7, z = 1, speed = 1.8, phase = 0.5, amp = 0.6 },
-	{ x = 10, base_y = 9, z = -3, speed = 1.1, phase = 3.0, amp = 1.0 },
-	{ x = 7, base_y = 11, z = -6, speed = 0.6, phase = 1.5, amp = 1.8 },
-	{ x = 4, base_y = 13, z = -4, speed = 2.0, phase = 0.0, amp = 0.5 },
-	{ x = 1, base_y = 15, z = -2, speed = 1.0, phase = 4.0, amp = 1.0 },
-}
+Index = Index or 0
+local ui_initialized = false
 
 function Update(world, engine)
-	if not Initialized then
-		Initialized = true
+	local results = world:query({ req = { "Controllable", "Animated", "Transform", "RigidBody" } })
+	local light = world:query({ req = { "PointLight", "Transform" } })
 
-		local cube_mesh, _ = engine:load_gltf_asset("data/models/large_cube.glb")
-		local platform_tex = engine:create_texture("data/models/textures/ground.jpg")
-		for i, def in ipairs(platform_defs) do
-			local e = world:spawn({
-				Transform = { x = def.x, y = def.base_y, z = def.z, sx = 2.5, sy = 0.3, sz = 2.5 },
-				Mesh = cube_mesh,
-				Material = { albedo = platform_tex },
-				Collider = { extent_x = 2, extent_y = 2, extent_z = 2, offset_x = 0, offset_y = 0, offset_z = 0 },
-			})
-			Platform_entities[i] = e
+	for _, p in ipairs(results) do
+		local rigidbody = p.RigidBody ---@type RigidBody
+		local velocity = rigidbody.velocity
+		local animated = p.Animated ---@type Animated
+		if velocity.x == 0.0 and velocity.z == 0.0 then
+			animated.current_playing = nil
+		else
+			animated.current_playing = animated.animations[1]
 		end
+		Index = Index + 1
+		local transform = p.Transform ---@type Transform
 
-		local gem_mesh, _ = engine:load_gltf_asset("data/models/diamond.glb")
-		local gem_tex = engine:create_texture("data/models/textures/diamond.png")
-		Gem_entity = world:spawn({
-			Transform = { x = 1, y = 17, z = -2, sx = 0.5, sy = 0.5, sz = 0.5 },
-			Mesh = gem_mesh,
-			Material = { albedo = gem_tex },
-		})
+		local pos = transform.position
+		transform.position = pos
+
+		for _, u in ipairs(light) do
+			local ui = world:get_resource("UIStuff") ---@type UIStuff
+			local terrainmap = world:get_resource("TerrainMap") ---@type TerrainMap
+			if not ui_initialized then
+				ui.sliders = {
+					{ label = "Red", value = 1.0, min = 0.0, max = 1.0 },
+					{ label = "Green", value = 0.8, min = 0.0, max = 1.0 },
+					{ label = "Blue", value = 0.4, min = 0.0, max = 1.0 },
+					{ label = "Brightness", value = 3.0, min = 0.0, max = 20.0 },
+					{ label = "Linear", value = 0.22, min = 0.0, max = 2.0 },
+					{ label = "Quadratic", value = 0.20, min = 0.0, max = 5.0 },
+					{ label = "HeightMap Resolution", value = 300, min = 5, max = 5000 },
+				}
+				ui_initialized = true
+			end
+
+			local r = ui.sliders[1].value
+			local g = ui.sliders[2].value
+			local b = ui.sliders[3].value
+			local brightness = ui.sliders[4].value
+			local linear = ui.sliders[5].value
+			local quadratic = ui.sliders[6].value
+			local heightmap_res = ui.sliders[7].value
+			terrainmap.resolution = heightmap_res
+
+			local tmp_light = u.PointLight ---@type PointLight
+			tmp_light.brightness = brightness
+			tmp_light.linear = linear
+			tmp_light.quadratic = quadratic
+			local color = tmp_light.color
+			color.x = r
+			color.y = g
+			color.z = b
+			tmp_light.color = color
+
+			local light_transform = u.Transform ---@type Transform
+			local new_pos = transform.position
+			new_pos.y = new_pos.y + 0.2
+			light_transform.position = new_pos
+		end
 	end
+	results = world:query({ req = { "Collider", "Transform" }, ["not"] = { "Controllable" } })
 
-	local dt = world:get_resource("Time").delta_time
-	Time = Time + dt
+	for _, p in ipairs(results) do
+		Index = Index + 1
+		local collider = p.Collider ---@type Collider
+		local transform = p.Transform ---@type Transform
 
-	-- bob platforms
-	for i, def in ipairs(platform_defs) do
-		local e = Platform_entities[i]
-		if e then
-			local t = world:get_component(e, "Transform")
-			t.y = def.base_y + math.sin(Time * def.speed + def.phase) * def.amp
-		end
-	end
-
-	-- spin gem and check collection
-	if not Gem_collected and Gem_entity then
-		local gt = world:get_component(Gem_entity, "Transform")
-		gt:set_rotation_xz(Time * 2.0)
-
-		local results = world:query({ req = { "Transform", "Controllable" } })
-		local fox_x, fox_y, fox_z = 0, 0, 0
-		for _, row in ipairs(results) do
-			fox_x = row.Transform.x
-			fox_y = row.Transform.y
-			fox_z = row.Transform.z
-		end
-		world:end_query()
-
-		local dx = gt.x - fox_x
-		local dy = gt.y - fox_y
-		local dz = gt.z - fox_z
-		local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-		if dist < 1.5 then
-			Gem_collected = true
-			gt.sx = 0
-			gt.sy = 0
-			gt.sz = 0
-		end
+		local pos = transform.position
+		pos.y = 144
+		transform.position = pos
 	end
 end
