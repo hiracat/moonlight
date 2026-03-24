@@ -1,23 +1,26 @@
 use moonlight::ecs;
 use moonlight::lua;
 use proc_macros::LuaVal;
-use std::{f32::consts::PI, io::Read};
+use std::f32::consts::PI;
 
-use egui::Image;
 use image::ImageReader;
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Time, Transform},
     core::{App, Controllable, Engine, Keyboard, MouseState, System, TerrainMap},
-    ecs::{OptM, Req, ReqM, World},
-    physics::{Aabb, Collider, Obb, RigidBody},
+    ecs::{OptM, ReqM, World},
+    physics::{Collider, Obb, RigidBody},
     resources::{self, Material, Skybox},
 };
 use proc_macros::LuaRef;
-use ultraviolet::{Rotor3, Slerp, Vec3, Vec4};
+use ultraviolet::{Rotor3, Slerp, Vec3};
 use winit::keyboard::KeyCode;
 
 // ── Resources ────────────────────────────────────────────
-struct CameraOffset(Vec3);
+
+#[derive(Debug, LuaRef, Default, Clone)]
+struct CameraOffset {
+    offset: Vec3,
+}
 
 pub fn setup_game() -> App {
     let mut app = App::new("data/scripts/main.lua");
@@ -73,7 +76,11 @@ fn start(world: &mut World, engine: &mut Engine) {
     *world.get_mut_resource().unwrap() = camera;
     world.add_resource(directional).unwrap();
     world.add_resource(ambient).unwrap();
-    world.add_resource(CameraOffset(Vec3::zero())).unwrap();
+    world
+        .add_resource(CameraOffset {
+            offset: Vec3::zero(),
+        })
+        .unwrap();
 
     let skybox = engine.resource_manager.create_cubemap(&[
         "data/skybox/px.png",
@@ -98,7 +105,15 @@ fn start(world: &mut World, engine: &mut Engine) {
             ),
         )
         .unwrap();
-    world.add(fox, Controllable).unwrap();
+    world
+        .add(
+            fox,
+            Controllable {
+                speed: 7.0,
+                sprint_speed: 20.0,
+            },
+        )
+        .unwrap();
     world
         .add(
             fox,
@@ -185,7 +200,7 @@ fn game_update(world: &mut World, engine: &mut Engine) {
     let delta_time = world.get_resource::<Time>().unwrap().delta_time;
     player_update(world, delta_time);
     physics_update(world, delta_time);
-    let camera_offset = world.get_resource::<CameraOffset>().unwrap().0;
+    let camera_offset = world.get_resource::<CameraOffset>().unwrap().offset;
     camera_update(world, delta_time, camera_offset);
 }
 
@@ -193,19 +208,6 @@ fn ui(world: &mut World, context: &egui::Context) {
     let gem_collected = false;
 
     egui::CentralPanel::default().show(context, |_ui| {
-        if gem_collected {
-            egui::Window::new("🦊 You Win!")
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(context, |ui| {
-                    ui.heading("You collected the gem!");
-                    ui.label("Jump across the platforms to reach the top.");
-                });
-        } else {
-            egui::Window::new("Goal").show(context, |ui| {
-                ui.label("Reach the glowing gem at the top!");
-            });
-        }
-
         if let Some(ui_stuff) = world.get_mut_resource::<UIStuff>() {
             for slider in &mut ui_stuff.sliders {
                 egui::Window::new(&slider.label).show(context, |ui| {
@@ -363,9 +365,13 @@ fn player_update(world: &mut World, delta_time: f32) {
 
     let mut delta_v = Vec3::zero();
     let mut jump = 0.0;
-    let mut max_speed = 7.0;
+    let camera_rotation = world.get_resource::<Camera>().unwrap().rotation;
+    let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>, ReqM<RigidBody>)>();
+    let (_, (control, transform, rigidbody)) = binding.next().expect("player should exist!");
+    let mut max_speed = control.speed;
+
     if keyboard.is_down(KeyCode::ShiftLeft) {
-        max_speed = 20.0;
+        max_speed = control.sprint_speed;
     }
     if keyboard.is_down(KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
@@ -379,10 +385,6 @@ fn player_update(world: &mut World, delta_time: f32) {
     if keyboard.is_down(KeyCode::KeyA) {
         delta_v += Vec3::new(-1.0, 0.0, 0.0);
     }
-
-    let camera_rotation = world.get_resource::<Camera>().unwrap().rotation;
-    let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>, ReqM<RigidBody>)>();
-    let (_, (_, transform, rigidbody)) = binding.next().expect("player should exist!");
 
     // BUG: allows the player to jump at the apex of their jump, but the period of time which the
     // bug is viable to exploit is almost zero so not going to fix

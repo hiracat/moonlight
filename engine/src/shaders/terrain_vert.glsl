@@ -57,7 +57,8 @@ void main() {
     float hD = texture(heightmap, uv + vec2(0.0, -texel)).r * terrain.height;
     float hU = texture(heightmap, uv + vec2(0.0,  texel)).r * terrain.height;
 
-    out_normal = normalize(vec3(hL - hR, 2.0, hD - hU));
+    float world_texel = terrain.size / float(terrain.resolution - 1);
+    out_normal = normalize(vec3(hL - hR, 2.0 * world_texel, hD - hU));
     out_uv = uv;
     out_position = world_pos;
 

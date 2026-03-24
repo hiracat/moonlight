@@ -9,6 +9,7 @@ function Update(world, engine)
 		local rigidbody = p.RigidBody ---@type RigidBody
 		local velocity = rigidbody.velocity
 		local animated = p.Animated ---@type Animated
+		local control = p.Controllable ---@type Controllable
 		if velocity.x == 0.0 and velocity.z == 0.0 then
 			animated.current_playing = nil
 		else
@@ -31,7 +32,12 @@ function Update(world, engine)
 					{ label = "Brightness", value = 3.0, min = 0.0, max = 20.0 },
 					{ label = "Linear", value = 0.22, min = 0.0, max = 2.0 },
 					{ label = "Quadratic", value = 0.20, min = 0.0, max = 5.0 },
-					{ label = "HeightMap Resolution", value = 300, min = 5, max = 5000 },
+					{ label = "HeightMap Resolution", value = 1000, min = 5, max = 5000 },
+					{ label = "sprint speed", value = 20, min = 5, max = 200 },
+
+					{ label = "Cam side to side", value = 0.0, min = -300, max = 300 },
+					{ label = "cam up down", value = 0.0, min = -100, max = 300 },
+					{ label = "cam back", value = 0.0, min = -100, max = 300 },
 				}
 				ui_initialized = true
 			end
@@ -44,6 +50,10 @@ function Update(world, engine)
 			local quadratic = ui.sliders[6].value
 			local heightmap_res = ui.sliders[7].value
 			terrainmap.resolution = heightmap_res
+			control.sprint_speed = ui.sliders[8].value
+
+			local offset = world:get_resource("CameraOffset") ---@type CameraOffset
+			offset.offset = { x = ui.sliders[9].value, y = ui.sliders[10].value, z = ui.sliders[11].value }
 
 			local tmp_light = u.PointLight ---@type PointLight
 			tmp_light.brightness = brightness

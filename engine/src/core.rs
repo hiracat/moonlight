@@ -1,7 +1,7 @@
 use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
 
 use ash::vk;
-use image::{ImageBuffer, Luma, Rgb, Rgb32FImage};
+use image::{ImageBuffer, Luma};
 use proc_macros::LuaRef;
 use ultraviolet::Vec3;
 use winit::{
@@ -28,7 +28,10 @@ use crate::{
     vulkan::VulkanContext,
 };
 #[derive(Debug, Copy, Clone, Default, LuaRef)]
-pub struct Controllable;
+pub struct Controllable {
+    pub speed: f32,
+    pub sprint_speed: f32,
+}
 
 pub struct Engine {
     world_renderer: WorldRenderer,
@@ -800,9 +803,10 @@ impl TerrainMap {
         let h = self.cpu_map.height() as f32;
 
         // map world position to pixel coordinates
-        // x/z are world coords, remap to 0..resolution
-        let px = ((x / self.size) + 0.5) * w;
-        let pz = ((z / self.size) + 0.5) * h;
+        // you have to subtract -0.5 in order to sample from the middle of the pixel instead of the
+        // edge, like the way it does on the gpu
+        let px = ((x / self.size) + 0.5) * w - 0.5;
+        let pz = ((z / self.size) + 0.5) * h - 0.5;
 
         // clamp to image bounds
         let px = px.clamp(0.0, w - 1.0);

@@ -1715,6 +1715,10 @@ impl GpuTexture {
         unsafe { device.destroy_buffer(staging_buffer, None) };
         allocator.lock().unwrap().free(staging_mem).unwrap();
 
+        let repeat_mode = match format {
+            TextureFormat::HeightF32 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            _ => vk::SamplerAddressMode::REPEAT,
+        };
         let sampler_create_info = vk::SamplerCreateInfo {
             flags: vk::SamplerCreateFlags::empty(),
 
@@ -1723,9 +1727,9 @@ impl GpuTexture {
 
             mipmap_mode: vk::SamplerMipmapMode::LINEAR,
 
-            address_mode_u: vk::SamplerAddressMode::REPEAT,
-            address_mode_v: vk::SamplerAddressMode::REPEAT,
-            address_mode_w: vk::SamplerAddressMode::REPEAT,
+            address_mode_u: repeat_mode,
+            address_mode_v: repeat_mode,
+            address_mode_w: repeat_mode,
 
             mip_lod_bias: 0.0,
             anisotropy_enable: vk::TRUE,
