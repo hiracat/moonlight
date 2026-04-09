@@ -64,12 +64,37 @@ void main() {
 
 
 
-    float real_height = (texture(heightmap, uv).r - .5) * 2;
-    float red = real_height * 0.4;
-    float green = real_height;
-    float blue = -real_height;
+    float t = texture(heightmap, uv).r; // 0..1 normalized height
+    float slope = out_normal.y;         // 1=flat, 0=vertical cliff
 
-    out_color = vec3(red, green, blue);
+    // Biome colours
+    vec3 deep_water    = vec3(0.04, 0.12, 0.28);
+    vec3 shallow_water = vec3(0.10, 0.28, 0.48);
+    vec3 sand          = vec3(0.72, 0.65, 0.44);
+    vec3 grass_lo      = vec3(0.22, 0.48, 0.14);
+    vec3 grass_hi      = vec3(0.16, 0.36, 0.10);
+    vec3 rock          = vec3(0.40, 0.36, 0.30);
+    vec3 rock_dark     = vec3(0.28, 0.25, 0.20);
+    vec3 snow          = vec3(0.88, 0.90, 0.94);
+
+    vec3 color;
+    if (t < 0.28) {
+        color = mix(deep_water, shallow_water, smoothstep(0.0, 0.22, t));
+        color = mix(color, sand,               smoothstep(0.22, 0.28, t));
+    } else if (t < 0.50) {
+        color = mix(sand,     grass_lo,        smoothstep(0.28, 0.36, t));
+        color = mix(color,    grass_hi,        smoothstep(0.40, 0.50, t));
+    } else if (t < 0.72) {
+        color = mix(grass_hi, rock,            smoothstep(0.50, 0.62, t));
+        color = mix(color,    rock_dark,       smoothstep(0.62, 0.72, t));
+    } else {
+        color = mix(rock_dark, snow,           smoothstep(0.72, 0.88, t));
+    }
+
+    // Steep slopes override with bare rock regardless of elevation
+    color = mix(rock_dark, color, smoothstep(0.45, 0.80, slope));
+
+    out_color = color;
 
     // camera project
     gl_Position = vp_uniforms.projection * vp_uniforms.view * world_pos;
