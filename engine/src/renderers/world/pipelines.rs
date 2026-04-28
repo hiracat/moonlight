@@ -415,8 +415,8 @@ pub fn create_builtin_graphics_pipelines(
                     if !mesh.animated {
                         continue;
                     }
-                    if let Some(animation) = animation {
-                        if let Some(current) = &animation.current_playing {
+                    if let Some(animation) = animation
+                        && let Some(current) = &animation.current_playing {
                             let animation_impl = &resource_manager.animation_resources.animations
                                 [animation.skeleton.id][current.id];
                             let skeleton_impl = &mut resource_manager.animation_resources.skeletons
@@ -520,8 +520,7 @@ pub fn create_builtin_graphics_pipelines(
                             skeleton_impl.update_global_transforms();
 
                             resource_manager.animation_resources.write_bones();
-                        }
-                    };
+                        };
 
                     let model_set = builder.add_uniform_buffer::<ModelUBO>(
                         resource_manager,
@@ -986,14 +985,11 @@ pub fn create_graphics_pipeline(
         ..Default::default()
     };
 
-    let tesselation_state = match &desc.tesselation_state {
-        Some(x) => Some(vk::PipelineTessellationStateCreateInfo {
+    let tesselation_state = desc.tesselation_state.as_ref().map(|x| vk::PipelineTessellationStateCreateInfo {
             patch_control_points: x.patch_control_points,
 
             ..Default::default()
-        }),
-        None => None,
-    };
+        });
     let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo {
         color_attachment_count: desc.color_attachment_formats.len() as u32,
         p_color_attachment_formats: desc.color_attachment_formats.as_ptr(),
@@ -1145,8 +1141,8 @@ pub fn create_pipeline_layout_from_vert_frag(
         let fragment_bindings = fragment_descriptor_sets.get(&set_index);
 
         let max_binding = {
-            let max_vertex = vertex_bindings.map_or(None, |x| x.keys().max());
-            let max_fragment = fragment_bindings.map_or(None, |x| x.keys().max());
+            let max_vertex = vertex_bindings.and_then(|x| x.keys().max());
+            let max_fragment = fragment_bindings.and_then(|x| x.keys().max());
             assert!(max_vertex.is_some() || max_fragment.is_some());
             *max_vertex.unwrap_or(&0).max(max_fragment.unwrap_or(&0))
         };
@@ -1252,21 +1248,21 @@ pub fn create_pipeline_layout_from_vert_frag(
 
 fn load_path_data(path: &path::Path) -> Reflection {
     let out_dir = PathBuf::from(env!("OUT_DIR"));
-    let full_path: PathBuf = out_dir.join(&path);
+    let full_path: PathBuf = out_dir.join(path);
     let code = fs::read(full_path).expect("failed to read file");
     rr::Reflection::new_from_spirv(&code).unwrap()
 }
 fn get_entry_name(reflection: &Reflection) -> ffi::CString {
     let entry_point_name =
         reflection.0.entry_points[0].operands[ASM_ENTRY_POINT_NAME_IDX].unwrap_literal_string();
-    let entry_cstr = ffi::CString::new(entry_point_name).unwrap();
-    entry_cstr
+    
+    ffi::CString::new(entry_point_name).unwrap()
 }
 fn get_shader_kind(reflection: &Reflection) -> vk::ShaderStageFlags {
     let raw_stage = reflection.0.entry_points[0].operands[ASM_ENTRY_POINT_EXECUTION_MODEL_IDX]
         .unwrap_execution_model();
-    let shader_kind = vk::ShaderStageFlags::from_raw(0b1 << (raw_stage as u32));
-    shader_kind
+    
+    vk::ShaderStageFlags::from_raw(0b1 << (raw_stage as u32))
 }
 
 /// helper for making descriptor writes
@@ -1374,9 +1370,9 @@ impl DescriptorWriteBuilder<'_> {
             resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
 
         self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer: buffer,
-            range: range,
-            offset: offset,
+            buffer,
+            range,
+            offset,
         }));
 
         self.writes.push(vk::WriteDescriptorSet {
@@ -1401,9 +1397,9 @@ impl DescriptorWriteBuilder<'_> {
         offset: u64,
     ) -> vk::DescriptorSet {
         self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer: buffer,
-            range: range,
-            offset: offset,
+            buffer,
+            range,
+            offset,
         }));
 
         self.writes.push(vk::WriteDescriptorSet {

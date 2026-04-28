@@ -1,6 +1,5 @@
 use std::{any::TypeId, collections::HashMap, sync::Arc};
 
-use proc_macros::LuaVal;
 use ultraviolet::{self as uv};
 
 use crate::{
@@ -48,7 +47,7 @@ impl LuaVM {
         err.print_on_error();
         dbg!(&path);
         Self {
-            lua: lua,
+            lua,
             path: path.to_string(),
             type_registry: Arc::new(TypeRegistry::new()),
             last_modified: std::time::SystemTime::now(),

@@ -260,18 +260,18 @@ impl Ray {
             dir: dir.normalized(),
         }
     }
-    pub fn ray_box(ray: &Ray, collider: &Collider, collider_position: Vec3) -> Option<f32> {
+    pub fn ray_box(ray: &Ray, collider: &Collider, _collider_position: Vec3) -> Option<f32> {
         fn calculate_t_values(origin: f32, dir: f32, min: f32, max: f32) -> (f32, f32) {
             if dir.abs() < f32::EPSILON {
                 if origin < min || origin > max {
-                    return (f32::INFINITY, f32::NEG_INFINITY);
+                    (f32::INFINITY, f32::NEG_INFINITY)
                 } else {
-                    return (f32::NEG_INFINITY, f32::INFINITY);
+                    (f32::NEG_INFINITY, f32::INFINITY)
                 }
             } else {
                 let t1 = (min - origin) / dir;
                 let t2 = (max - origin) / dir;
-                return (t1.min(t2), t1.max(t2));
+                (t1.min(t2), t1.max(t2))
             }
         }
         match collider {

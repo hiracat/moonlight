@@ -55,7 +55,8 @@ impl VulkanContext {
         let instance = create_instance(&entry, event_loop);
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = unsafe {
-            let surface = ash_window::create_surface(
+            
+            ash_window::create_surface(
                 &entry,
                 &instance,
                 // idk what to do about this, i need the raw handle
@@ -65,8 +66,7 @@ impl VulkanContext {
                 window.raw_window_handle().unwrap(),
                 None,
             )
-            .unwrap();
-            surface
+            .unwrap()
         };
 
         //need to make this optional to put stuff inside
@@ -203,21 +203,21 @@ pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash:
         ..Default::default()
     };
 
-    let instance = unsafe { entry.create_instance(&create_info, None).unwrap() };
-    instance
+    
+    unsafe { entry.create_instance(&create_info, None).unwrap() }
 }
 pub fn setup_debug_utils(
     debug_utils_loader: &ash::ext::debug_utils::Instance,
 ) -> vk::DebugUtilsMessengerEXT {
     let messenger_ci = populate_debug_messenger_create_info();
 
-    let utils_messenger = unsafe {
+    
+
+    unsafe {
         debug_utils_loader
             .create_debug_utils_messenger(&messenger_ci, None)
             .expect("Debug Utils Callback")
-    };
-
-    utils_messenger
+    }
 }
 unsafe extern "system" fn vulkan_debug_utils_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,

@@ -156,7 +156,7 @@ impl SwapchainResources {
                 }
             }
         }
-        return formats.first().copied();
+        formats.first().copied()
     }
 }
 
@@ -232,7 +232,7 @@ pub fn update_attachment_descriptor_sets(
         let mut image_infos = Vec::with_capacity(frame_count);
         for frame_index in 0..attachments[binding_index].len() {
             image_infos.push(vk::DescriptorImageInfo {
-                sampler: sampler,
+                sampler,
                 image_view: attachments[binding_index][frame_index],
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             });

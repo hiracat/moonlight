@@ -37,7 +37,7 @@ impl From<&Transform> for ModelUBO {
         let model = position * rotation * scale;
 
         ModelUBO {
-            model: model,
+            model,
             normal: model.inversed().transposed(),
         }
     }
@@ -57,7 +57,7 @@ impl From<&Camera> for CameraUBO {
         let view = rotation_matrix * translation_matrix;
 
         CameraUBO {
-            view: view,
+            view,
             proj: uv::projection::perspective_reversed_infinite_z_vk(
                 camera.fov_rads,
                 camera.aspect_ratio,

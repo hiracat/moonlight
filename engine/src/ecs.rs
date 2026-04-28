@@ -59,14 +59,14 @@ macro_rules! impl_fetch {
                             // loop
                             let [<val_ $req_ty:lower>] = unsafe { &*(req[_req_idx] as *const $req_ty) };
 
-                            _req_idx = _req_idx + 1;
+                            _req_idx += 1;
                         )*
                         // how many of opt do we have/whats our current
                         let mut _opt_idx = 0usize;
                         $(
                             // for every opt, take one map it to the correct type or none
                             let [<val_ $opt_ty:lower>] = _opt[_opt_idx].map(|bytes| unsafe { &*(bytes as *const u8 as *const $opt_ty) });
-                            _opt_idx = _opt_idx + 1;
+                            _opt_idx += 1;
                         )*
                         (entityid, ( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
                     })
@@ -195,7 +195,7 @@ macro_rules! impl_fetch_mut {
                             // loop
                             let [<val_ $req_ty:lower>] = unsafe { &mut *(req[_req_idx] as *mut $req_ty) };
 
-                            _req_idx = _req_idx + 1;
+                            _req_idx += 1;
                         )*
                         // how many of opt do we have/whats our current
                         let mut _opt_idx = 0usize;
@@ -203,7 +203,7 @@ macro_rules! impl_fetch_mut {
                             // for every opt, take one map it to the correct type or none
                             let [<val_ $opt_ty:lower>] = _opt[_opt_idx].map(|bytes| unsafe { &mut *(bytes as *mut $opt_ty) });
 
-                            _opt_idx = _opt_idx + 1;
+                            _opt_idx += 1;
                         )*
                         (entityid, ( $([<val_ $req_ty:lower>],)* $([<val_ $opt_ty:lower>],)* ))
                     })
@@ -478,10 +478,7 @@ impl<T: 'static> Fetch for (T,) {
         }
     }
     fn get<'w>(entity: EntityId, world: &'w World) -> Self::LookupResult<'w> {
-        let storage = match world.get_storage().ok_or(WorldError::ComponentTypeMissing) {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+        let storage = world.get_storage().ok_or(WorldError::ComponentTypeMissing)?;
         storage
             .get(entity)
             .ok_or(WorldError::EntityMissingComponent)
@@ -496,13 +493,9 @@ impl<T: 'static> FetchMut for (T,) {
     type LookupResult<'w> = Result<&'w mut T, WorldError>;
 
     fn get_mut<'w>(entity: EntityId, world: &'w mut World) -> Self::LookupResult<'w> {
-        let storage = match world
+        let storage = world
             .get_storage_mut()
-            .ok_or(WorldError::ComponentTypeMissing)
-        {
-            Ok(it) => it,
-            Err(err) => return Err(err),
-        };
+            .ok_or(WorldError::ComponentTypeMissing)?;
         storage
             .get_mut(entity)
             .ok_or(WorldError::EntityMissingComponent)
@@ -741,8 +734,7 @@ impl<'a> Cursor<'a> {
     }
     fn new<T: 'static>(storage: &ComponentStorage<T>) -> Self {
         let first_entity = storage
-            .data
-            .get(0)
+            .data.first()
             .map(|x| x.0)
             .unwrap_or(EntityId(u32::MAX));
         let storage = unsafe {
@@ -811,8 +803,7 @@ impl<'a> CursorMut<'a> {
     }
     fn new<T: 'static>(storage: &mut ComponentStorage<T>) -> Self {
         let first_entity = storage
-            .data
-            .get(0)
+            .data.first()
             .map(|x| x.0)
             .unwrap_or(EntityId(u32::MAX));
         let storage = unsafe {
@@ -858,16 +849,22 @@ impl<'a> CursorMut<'a> {
 pub struct ComponentStorage<T: 'static> {
     data: Vec<(EntityId, T)>,
 }
+impl<T: 'static> Default for ComponentStorage<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: 'static> ComponentStorage<T> {
     pub fn new() -> ComponentStorage<T> {
         ComponentStorage::<T> { data: Vec::new() }
     }
     pub fn add(&mut self, entity: EntityId, value: T) -> Result<(), WorldError> {
         match self.data.binary_search_by_key(&entity, |x| x.0) {
-            Ok(_) => return Err(WorldError::ComponentAlreadyAdded),
+            Ok(_) => Err(WorldError::ComponentAlreadyAdded),
             Err(x) => {
                 self.data.insert(x, (entity, value));
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -889,24 +886,24 @@ impl<T: 'static> ComponentStorage<T> {
             Ok(x) => {
                 self.data.remove(x);
                 // deallocate empty storages
-                if self.data.len() < 1 {
+                if self.data.is_empty() {
                     self.data.shrink_to_fit();
                 }
-                return Ok(());
+                Ok(())
             }
-            Err(_) => return Err(WorldError::EntityMissingComponent),
+            Err(_) => Err(WorldError::EntityMissingComponent),
         }
     }
     pub fn get(&self, entity: EntityId) -> Option<&T> {
         match self.data.binary_search_by_key(&entity, |x| x.0) {
-            Ok(x) => return self.data.get(x).map(|x| &x.1),
-            Err(_) => return None,
+            Ok(x) => self.data.get(x).map(|x| &x.1),
+            Err(_) => None,
         }
     }
     pub fn get_mut(&mut self, entity: EntityId) -> Option<&mut T> {
         match self.data.binary_search_by_key(&entity, |x| x.0) {
-            Ok(x) => return self.data.get_mut(x).map(|x| &mut x.1),
-            Err(_) => return None,
+            Ok(x) => self.data.get_mut(x).map(|x| &mut x.1),
+            Err(_) => None,
         }
     }
 }
@@ -945,8 +942,8 @@ pub struct QueryInfo {
 }
 
 impl World {
-    pub(crate) fn dyn_query_mut<'w>(
-        &'w mut self,
+    pub(crate) fn dyn_query_mut(
+        &mut self,
         query_info: &QueryInfo,
     ) -> Vec<(EntityId, Vec<*mut [u8]>, Vec<Option<*mut [u8]>>)> {
         let mut req_cursors: Vec<CursorMut> = Vec::new();
@@ -1002,8 +999,8 @@ impl World {
         let mut results = Vec::new();
 
         while let Some((entity, req_ptrs, opt_ptrs)) = dyn_query.next() {
-            let req_ptrs: Vec<*mut [u8]> = req_ptrs.iter().copied().collect();
-            let opt_ptrs: Vec<Option<*mut [u8]>> = opt_ptrs.iter().copied().collect();
+            let req_ptrs: Vec<*mut [u8]> = req_ptrs.to_vec();
+            let opt_ptrs: Vec<Option<*mut [u8]>> = opt_ptrs.to_vec();
             results.push((entity, req_ptrs, opt_ptrs));
         }
 
@@ -1067,7 +1064,8 @@ impl World {
         component: T,
     ) -> Result<(), WorldError> {
         if self.entities.contains(&entity) {
-            Ok(self.get_or_make_storage::<T>().replace(entity, component))
+            self.get_or_make_storage::<T>().replace(entity, component);
+            Ok(())
         } else {
             Err(WorldError::EntityMissing)
         }
@@ -1104,7 +1102,7 @@ impl World {
                 Ok(())
             }
             std::collections::hash_map::Entry::Occupied(_) => {
-                return Err(WorldError::ResourceAlreadyAdded);
+                Err(WorldError::ResourceAlreadyAdded)
             }
         }
     }
@@ -1135,7 +1133,7 @@ impl World {
         )
     }
     pub fn get_mut_resource_dyn(&mut self, typeid: &TypeId) -> Option<&mut Box<dyn Any>> {
-        self.resource_storage.get_mut(&typeid)
+        self.resource_storage.get_mut(typeid)
     }
 
     /// Panics: panics if any of the queried types are identical
@@ -1161,7 +1159,7 @@ impl World {
         QueryMut { iter: iterator }
     }
 
-    fn get_or_make_storage<'s, T: 'static>(&'s mut self) -> &'s mut ComponentStorage<T> {
+    fn get_or_make_storage<T: 'static>(&mut self) -> &mut ComponentStorage<T> {
         let entry = self
             .component_storages
             .entry(TypeId::of::<T>())
@@ -1175,14 +1173,14 @@ impl World {
             .expect("ComponentStorage<T> was just inserted, so downcast must work")
     }
 
-    fn get_storage<'s, T: 'static>(&'s self) -> Option<&'s ComponentStorage<T>> {
+    fn get_storage<T: 'static>(&self) -> Option<&ComponentStorage<T>> {
         self.component_storages.get(&TypeId::of::<T>()).map(|x| {
             x.as_any()
                 .downcast_ref::<ComponentStorage<T>>()
                 .expect("should be able to downcast if it exists")
         })
     }
-    fn get_storage_mut<'s, T: 'static>(&'s mut self) -> Option<&'s mut ComponentStorage<T>> {
+    fn get_storage_mut<T: 'static>(&mut self) -> Option<&mut ComponentStorage<T>> {
         self.component_storages
             .get_mut(&TypeId::of::<T>())
             .map(|x| {
@@ -1191,10 +1189,10 @@ impl World {
                     .expect("should be able to downcast if it exists")
             })
     }
-    fn get_storage_dyn_mut<'s>(
-        &'s mut self,
+    fn get_storage_dyn_mut(
+        &mut self,
         typeid: TypeId,
-    ) -> Option<&'s mut dyn ErasedComponentStorage> {
+    ) -> Option<&mut dyn ErasedComponentStorage> {
         self.component_storages.get_mut(&typeid).map(|x| x.as_mut())
     }
 }

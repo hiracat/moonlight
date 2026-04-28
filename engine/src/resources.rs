@@ -268,7 +268,7 @@ fn load_joints(
             // without unwrapping
             buffers.get(buffer.index()).map(|data| &data.0[..])
         }) {
-        iter.map(|matrix_array| uv::Mat4::from(matrix_array))
+        iter.map(uv::Mat4::from)
             .collect()
     } else {
         panic!("Failed to read inverse bind matrices");
@@ -357,7 +357,7 @@ fn build_hierarchy(
             .get(&node.index())
             .expect("all joints should have an entry")],
         // needs to be set later
-        parent_index: parent_index,
+        parent_index,
         // this will be updated by update_global_transforms
         global_transform: uv::Mat4::identity(),
     });
@@ -602,10 +602,10 @@ impl UniformRingBuffer {
         let alignment = 64;
 
         Self {
-            buffer: buffer,
+            buffer,
             memory: allocation,
-            size: size,
-            alignment: alignment,
+            size,
+            alignment,
             current: 0,
             device: device.clone(),
             allocator: allocator.clone(),
@@ -626,7 +626,7 @@ impl UniformRingBuffer {
         let offset = self.current;
         self.current += aligned_size as u64;
 
-        assert_eq!(self.current as u64 % self.alignment as u64, 0);
+        assert_eq!(self.current % self.alignment as u64, 0);
         assert_eq!(aligned_size as u64 % self.alignment as u64, 0);
         (self.buffer, offset)
     }
@@ -668,10 +668,10 @@ impl AnimatedVertex {
     ) -> Self {
         Self {
             position: postion,
-            normal: normal,
-            uv: uv,
-            bone_weights: bone_weights,
-            bone_indices: bone_indices,
+            normal,
+            uv,
+            bone_weights,
+            bone_indices,
         }
     }
 }
@@ -679,8 +679,8 @@ impl Vertex {
     pub fn new(postion: uv::Vec3, normal: uv::Vec3, uv: uv::Vec2) -> Self {
         Self {
             position: postion,
-            normal: normal,
-            uv: uv,
+            normal,
+            uv,
         }
     }
 }
@@ -728,7 +728,7 @@ impl ResourceManager {
         assert_eq!(document.skins().len(), 1);
 
         let skin = document.skins().next().unwrap();
-        let (joints, gltf_node_to_engine, gltf_joint_to_engine) = load_joints(&skin, &buffers);
+        let (joints, gltf_node_to_engine, gltf_joint_to_engine) = load_joints(&skin, buffers);
 
         let mut skeleton = SkeletonImpl { joints };
         skeleton.update_global_transforms();
@@ -757,19 +757,19 @@ impl ResourceManager {
                     match outputs {
                         gltf::animation::util::ReadOutputs::Translations(translations) => {
                             let translations_vec: Vec<_> =
-                                translations.map(|x| uv::Vec3::from(x)).collect();
+                                translations.map(uv::Vec3::from).collect();
                             assert_eq!(translations_vec.len(), timestamps.len());
                             Keyframes::Translation(translations_vec)
                         }
                         gltf::animation::util::ReadOutputs::Rotations(rotations) => {
                             let rotations_vec = rotations
                                 .into_f32()
-                                .map(|x| uv::Rotor3::from_quaternion_array(x))
+                                .map(uv::Rotor3::from_quaternion_array)
                                 .collect();
                             Keyframes::Rotation(rotations_vec)
                         }
                         gltf::animation::util::ReadOutputs::Scales(scales) => {
-                            let scales_vec = scales.map(|x| uv::Vec3::from(x)).collect();
+                            let scales_vec = scales.map(uv::Vec3::from).collect();
                             Keyframes::Scale(scales_vec)
                         }
                         gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => {
@@ -784,8 +784,8 @@ impl ResourceManager {
                     target_joint_index: *gltf_node_to_engine
                         .get(&channel.target().node().index())
                         .expect("should have value for all nodes accessed"),
-                    keyframes: keyframes,
-                    timestamps: timestamps,
+                    keyframes,
+                    timestamps,
                 })
             }
             animation_clips.push(AnimationImpl {
@@ -1003,17 +1003,17 @@ impl ResourceManager {
             "index buffer",
         );
 
-        let mesh = GpuMesh {
+        
+        GpuMesh {
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
             index_count: indices.len() as u32,
             index_buffer: index_buffer[0],
             vertex_buffer: vertex_buffer[0],
             vertex_type: VertexType::Static,
-            device: device,
+            device,
             allocator: allocator.clone(),
-        };
-        mesh
+        }
     }
 
     fn load_animated_mesh(
@@ -1054,7 +1054,7 @@ impl ResourceManager {
                     normal: normal.into(),
                     uv: uv.into(),
                     bone_weights: bone_weights.into(),
-                    bone_indices: bone_indices,
+                    bone_indices,
                 },
             )
             .collect();
@@ -1085,17 +1085,17 @@ impl ResourceManager {
             "index buffer",
         );
 
-        let mesh = GpuMesh {
+        
+        GpuMesh {
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
             index_count: indices.len() as u32,
             index_buffer: index_buffer[0],
             vertex_buffer: vertex_buffer[0],
             vertex_type: VertexType::Animated,
-            device: device,
+            device,
             allocator: allocator.clone(),
-        };
-        mesh
+        }
     }
 
     pub(crate) fn get_mesh(&mut self, mesh: Mesh) -> Option<&GpuMesh> {
@@ -1183,7 +1183,7 @@ impl GpuTexture {
             layer_count: 1,
         };
         instant_submit_command_buffer(
-            &device,
+            device,
             one_time_submit_buffer,
             one_time_submit_pool,
             queue,
@@ -1283,8 +1283,7 @@ impl GpuTexture {
     ) -> Self {
         let image_bytes: Vec<_> = images
             .iter_mut()
-            .map(|x| x.to_rgba8().into_raw())
-            .flatten()
+            .flat_map(|x| x.to_rgba8().into_raw())
             .collect();
 
         let create_info = vk::BufferCreateInfo {
@@ -1516,7 +1515,7 @@ impl GpuTexture {
             image: final_image,
             memory: image_mem,
             sampler,
-            device: device,
+            device,
             allocator: allocator.clone(),
         }
     }
@@ -1787,7 +1786,7 @@ impl GpuTexture {
             image: final_image,
             memory: image_mem,
             sampler,
-            device: device,
+            device,
             allocator: allocator.clone(),
         }
     }

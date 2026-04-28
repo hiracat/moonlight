@@ -428,7 +428,8 @@ pub fn derive_lua_union(input: TokenStream) -> TokenStream {
 }
 
 fn get_field_type_string_name(field_type: &syn::Type) -> String {
-    let field_type_str = match field_type {
+    
+    match field_type {
         syn::Type::Path(type_path) => {
             let last = type_path.path.segments.last().unwrap();
             let name = last.ident.to_string();
@@ -457,6 +458,5 @@ fn get_field_type_string_name(field_type: &syn::Type) -> String {
             }
         }
         _ => quote!(#field_type).to_string(),
-    };
-    field_type_str
+    }
 }

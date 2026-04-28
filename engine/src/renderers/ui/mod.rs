@@ -111,64 +111,61 @@ impl UIRenderer {
         let mut current_index_offset = 0;
         let mut current_index_byte_offset = 0;
         for item in geometry {
-            match &item.primitive {
-                egui::epaint::Primitive::Mesh(x) => {
-                    let vertex_memory = self.vertex_memory.mapped_slice_mut().unwrap();
-                    let vertex_writeable_slice = &mut vertex_memory[current_vertex_byte_offset
-                        ..current_vertex_byte_offset
-                            + x.vertices.len() * size_of::<epaint::Vertex>()];
+            if let egui::epaint::Primitive::Mesh(x) = &item.primitive {
+                let vertex_memory = self.vertex_memory.mapped_slice_mut().unwrap();
+                let vertex_writeable_slice = &mut vertex_memory[current_vertex_byte_offset
+                    ..current_vertex_byte_offset
+                        + x.vertices.len() * size_of::<epaint::Vertex>()];
 
-                    let vertex_bytes: &[u8] = cast_slice(&x.vertices);
-                    vertex_writeable_slice.copy_from_slice(vertex_bytes);
+                let vertex_bytes: &[u8] = cast_slice(&x.vertices);
+                vertex_writeable_slice.copy_from_slice(vertex_bytes);
 
-                    let index_memory = self.index_memory.mapped_slice_mut().unwrap();
-                    let index_writeable_slice = &mut index_memory[current_index_byte_offset
-                        ..current_index_byte_offset + x.indices.len() * size_of::<u32>()];
+                let index_memory = self.index_memory.mapped_slice_mut().unwrap();
+                let index_writeable_slice = &mut index_memory[current_index_byte_offset
+                    ..current_index_byte_offset + x.indices.len() * size_of::<u32>()];
 
-                    let index_bytes: &[u8] = cast_slice(&x.indices);
-                    index_writeable_slice.copy_from_slice(index_bytes);
-                    // Convert egui's clip_rect (in points) to Vulkan scissor rect (in pixels)
-                    // egui uses points (logical pixels), Vulkan uses physical pixels
-                    let clip_min_x = (item.clip_rect.min.x * pixels_per_point).round() as i32;
-                    let clip_min_y = (item.clip_rect.min.y * pixels_per_point).round() as i32;
-                    let clip_max_x = (item.clip_rect.max.x * pixels_per_point).round() as i32;
-                    let clip_max_y = (item.clip_rect.max.y * pixels_per_point).round() as i32;
+                let index_bytes: &[u8] = cast_slice(&x.indices);
+                index_writeable_slice.copy_from_slice(index_bytes);
+                // Convert egui's clip_rect (in points) to Vulkan scissor rect (in pixels)
+                // egui uses points (logical pixels), Vulkan uses physical pixels
+                let clip_min_x = (item.clip_rect.min.x * pixels_per_point).round() as i32;
+                let clip_min_y = (item.clip_rect.min.y * pixels_per_point).round() as i32;
+                let clip_max_x = (item.clip_rect.max.x * pixels_per_point).round() as i32;
+                let clip_max_y = (item.clip_rect.max.y * pixels_per_point).round() as i32;
 
-                    // Clamp to window bounds
-                    let clip_min_x = clip_min_x.max(0);
-                    let clip_min_y = clip_min_y.max(0);
-                    let clip_max_x = clip_max_x.min(window_size.width as i32);
-                    let clip_max_y = clip_max_y.min(window_size.height as i32);
+                // Clamp to window bounds
+                let clip_min_x = clip_min_x.max(0);
+                let clip_min_y = clip_min_y.max(0);
+                let clip_max_x = clip_max_x.min(window_size.width as i32);
+                let clip_max_y = clip_max_y.min(window_size.height as i32);
 
-                    // Calculate width and height
-                    let clip_width = (clip_max_x - clip_min_x).max(0) as u32;
-                    let clip_height = (clip_max_y - clip_min_y).max(0) as u32;
+                // Calculate width and height
+                let clip_width = (clip_max_x - clip_min_x).max(0) as u32;
+                let clip_height = (clip_max_y - clip_min_y).max(0) as u32;
 
-                    // Create Vulkan scissor rect
-                    let scissor = vk::Rect2D {
-                        offset: vk::Offset2D {
-                            x: clip_min_x,
-                            y: clip_min_y,
-                        },
-                        extent: vk::Extent2D {
-                            width: clip_width,
-                            height: clip_height,
-                        },
-                    };
-                    draw_jobs.push(UIDrawJob {
-                        descriptor_set: *self.descriptor_sets.get(&x.texture_id).unwrap(),
-                        index_count: x.indices.len(),
-                        index_offset: current_index_offset,
-                        vertex_offset: current_vertex_offset,
-                        scissor: scissor,
-                    });
+                // Create Vulkan scissor rect
+                let scissor = vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: clip_min_x,
+                        y: clip_min_y,
+                    },
+                    extent: vk::Extent2D {
+                        width: clip_width,
+                        height: clip_height,
+                    },
+                };
+                draw_jobs.push(UIDrawJob {
+                    descriptor_set: *self.descriptor_sets.get(&x.texture_id).unwrap(),
+                    index_count: x.indices.len(),
+                    index_offset: current_index_offset,
+                    vertex_offset: current_vertex_offset,
+                    scissor,
+                });
 
-                    current_vertex_offset += x.vertices.len();
-                    current_vertex_byte_offset += vertex_bytes.len();
-                    current_index_offset += x.indices.len();
-                    current_index_byte_offset += index_bytes.len();
-                }
-                _ => {}
+                current_vertex_offset += x.vertices.len();
+                current_vertex_byte_offset += vertex_bytes.len();
+                current_index_offset += x.indices.len();
+                current_index_byte_offset += index_bytes.len();
             }
         }
 
@@ -486,7 +483,7 @@ impl UIRenderer {
             .unwrap()
             .allocate(&index_alloc_desc)
             .unwrap();
-        let pool_sizes = vec![vk::DescriptorPoolSize {
+        let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 64,
         }];

@@ -32,7 +32,7 @@ fn main() {
         let mut file = File::open(path).expect("failed to open file");
         let mut source = String::new();
         file.read_to_string(&mut source)
-            .expect(&format! {"invalid file {}", path.to_string_lossy()});
+            .unwrap_or_else(|_| panic!("invalid file {}", path.to_string_lossy()));
 
         let shader_kind = shader_kind_from_filename(path);
 

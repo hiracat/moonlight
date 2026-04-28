@@ -244,7 +244,7 @@ impl WorldRenderer {
 
         for pipeline in &self.pipelines {
             let job_set = (pipeline.write_data_and_build_draw_jobs)(
-                &device,
+                device,
                 resource_manager,
                 pool,
                 world,
@@ -253,7 +253,7 @@ impl WorldRenderer {
             );
             jobs.push(job_set);
         }
-        return jobs;
+        jobs
     }
 
     #[allow(clippy::too_many_lines)]
@@ -315,7 +315,7 @@ impl WorldRenderer {
                 .unwrap()
         };
 
-        let image_size = swapchain_resources.image_size;
+        let _image_size = swapchain_resources.image_size;
         let mut graph = RenderGraph::new();
 
         let mut final_color = graph.add_image(ImageDesc::Imported {
@@ -456,7 +456,7 @@ impl WorldRenderer {
             per_swapchain_image_descriptor_sets: descriptor_sets,
             image_descriptor_set_pool: input_descriptor_pool,
             per_swapchain_image_set_layout,
-            sampler: sampler,
+            sampler,
         }
     }
 

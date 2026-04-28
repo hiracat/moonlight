@@ -406,7 +406,7 @@ impl CompiledRenderGraph {
             let mut depth_attachments = Option::None;
             //BUG: if a pipeline reads and writes the same thing, this will break, but cycle
             //detection will catch that, so until thats needed its fine
-            for (_write_index, write) in pipeline.writes.iter().enumerate() {
+            for write in pipeline.writes.iter() {
                 let state = &mut tracked_image_states[write.id.arr_idx];
                 //PERF: this should come from either reflection or from user declaration on the
                 //.write, but im too lazy
@@ -439,12 +439,12 @@ impl CompiledRenderGraph {
                     commands.push(GraphCommand::ImageBarrier {
                         image_id: write.id,
                         src_layout: state.current_layout,
-                        dst_layout: dst_layout,
-                        dst_stage: dst_stage,
-                        dst_access: dst_access,
+                        dst_layout,
+                        dst_stage,
+                        dst_access,
                         src_stage: state.last_stage,
                         src_access: state.last_access,
-                        aspect_mask: aspect_mask,
+                        aspect_mask,
                     });
                 }
                 state.current_layout = dst_layout;
@@ -503,9 +503,9 @@ impl CompiledRenderGraph {
                     commands.push(GraphCommand::ImageBarrier {
                         image_id: read.id,
                         src_layout: state.current_layout,
-                        dst_layout: dst_layout,
-                        dst_access: dst_access,
-                        dst_stage: dst_stage,
+                        dst_layout,
+                        dst_access,
+                        dst_stage,
                         src_access: state.last_access,
                         src_stage: state.last_stage,
                         aspect_mask,

@@ -173,9 +173,9 @@ pub fn create_image(
     let view = unsafe {
         device.create_image_view(
             &vk::ImageViewCreateInfo {
-                subresource_range: subresource_range,
-                format: format,
-                image: image,
+                subresource_range,
+                format,
+                image,
                 view_type: vk::ImageViewType::TYPE_2D,
                 ..Default::default()
             },
