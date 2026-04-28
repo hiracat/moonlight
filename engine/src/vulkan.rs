@@ -1,5 +1,5 @@
 use std::{
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     marker::PhantomData,
     ptr,
     sync::{Arc, Mutex},
@@ -7,8 +7,8 @@ use std::{
 
 use ash::vk;
 use gpu_allocator::{
-    vulkan::{Allocator, AllocatorCreateDesc},
     AllocatorDebugSettings,
+    vulkan::{Allocator, AllocatorCreateDesc},
 };
 #[allow(deprecated)]
 use winit::{
@@ -28,7 +28,8 @@ pub struct VulkanContext {
     pub instance: Arc<ash::Instance>,
     pub device: Arc<ash::Device>,
     pub physical_device: vk::PhysicalDevice,
-    surface_loader: ash::khr::surface::Instance,
+    pub surface_loader: ash::khr::surface::Instance,
+    pub swapchain_loader: ash::khr::swapchain::Device,
 
     debug_messenger: vk::DebugUtilsMessengerEXT,
     debug_utils_loader: ash::ext::debug_utils::Instance,
@@ -115,22 +116,24 @@ impl VulkanContext {
         };
         let one_time_submit_buffer =
             unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] };
+        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         Self {
-            surface_loader: surface_loader,
+            swapchain_loader,
+            surface_loader,
             one_time_submit_pool: one_time_command_pool,
             one_time_submit_buffer,
-            entry: entry,
+            entry,
             instance: Arc::new(instance),
             device: Arc::new(device),
-            physical_device: physical_device,
-            queue: queue,
-            queue_family_index: queue_family_index,
+            physical_device,
+            queue,
+            queue_family_index,
             allocator: Some(Arc::new(Mutex::new(memory_allocator))),
-            debug_messenger: debug_messenger,
-            debug_utils_loader: debug_utils_loader,
-            window: window,
-            surface: surface,
+            debug_messenger,
+            debug_utils_loader,
+            window,
+            surface,
         }
     }
 }
@@ -151,7 +154,7 @@ impl Drop for VulkanContext {
     }
 }
 pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash::Instance {
-    let engine_name = CStr::from_bytes_with_nul(b"moonlight\0").unwrap();
+    let engine_name = c"moonlight";
     let app_info = vk::ApplicationInfo {
         api_version: vk::make_api_version(0, 1, 3, 0),
         p_engine_name: engine_name.as_ptr(),
@@ -163,10 +166,10 @@ pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash:
         ash_window::enumerate_required_extensions(event_loop.raw_display_handle().unwrap())
             .unwrap();
 
-    let mut instance_extensions: Vec<_> = required_instance_extensions.iter().copied().collect();
+    let mut instance_extensions: Vec<_> = required_instance_extensions.to_vec();
     instance_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
 
-    let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+    let validation_layer = c"VK_LAYER_KHRONOS_validation";
     let validation_features = [
         vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
         // vk::ValidationFeatureEnableEXT::GPU_ASSISTED,

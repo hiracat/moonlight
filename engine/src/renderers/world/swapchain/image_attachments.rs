@@ -131,7 +131,7 @@ pub fn create_gbuffer_resources(
     }
 }
 
-fn create_image(
+pub fn create_image(
     device: &Arc<ash::Device>,
     allocator: &SharedAllocator,
     name: &str,

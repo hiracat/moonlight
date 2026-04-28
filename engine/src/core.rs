@@ -20,8 +20,8 @@ use crate::{
     renderers::{
         ui::UIRenderer,
         world::{
-            draw::{WorldRenderer, FRAMES_IN_FLIGHT},
-            swapchain::{create_semaphores, SwapchainResources},
+            draw::{FRAMES_IN_FLIGHT, WorldRenderer},
+            swapchain::{SwapchainResources, create_semaphores},
         },
     },
     resources::{ResourceManager, Texture},
@@ -93,24 +93,25 @@ impl Engine {
         for _ in 0..FRAMES_IN_FLIGHT {
             per_frame.push(PerFrame::create(&context));
         }
+
         let render_finished = create_semaphores(&context.device, swapchain.swapchain_images.len());
-        let size = context.window.inner_size();
+        let size = swapchain.image_size;
         let window_size = (size.width, size.height);
 
         Self {
             vulkan_context: context,
-            world_renderer: world_renderer,
-            ui_renderer: ui_renderer,
-            swapchain: swapchain,
-            render_finished: render_finished,
-            resource_manager: resource_manager,
+            world_renderer,
+            ui_renderer,
+            swapchain,
+            render_finished,
+            resource_manager,
             prev_frame_end: Instant::now(),
             frame_in_flight: 0,
-            per_frame: per_frame,
+            per_frame,
             frame_count: 0,
             swapchain_image_index: 0,
             swapchain_resized: false,
-            window_size: window_size,
+            window_size,
         }
     }
     fn draw(&mut self, world: &mut World) {
@@ -125,16 +126,6 @@ impl Engine {
             .ui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        let window_size_w = self.vulkan_context.window.inner_size();
-        let window_size_v = vk::Extent2D {
-            width: window_size_w.width,
-            height: window_size_w.height,
-        };
-
-        if window_size_w.width == 0 || window_size_w.height == 0 {
-            return;
-        }
-
         let frame = &self.per_frame[self.frame_in_flight];
 
         unsafe {
@@ -144,38 +135,57 @@ impl Engine {
                 .unwrap();
         };
 
+        loop {
+            let is_suboptimal;
+            (self.swapchain_image_index, is_suboptimal) = unsafe {
+                match self.swapchain.swapchain_loader.acquire_next_image(
+                    self.swapchain.swapchain,
+                    u64::MAX,
+                    frame.image_available,
+                    vk::Fence::null(),
+                ) {
+                    Ok((index, suboptimal)) => (index as usize, suboptimal),
+                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        self.swapchain_resized = true;
+                        return;
+                    }
+                    Err(e) => panic!("failed to acquire next image: {e}"),
+                }
+            };
+
+            if is_suboptimal {
+                self.swapchain_resized = true;
+            } else {
+                break;
+            }
+
+            if self.swapchain_resized {
+                unsafe {
+                    self.vulkan_context.device.device_wait_idle().unwrap();
+                }
+                // Use the new dimensions of the window.
+                self.swapchain = SwapchainResources::create(
+                    &self.vulkan_context,
+                    Some(self.swapchain.swapchain),
+                );
+                self.world_renderer
+                    .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+            }
+        }
+
+        if self.swapchain.image_size.width == 0 || self.swapchain.image_size.height == 0 {
+            return;
+        }
+
         self.frame_count += 1;
 
-        if self.swapchain_resized {
-            unsafe {
-                self.vulkan_context.device.device_wait_idle().unwrap();
-            }
-            // Use the new dimensions of the window.
-            self.swapchain =
-                SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
-            self.world_renderer
-                .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
-        }
+        // check size after swapchain resize
 
-        let is_suboptimal;
-        (self.swapchain_image_index, is_suboptimal) = unsafe {
-            match self.swapchain.swapchain_loader.acquire_next_image(
-                self.swapchain.swapchain,
-                u64::MAX,
-                frame.image_available,
-                vk::Fence::null(),
-            ) {
-                Ok((index, suboptimal)) => (index as usize, suboptimal),
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.swapchain_resized = true;
-                    return;
-                }
-                Err(e) => panic!("failed to acquire next image: {e}"),
-            }
+        let window_size_v = self.swapchain.image_size;
+        let window_size_w = PhysicalSize {
+            width: window_size_v.width,
+            height: window_size_v.height,
         };
-        if is_suboptimal {
-            self.swapchain_resized = true;
-        }
 
         // NOTE: RENDERING START
 
@@ -218,7 +228,8 @@ impl Engine {
             src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             src_access_mask: vk::AccessFlags2::empty(),
             dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
             subresource_range: vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 level_count: 1,
@@ -256,7 +267,6 @@ impl Engine {
             window_size_v,
             &mut self.resource_manager,
             self.swapchain_image_index,
-            self.swapchain.swapchain_image_views[self.swapchain_image_index],
         );
 
         let swapchain_image_view = self.swapchain.swapchain_image_views[self.swapchain_image_index];
@@ -349,7 +359,7 @@ impl Engine {
             p_wait_dst_stage_mask: &wait_dst_access_mask,
             command_buffer_count: 1,
             p_command_buffers: &frame.command_buffer,
-            p_signal_semaphores: &self.render_finished[self.swapchain_image_index as usize],
+            p_signal_semaphores: &self.render_finished[self.swapchain_image_index],
             signal_semaphore_count: 1,
             ..Default::default()
         };
@@ -367,7 +377,7 @@ impl Engine {
 
         let mut present_results: [vk::Result; 1] = [Default::default(); 1];
         let present_info = vk::PresentInfoKHR {
-            p_wait_semaphores: &self.render_finished[self.swapchain_image_index as usize],
+            p_wait_semaphores: &self.render_finished[self.swapchain_image_index],
             wait_semaphore_count: 1,
             p_swapchains: &self.swapchain.swapchain,
             swapchain_count: 1,
@@ -469,7 +479,7 @@ impl PerFrame {
         }
         .unwrap();
         // One pool with multiple descriptor types
-        let transient_pool_sizes = vec![
+        let transient_pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 50,
@@ -538,7 +548,7 @@ impl Keyboard {
         self.keys.remove(&key);
     }
     pub fn is_down(&self, key: KeyCode) -> bool {
-        return self.keys.contains(&key);
+        self.keys.contains(&key)
     }
 }
 #[derive(Default)]
@@ -591,13 +601,7 @@ impl ApplicationHandler for App {
 
         self.engine = Some(Engine::init(event_loop));
 
-        let window_size = self
-            .engine
-            .as_ref()
-            .unwrap()
-            .vulkan_context
-            .window
-            .inner_size();
+        let window_size = self.engine.as_ref().unwrap().swapchain.image_size;
 
         // Keyboard + mouse input resources
         let keyboard = Keyboard::default();
@@ -640,10 +644,10 @@ impl ApplicationHandler for App {
             .winit_egui_state
             .on_window_event(&window, &event);
 
-        if response.consumed == true {
+        if response.consumed {
             return;
         }
-        if response.repaint == true {
+        if response.repaint {
             self.engine
                 .as_ref()
                 .unwrap()
@@ -675,8 +679,9 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => {
                 let engine = self.engine.as_mut().unwrap();
                 engine.swapchain_resized = true;
-                let PhysicalSize { width, height } = window.inner_size();
-                engine.window_size = (width, height);
+                engine.window_size.0 = engine.swapchain.image_size.width;
+                engine.window_size.1 = engine.swapchain.image_size.height;
+                let (width, height) = engine.window_size;
                 world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
                     width as f32 / height as f32;
             }

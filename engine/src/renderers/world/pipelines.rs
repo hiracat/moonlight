@@ -25,6 +25,10 @@ use crate::{
     ecs::Req,
     renderers::world::draw::DrawJob,
 };
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct PipelineHandle {
+    pub arr_index: usize,
+}
 pub struct PipelineBundle {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,

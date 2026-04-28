@@ -22,6 +22,7 @@ mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
 paste = "1.0.15"
 inventory = "0.3.22"
 proc-macros = { path = "../proc-macros", features = ["internal"] }
+educe = "0.6.0"
 
 
 [dev-dependencies]

@@ -3,7 +3,7 @@
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 use ash::vk;
-use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use proc_macros::LuaRef;
@@ -1544,6 +1544,12 @@ impl GpuTexture {
             flags: vk::BufferCreateFlags::empty(),
             ..Default::default()
         };
+        let extent = vk::Extent3D {
+            width: image.width(),
+            height: image.height(),
+            depth: 1,
+        };
+
         let staging_buffer = unsafe { device.create_buffer(&create_info, None).unwrap() };
 
         let requirements = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
@@ -1579,11 +1585,7 @@ impl GpuTexture {
             usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             tiling: vk::ImageTiling::OPTIMAL,
-            extent: vk::Extent3D {
-                width: image.width(),
-                height: image.height(),
-                depth: 1,
-            },
+            extent,
             flags: vk::ImageCreateFlags::empty(),
             format: image_format,
             samples: vk::SampleCountFlags::TYPE_1,
@@ -1616,11 +1618,29 @@ impl GpuTexture {
                 .unwrap()
         }
 
-        staging_mem
-            .mapped_slice_mut()
-            .unwrap()
-            .write(image.as_bytes())
-            .unwrap();
+        match format {
+            TextureFormat::Srgba => {
+                staging_mem
+                    .mapped_slice_mut()
+                    .unwrap()
+                    .write_all(image.to_rgba8().as_bytes())
+                    .unwrap();
+            }
+            TextureFormat::LinearRgba => {
+                staging_mem
+                    .mapped_slice_mut()
+                    .unwrap()
+                    .write_all(image.to_rgba8().as_bytes())
+                    .unwrap();
+            }
+            TextureFormat::HeightF32 => {
+                staging_mem
+                    .mapped_slice_mut()
+                    .unwrap()
+                    .write_all(image.to_rgba32f().as_bytes())
+                    .unwrap();
+            }
+        };
 
         let subresource_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1667,11 +1687,7 @@ impl GpuTexture {
                         layer_count: 1,
                         base_array_layer: 0,
                     },
-                    image_extent: vk::Extent3D {
-                        width: image.width(),
-                        height: image.height(),
-                        depth: 1,
-                    },
+                    image_extent: extent,
                     buffer_offset: 0,
                     buffer_row_length: 0,
                     buffer_image_height: 0,

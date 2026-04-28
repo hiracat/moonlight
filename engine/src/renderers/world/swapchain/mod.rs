@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use crate::{renderers::world::swapchain::image_attachments::Image, vulkan::VulkanContext};
+use crate::vulkan::VulkanContext;
 use ash::vk;
 pub mod image_attachments;
 
 pub struct SwapchainResources {
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_image_format: vk::SurfaceFormatKHR,
-    pub surface_loader: ash::khr::surface::Instance,
     pub swapchain_loader: ash::khr::swapchain::Device,
     // the images that are managed by the swapchain, indexed by swapchain_image_index
     pub swapchain_images: Vec<vk::Image>,
@@ -33,19 +32,30 @@ impl SwapchainResources {
     pub fn create(context: &VulkanContext, old_swapchain: Option<vk::SwapchainKHR>) -> Self {
         dbg!("creating swapchain");
         dbg!(old_swapchain);
-        let surface_loader = ash::khr::surface::Instance::new(&context.entry, &context.instance);
-        let swapchain_loader = ash::khr::swapchain::Device::new(&context.instance, &context.device);
-        let window_size = context.window.inner_size();
-        let window_size = vk::Extent2D {
-            width: window_size.width,
-            height: window_size.height,
-        };
+        let swapchain_loader = &context.swapchain_loader;
 
         let capabilities = unsafe {
-            surface_loader
+            context
+                .surface_loader
                 .get_physical_device_surface_capabilities(context.physical_device, context.surface)
         }
         .unwrap();
+
+        let window_size = if capabilities.current_extent.width != u32::MAX {
+            capabilities.current_extent
+        } else {
+            let inner = context.window.inner_size();
+            vk::Extent2D {
+                width: inner.width.clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: inner.height.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
+        };
 
         let image_count = if capabilities.min_image_count == capabilities.max_image_count {
             capabilities.max_image_count
@@ -60,7 +70,8 @@ impl SwapchainResources {
             base_array_layer: 0,
         };
         let swapchain_image_formats = unsafe {
-            surface_loader
+            context
+                .surface_loader
                 .get_physical_device_surface_formats(context.physical_device, context.surface)
                 .unwrap()
         };
@@ -119,12 +130,11 @@ impl SwapchainResources {
         Self {
             device: context.device.clone(),
             image_size: window_size,
+            swapchain_loader: swapchain_loader.clone(),
             swapchain,
-            swapchain_image_format: swapchain_image_format,
-            surface_loader: surface_loader,
-            swapchain_loader: swapchain_loader,
-            swapchain_images: swapchain_images,
-            swapchain_image_views: swapchain_image_views,
+            swapchain_image_format,
+            swapchain_images,
+            swapchain_image_views,
         }
     }
 
@@ -173,7 +183,7 @@ pub fn create_attachment_descriptor_sets(
     sampler: vk::Sampler,
     descriptor_pool: vk::DescriptorPool,
     attachment_layout: vk::DescriptorSetLayout,
-    attachments: &[&[Image]],
+    attachments: &[&[vk::ImageView]],
     binding_indices: &[u32],
 ) -> Vec<vk::DescriptorSet> {
     debug_assert!(
@@ -209,7 +219,7 @@ pub fn create_attachment_descriptor_sets(
 pub fn update_attachment_descriptor_sets(
     device: &ash::Device,
     descriptor_sets: &[vk::DescriptorSet],
-    attachments: &[&[Image]],
+    attachments: &[&[vk::ImageView]],
     binding_indices: &[u32],
     sampler: vk::Sampler,
 ) {
@@ -223,7 +233,7 @@ pub fn update_attachment_descriptor_sets(
         for frame_index in 0..attachments[binding_index].len() {
             image_infos.push(vk::DescriptorImageInfo {
                 sampler: sampler,
-                image_view: attachments[binding_index][frame_index].view,
+                image_view: attachments[binding_index][frame_index],
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             });
 

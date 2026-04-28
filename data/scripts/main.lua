@@ -38,6 +38,7 @@ function Update(world, engine)
 					{ label = "Cam side to side", value = 0.0, min = -300, max = 300 },
 					{ label = "cam up down", value = 0.0, min = -100, max = 300 },
 					{ label = "cam back", value = 0.0, min = -100, max = 300 },
+					{ label = "gravity", value = 9.8, min = -10, max = 30 },
 				}
 				ui_initialized = true
 			end
@@ -54,6 +55,9 @@ function Update(world, engine)
 
 			local offset = world:get_resource("CameraOffset") ---@type CameraOffset
 			offset.offset = { x = ui.sliders[9].value, y = ui.sliders[10].value, z = ui.sliders[11].value }
+
+			local config = world:get_resource("Config") ---@type Config
+			config.gravity_strength = ui.sliders[12].value
 
 			local tmp_light = u.PointLight ---@type PointLight
 			tmp_light.brightness = brightness

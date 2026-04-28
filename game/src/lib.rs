@@ -43,6 +43,18 @@ struct UIStuff {
     sliders: Vec<Slider>,
 }
 
+#[derive(LuaRef, Clone, Copy)]
+struct Config {
+    gravity_strength: f32,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            gravity_strength: 9.8,
+        }
+    }
+}
+
 fn start(world: &mut World, engine: &mut Engine) {
     let (width, height) = engine.window_size;
     let camera = Camera::create(
@@ -72,6 +84,8 @@ fn start(world: &mut World, engine: &mut Engine) {
 
     world.add_resource(UIStuff::default()).unwrap();
     world.add_resource(heightmap).unwrap();
+    let config = Config::default();
+    world.add_resource(config).unwrap();
 
     *world.get_mut_resource().unwrap() = camera;
     world.add_resource(directional).unwrap();
@@ -125,7 +139,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         .resource_manager
         .load_gltf_asset("data/models/animated_fox.glb");
     let mut fox_animations = fox_animations.unwrap();
-    fox_animations.current_playing = Some(fox_animations.animations[0].clone());
+    fox_animations.current_playing = Some(fox_animations.animations[0]);
     // fox_animations.current_playing = None;
     world.add(fox, fox_model).unwrap();
     world.add(fox, fox_animations).unwrap();
@@ -144,7 +158,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             ground,
-            Transform::from(None, None, Some(Vec3::new(5.0, 1.0, 5.0))),
+            Transform::from(None, None, Some(Vec3::new(1000.0, 1.0, 1000.0))),
         )
         .unwrap();
     world
@@ -196,7 +210,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         .unwrap();
 }
 
-fn game_update(world: &mut World, engine: &mut Engine) {
+fn game_update(world: &mut World, _engine: &mut Engine) {
     let delta_time = world.get_resource::<Time>().unwrap().delta_time;
     player_update(world, delta_time);
     physics_update(world, delta_time);
@@ -205,8 +219,6 @@ fn game_update(world: &mut World, engine: &mut Engine) {
 }
 
 fn ui(world: &mut World, context: &egui::Context) {
-    let gem_collected = false;
-
     egui::CentralPanel::default().show(context, |_ui| {
         if let Some(ui_stuff) = world.get_mut_resource::<UIStuff>() {
             for slider in &mut ui_stuff.sliders {
@@ -225,6 +237,7 @@ fn ui(world: &mut World, context: &egui::Context) {
 // this on down is human written code though
 
 fn physics_update(world: &mut World, delta_time: f32) {
+    let config = *world.get_resource::<Config>().unwrap();
     //NOTE: MOVEMENT INTEGRATION
     let rigidbodies = world.query_mut::<(ReqM<Transform>, ReqM<RigidBody>)>();
     for (_, (transform, rigidbody)) in rigidbodies {
@@ -245,7 +258,7 @@ fn physics_update(world: &mut World, delta_time: f32) {
         }
         // NOTE: APPLIES GRAVITY, GROUNDED FLAGS DONT MATTER BECAUSE WILL BE CORRECTED FOR IN
         // RESOLUTION FOR POSITION AND THEN VELOCITY
-        rigidbody.velocity.y -= 9.8 * delta_time;
+        rigidbody.velocity.y -= config.gravity_strength * delta_time;
 
         let velocity = rigidbody.velocity;
         transform.position += velocity * delta_time;
@@ -260,44 +273,39 @@ fn physics_update(world: &mut World, delta_time: f32) {
     //NOTE: COLLISION RESOLUTION
     for i in 0..collidable.len() {
         for j in i + 1..collidable.len() {
-            match Collider::penetration_vector(
-                collidable[i].1 .1,
-                collidable[j].1 .1,
-                collidable[i].1 .0,
-                collidable[j].1 .0,
+            if let Some(pen_vec) = Collider::penetration_vector(
+                collidable[i].1.1,
+                collidable[j].1.1,
+                collidable[i].1.0,
+                collidable[j].1.0,
             ) {
-                Some(pen_vec) => {
-                    if collidable[i].1 .2.is_some() && collidable[j].1 .2.is_some() {
-                        collidable[i].1 .0.position += pen_vec * 0.5;
-                        collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
-                        collidable[j].1 .0.position -= pen_vec * 0.5;
-                        collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
-                    } else {
-                        if collidable[i].1 .2.is_some() {
-                            collidable[i].1 .0.position += pen_vec;
-                            collision_penetrations.push((collidable[i].0, pen_vec));
-                        }
-                        if collidable[j].1 .2.is_some() {
-                            collidable[j].1 .0.position -= pen_vec;
-                            collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
-                        }
+                if collidable[i].1.2.is_some() && collidable[j].1.2.is_some() {
+                    collidable[i].1.0.position += pen_vec * 0.5;
+                    collision_penetrations.push((collidable[i].0, pen_vec * 0.5));
+                    collidable[j].1.0.position -= pen_vec * 0.5;
+                    collision_penetrations.push((collidable[j].0, pen_vec * -0.5));
+                } else {
+                    if collidable[i].1.2.is_some() {
+                        collidable[i].1.0.position += pen_vec;
+                        collision_penetrations.push((collidable[i].0, pen_vec));
+                    }
+                    if collidable[j].1.2.is_some() {
+                        collidable[j].1.0.position -= pen_vec;
+                        collision_penetrations.push((collidable[j].0, pen_vec * -1.0));
                     }
                 }
-                None => (),
             }
         }
     }
     let terrain = unsafe { &mut *(world_ptr) }
         .get_resource::<TerrainMap>()
         .unwrap();
-    for i in 0..collidable.len() {
-        let distance = collidable[i].1 .0.position.y
-            - terrain.get_height_at(collidable[i].1 .0.position.x, collidable[i].1 .0.position.z);
-        if distance < 0.0 {
-            if collidable[i].1 .2.is_some() {
-                collidable[i].1 .0.position.y -= distance;
-                collision_penetrations.push((collidable[i].0, Vec3::new(0.0, distance, 0.0)));
-            }
+    for collider in collidable {
+        let distance = collider.1.0.position.y
+            - terrain.get_height_at(collider.1.0.position.x, collider.1.0.position.z);
+        if distance < 0.0 && collider.1.2.is_some() {
+            collider.1.0.position.y -= distance;
+            collision_penetrations.push((collider.0, Vec3::new(0.0, distance, 0.0)));
         }
     }
 
@@ -320,12 +328,12 @@ fn physics_update(world: &mut World, delta_time: f32) {
 fn set_axis_component(velocity: Vec3, collision_vector: Vec3, restitution: f32) -> Vec3 {
     let collision = collision_vector.normalized();
     let projection = collision * velocity.dot(collision);
-    return velocity - (1.0 + restitution) * projection;
+    velocity - (1.0 + restitution) * projection
 }
 fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let mouse = *world.get_resource::<MouseState>().unwrap();
     let player = world.query::<(Controllable,)>().next().unwrap().0;
-    let player_transform = world.get::<(Transform,)>(player).unwrap().clone();
+    let player_transform = *world.get::<(Transform,)>(player).unwrap();
     let camera = world.get_mut_resource::<Camera>().unwrap();
 
     let sensativity = 0.002;
