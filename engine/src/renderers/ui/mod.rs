@@ -10,15 +10,14 @@ use ash::vk::{
     VertexInputBindingDescription,
 };
 use bytemuck::cast_slice;
-use egui::{epaint, ClippedPrimitive, TextureId};
+use egui::{ClippedPrimitive, TextureId, epaint};
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use winit::dpi::PhysicalSize;
 
 use crate::renderers::world::pipelines::{
-    create_graphics_pipeline, create_pipeline_layout_from_vert_frag, ColorBlendState,
-    DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState, RasterState,
-    VertexInputState,
+    ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
+    RasterState, VertexInputState, create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
 };
 use crate::renderers::world::swapchain::SwapchainResources;
 use crate::resources::{self, GpuTexture};
@@ -114,8 +113,7 @@ impl UIRenderer {
             if let egui::epaint::Primitive::Mesh(x) = &item.primitive {
                 let vertex_memory = self.vertex_memory.mapped_slice_mut().unwrap();
                 let vertex_writeable_slice = &mut vertex_memory[current_vertex_byte_offset
-                    ..current_vertex_byte_offset
-                        + x.vertices.len() * size_of::<epaint::Vertex>()];
+                    ..current_vertex_byte_offset + x.vertices.len() * size_of::<epaint::Vertex>()];
 
                 let vertex_bytes: &[u8] = cast_slice(&x.vertices);
                 vertex_writeable_slice.copy_from_slice(vertex_bytes);
@@ -315,7 +313,6 @@ impl UIRenderer {
             Path::new("shaders/egui_frag.spv"),
         );
         let desc = &GraphicsPipelineDesc {
-            shaders: &shaders.0,
             vertex_input_state: VertexInputState {
                 vertex_binding_descriptions: vec![VertexInputBindingDescription {
                     binding: 0,
@@ -396,12 +393,11 @@ impl UIRenderer {
             },
             dynamic_state: vec![DynamicState::VIEWPORT, DynamicState::SCISSOR],
             tesselation_state: None,
-            pipeline_layout: shaders.1,
             color_attachment_formats: vec![swapchain_format],
             depth_attachment_format: None,
         };
         (
-            create_graphics_pipeline(&device, desc).unwrap(),
+            create_graphics_pipeline(&device, desc, &shaders.0, shaders.1).unwrap(),
             shaders.1,
             shaders.2,
         )

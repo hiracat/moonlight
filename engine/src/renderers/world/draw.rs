@@ -1,10 +1,10 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use super::pipelines::{PipelineBundle, PipelineKey, create_builtin_graphics_pipelines};
+use super::pipelines::create_builtin_graphics_pipelines;
 use crate::ecs::World;
-use crate::renderers::world::pipelines::PipelineHandle;
+use crate::renderers::world::pipelines::PipelineManager;
 use crate::renderers::world::rendergraph::{
-    CompiledRenderGraph, GraphCommand, ImageDesc, ImageId, ImportedImageBinding, RenderGraph,
+    CompiledRenderGraph, GraphCommand, ImageId, ImportedImageBinding, RenderGraph,
 };
 use crate::renderers::world::swapchain::update_attachment_descriptor_sets;
 use crate::renderers::world::swapchain::{SwapchainResources, create_attachment_descriptor_sets};
@@ -20,12 +20,20 @@ pub const GEOMETRY_SUBPASS: u32 = 0;
 pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
+//HACK: this is bad, but i just wanna get it to work, ill fix it later
+pub struct Ids {
+    pub albedo: ImageId,
+    pub position: ImageId,
+    pub normal: ImageId,
+    pub final_color: ImageId,
+}
+
 pub struct WorldRenderer {
     swapchain_image_id: ImageId,
     image_attachment_order: [ImageId; 3],
 
     // indexed by PipelineHandle
-    pub pipelines: Vec<PipelineBundle>,
+    pub pipelines: PipelineManager,
     pub rendergraph_config: RenderGraph,
     // one per swapchain image
     pub graph: Vec<CompiledRenderGraph>,
@@ -167,7 +175,7 @@ impl WorldRenderer {
                     }
                 }
                 GraphCommand::BindPipeline(pipeline_bind_point, pipeline_handle) => {
-                    let pipeline = self.pipelines[pipeline_handle.arr_index].pipeline;
+                    let pipeline = self.pipelines.pipelines[pipeline_handle.arr_index].pipeline;
                     unsafe {
                         device.cmd_bind_pipeline(command_buffer, *pipeline_bind_point, pipeline);
                         device.cmd_set_viewport(command_buffer, 0, &[viewport]);
@@ -177,7 +185,7 @@ impl WorldRenderer {
                     for job in job_list {
                         assert_eq!(
                             job.descriptor_sets.len(),
-                            self.pipelines[pipeline_handle.arr_index]
+                            self.pipelines.pipelines[pipeline_handle.arr_index]
                                 .descriptor_set_layouts
                                 .len(),
                             "must be an equal amount of descriptor sets as descriptor set layouts"
@@ -187,7 +195,7 @@ impl WorldRenderer {
                             device.cmd_bind_descriptor_sets(
                                 command_buffer,
                                 vk::PipelineBindPoint::GRAPHICS,
-                                self.pipelines[pipeline_handle.arr_index].layout,
+                                self.pipelines.pipelines[pipeline_handle.arr_index].layout,
                                 0,
                                 &job.descriptor_sets,
                                 &[],
@@ -240,9 +248,9 @@ impl WorldRenderer {
         world: &mut World,
     ) -> Vec<Vec<DrawJob>> {
         // indexed by pipelinekey, then just everything that belongs in that pipeline
-        let mut jobs: Vec<Vec<DrawJob>> = Vec::with_capacity(self.pipelines.len());
+        let mut jobs: Vec<Vec<DrawJob>> = Vec::with_capacity(self.pipelines.pipelines.len());
 
-        for pipeline in &self.pipelines {
+        for pipeline in &self.pipelines.pipelines {
             let job_set = (pipeline.write_data_and_build_draw_jobs)(
                 device,
                 resource_manager,
@@ -263,16 +271,15 @@ impl WorldRenderer {
             vk::Format::R16G16B16A16_SFLOAT,
             vk::Format::R32G32B32A32_SFLOAT,
         ];
-        let pipelines = create_builtin_graphics_pipelines(
+        let (graph, pipelines, ids) = create_builtin_graphics_pipelines(
             context.device.clone(),
             swapchain_resources.swapchain_image_format.format,
             vk::Format::D32_SFLOAT,
             &color_formats,
         );
         //HACK: yes this is a magic number, but its defined in the shader, so not resonable to fix
-        // Index 2 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
-        let per_swapchain_image_set_layout =
-            pipelines[PipelineKey::Ambient as usize].descriptor_set_layouts[0];
+        // Index 3 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
+        let per_swapchain_image_set_layout = pipelines.pipelines[3].descriptor_set_layouts[0];
         let sampler = unsafe {
             context.device.create_sampler(
                 &vk::SamplerCreateInfo {
@@ -315,93 +322,11 @@ impl WorldRenderer {
                 .unwrap()
         };
 
-        let _image_size = swapchain_resources.image_size;
-        let mut graph = RenderGraph::new();
-
-        let mut final_color = graph.add_image(ImageDesc::Imported {
-            name: "final_color",
-            format: swapchain_resources.swapchain_image_format.format,
-        });
-        let mut albedo = graph.add_image(ImageDesc::Managed {
-            name: "albedo",
-            format: vk::Format::A2B10G10R10_UNORM_PACK32,
-        });
-        let mut normal = graph.add_image(ImageDesc::Managed {
-            name: "normal",
-            format: vk::Format::R16G16B16A16_SFLOAT,
-        });
-        let mut position = graph.add_image(ImageDesc::Managed {
-            name: "position",
-            format: vk::Format::R32G32B32A32_SFLOAT,
-        });
-        let mut depth = graph.add_image(ImageDesc::Managed {
-            name: "depth",
-            format: vk::Format::D32_SFLOAT,
-        });
-        let graph = graph
-            .add_pipeline("static_geometry")
-            .pipeline(PipelineHandle { arr_index: 0 })
-            .writes(&mut albedo)
-            .writes(&mut normal)
-            .writes(&mut position)
-            .writes_depth(&mut depth)
-            .build();
-        let graph = graph
-            .add_pipeline("animated_geometry")
-            .pipeline(PipelineHandle { arr_index: 1 })
-            .writes(&mut albedo)
-            .writes(&mut normal)
-            .writes(&mut position)
-            .writes_depth(&mut depth)
-            .build();
-        let graph = graph
-            .add_pipeline("terrain")
-            .pipeline(PipelineHandle { arr_index: 2 })
-            .writes(&mut albedo)
-            .writes(&mut normal)
-            .writes(&mut position)
-            .writes_depth(&mut depth)
-            .build();
-        let graph = graph
-            .add_pipeline("ambient_light")
-            .pipeline(PipelineHandle { arr_index: 3 })
-            .reads(&albedo)
-            .reads(&normal)
-            .reads(&position)
-            .reads_depth(&depth)
-            .writes(&mut final_color)
-            .build();
-        let graph = graph
-            .add_pipeline("directional_light")
-            .pipeline(PipelineHandle { arr_index: 4 })
-            .reads(&albedo)
-            .reads(&normal)
-            .reads(&position)
-            .reads_depth(&depth)
-            .writes(&mut final_color)
-            .build();
-        let graph = graph
-            .add_pipeline("point_light")
-            .pipeline(PipelineHandle { arr_index: 5 })
-            .reads(&albedo)
-            .reads(&normal)
-            .reads(&position)
-            .reads_depth(&depth)
-            .writes(&mut final_color)
-            .build();
-
-        let graph = graph
-            .add_pipeline("skybox")
-            .pipeline(PipelineHandle { arr_index: 6 })
-            .writes(&mut final_color)
-            .reads_depth(&depth)
-            .build();
-
         let mut graphs = Vec::new();
         for i in 0..swapchain_resources.swapchain_images.len() {
             let mut imported_images = HashMap::new();
             imported_images.insert(
-                final_color.id,
+                ids.final_color,
                 ImportedImageBinding {
                     pre_initialized: false,
                     image: swapchain_resources.swapchain_images[i],
@@ -422,15 +347,15 @@ impl WorldRenderer {
 
         let albedo_views: Vec<vk::ImageView> = graphs
             .iter()
-            .map(|g| g.get_view_from_id(&albedo.id))
+            .map(|g| g.get_view_from_id(&ids.albedo))
             .collect();
         let normal_views: Vec<vk::ImageView> = graphs
             .iter()
-            .map(|g| g.get_view_from_id(&normal.id))
+            .map(|g| g.get_view_from_id(&ids.normal))
             .collect();
         let position_views: Vec<vk::ImageView> = graphs
             .iter()
-            .map(|g| g.get_view_from_id(&position.id))
+            .map(|g| g.get_view_from_id(&ids.position))
             .collect();
 
         let descriptor_sets = create_attachment_descriptor_sets(
@@ -447,8 +372,8 @@ impl WorldRenderer {
         );
 
         WorldRenderer {
-            image_attachment_order: [albedo.id, normal.id, position.id],
-            swapchain_image_id: final_color.id,
+            image_attachment_order: [ids.albedo, ids.normal, ids.position],
+            swapchain_image_id: ids.final_color,
             graph: graphs,
             rendergraph_config: graph,
             device: context.device.clone(),

@@ -8,12 +8,14 @@ use std::{
 };
 
 use ash::vk;
-use rspirv_reflect::{self as rr, rspirv::binary::Assemble, Reflection};
+use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 use ultraviolet::Slerp;
 
 use crate::core::TerrainMap;
 use crate::ecs::{Not, Opt, OptM, ReqM, World};
-use crate::renderers::world::draw::DrawStyle;
+use crate::renderers::world::descriptors::DescriptorWriteBuilder;
+use crate::renderers::world::draw::{DrawStyle, Ids};
+use crate::renderers::world::rendergraph::{ImageDesc, RenderGraph};
 use crate::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, Vertex};
 use crate::resources::{Material, Mesh, ResourceManager, Skybox};
 use crate::ubo::{
@@ -29,7 +31,65 @@ use crate::{
 pub struct PipelineHandle {
     pub arr_index: usize,
 }
+
+pub struct PipelineManager {
+    pub pipelines: Vec<PipelineBundle>,
+    device: Arc<ash::Device>,
+}
+impl PipelineManager {
+    fn new(device: Arc<ash::Device>) -> Self {
+        Self {
+            pipelines: Vec::new(),
+            device,
+        }
+    }
+    fn get_by_name(&self, name: &str) -> Option<&PipelineBundle> {
+        self.pipelines.iter().find(|x| x.name == name)
+    }
+    fn add_pipeline(
+        &mut self,
+        name: &'static str,
+        vertex_path: &path::Path,
+        fragment_path: &path::Path,
+        desc: &GraphicsPipelineDesc,
+        pipeline_fn: PipelineFn,
+    ) -> PipelineHandle {
+        let pipeline_data =
+            create_pipeline_layout_from_vert_frag(self.device.clone(), vertex_path, fragment_path);
+
+        let pipeline =
+            create_graphics_pipeline(&self.device, desc, &pipeline_data.0, pipeline_data.1)
+                .unwrap();
+
+        let bundle = PipelineBundle {
+            name,
+            layout: pipeline_data.1,
+            pipeline,
+            descriptor_set_layouts: pipeline_data.2,
+            write_data_and_build_draw_jobs: pipeline_fn,
+            device: self.device.clone(),
+        };
+        self.pipelines.push(bundle);
+        PipelineHandle {
+            arr_index: self.pipelines.len() - 1,
+        }
+    }
+}
+
+type PipelineFn = Box<
+    dyn Fn(
+        &ash::Device,
+        &mut ResourceManager,
+        vk::DescriptorPool,
+        &mut World,
+        &Vec<vk::DescriptorSetLayout>,
+        // for swapchain image descriptor set
+        &vk::DescriptorSet,
+    ) -> Vec<DrawJob>,
+>;
+
 pub struct PipelineBundle {
+    pub name: &'static str,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
@@ -37,17 +97,7 @@ pub struct PipelineBundle {
     //PERF: this eventually should be replaced with a system that knows what components have a gpu
     //side and queries them all and writes, but too much effort for now(would probably need a
     //proc-marco)
-    pub write_data_and_build_draw_jobs: Box<
-        dyn Fn(
-            &ash::Device,
-            &mut ResourceManager,
-            vk::DescriptorPool,
-            &mut World,
-            &Vec<vk::DescriptorSetLayout>,
-            // for swapchain image descriptor set
-            &vk::DescriptorSet,
-        ) -> Vec<DrawJob>,
-    >,
+    pub write_data_and_build_draw_jobs: PipelineFn,
     device: Arc<ash::Device>,
 }
 impl Drop for PipelineBundle {
@@ -62,22 +112,6 @@ impl Drop for PipelineBundle {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-#[derive(Debug)]
-pub enum PipelineKey {
-    Geometry = 0,
-    Terrain,
-    AnimatedGeometry,
-    Directional,
-    Ambient,
-    Point,
-    Skybox,
-    // anything this and after is fairgame to be created from a number
-    CustomStart,
-    End = u32::MAX,
-}
-
 // CREATE ALL THE ENGINES BUILTIN GRAPHICS PIPELINES(I want to extend to being able to add your
 // own)
 pub fn create_builtin_graphics_pipelines(
@@ -85,49 +119,10 @@ pub fn create_builtin_graphics_pipelines(
     swapchain_image_format: vk::Format,
     depth_format: vk::Format,
     color_attachment_formats: &[vk::Format],
-) -> Vec<PipelineBundle> {
-    let static_geometry = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/static_geometry_vert.spv"),
-        Path::new("shaders/geometry_frag.spv"),
-    );
-    let heightmap = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/terrain_vert.spv"),
-        Path::new("shaders/terrain_frag.spv"),
-    );
-    let animated_geometry = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/animated_geometry_vert.spv"),
-        Path::new("shaders/geometry_frag.spv"),
-    );
-    let directional_layouts = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/directional_vert.spv"),
-        Path::new("shaders/directional_frag.spv"),
-    );
-
-    let ambient = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/ambient_vert.spv"),
-        Path::new("shaders/ambient_frag.spv"),
-    );
-
-    let point = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/point_vert.spv"),
-        Path::new("shaders/point_frag.spv"),
-    );
-    let skybox = create_pipeline_layout_from_vert_frag(
-        device.clone(),
-        Path::new("shaders/skybox_vert.spv"),
-        Path::new("shaders/skybox_frag.spv"),
-    );
-
-    let static_geometry_desc = GraphicsPipelineDesc {
-        pipeline_layout: static_geometry.1,
-        shaders: &static_geometry.0,
+) -> (RenderGraph, PipelineManager, Ids) {
+    let geometry_desc = GraphicsPipelineDesc {
         tesselation_state: None,
+        viewport_state: None,
         dynamic_state: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
         multisample_state: MultisampleState {
             rasterization_samples: vk::SampleCountFlags::TYPE_1,
@@ -184,125 +179,77 @@ pub fn create_builtin_graphics_pipelines(
             min_depth_bounds: 0.0,
             max_depth_bounds: 0.0,
         },
-        viewport_state: None,
         depth_attachment_format: Some(depth_format),
         color_attachment_formats: color_attachment_formats.to_vec(),
     };
-    let static_geometry_pipeline =
-        create_graphics_pipeline(&device, &static_geometry_desc).unwrap();
 
-    let mut heightmap_desc = static_geometry_desc;
-
-    // need to replace vertex with an empty vertex type
-    heightmap_desc
-        .vertex_input_state
-        .vertex_attribute_descriptions = Vertex::get_vertex_attributes();
-    heightmap_desc
-        .vertex_input_state
-        .vertex_binding_descriptions = vec![vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<Vertex>() as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
-    }];
-
-    heightmap_desc.pipeline_layout = heightmap.1;
-    heightmap_desc.shaders = &heightmap.0;
-    let heightmap_pipeline = create_graphics_pipeline(&device, &heightmap_desc).unwrap();
-
-    let mut animated_geometry_desc = heightmap_desc;
-    animated_geometry_desc
-        .vertex_input_state
-        .vertex_attribute_descriptions = AnimatedVertex::get_vertex_attributes();
-    animated_geometry_desc
-        .vertex_input_state
-        .vertex_binding_descriptions = vec![vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<AnimatedVertex>() as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
-    }];
-    animated_geometry_desc.pipeline_layout = animated_geometry.1;
-    animated_geometry_desc.shaders = &animated_geometry.0;
-    let animated_geometry_pipeline =
-        create_graphics_pipeline(&device, &animated_geometry_desc).unwrap();
-
-    let mut ambient_desc = animated_geometry_desc;
-    ambient_desc.color_attachment_formats = vec![swapchain_image_format];
-    ambient_desc.depth_stencil_state.depth_write_enable = false;
-    ambient_desc.color_blend_state = ColorBlendState {
-        logic_op: None,
-        blend_constants: [0.0; 4],
-        attachments: vec![
-            vk::PipelineColorBlendAttachmentState {
-                color_blend_op: vk::BlendOp::ADD,
-                src_color_blend_factor: vk::BlendFactor::ONE,
-                dst_color_blend_factor: vk::BlendFactor::ONE,
-                alpha_blend_op: vk::BlendOp::MAX,
-                src_alpha_blend_factor: vk::BlendFactor::ONE,
-                dst_alpha_blend_factor: vk::BlendFactor::ONE,
-                color_write_mask: vk::ColorComponentFlags::RGBA,
-                blend_enable: vk::TRUE,
-                ..Default::default()
-            };
-            1
-        ],
-    };
-    ambient_desc
-        .vertex_input_state
-        .vertex_attribute_descriptions = Vertex::get_vertex_attributes();
-    ambient_desc.vertex_input_state.vertex_binding_descriptions =
-        vec![vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<Vertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-    ambient_desc.pipeline_layout = ambient.1;
-    ambient_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::ALWAYS;
-    ambient_desc.shaders = &ambient.0;
-    let ambient_pipeline = create_graphics_pipeline(&device, &ambient_desc).unwrap();
-
-    let mut directional_desc = ambient_desc;
-
-    directional_desc.pipeline_layout = directional_layouts.1;
-    directional_desc.shaders = &directional_layouts.0;
-    let directional_pipeline = create_graphics_pipeline(&device, &directional_desc).unwrap();
-
-    let mut point_desc = directional_desc;
-
-    point_desc.pipeline_layout = point.1;
-    point_desc.shaders = &point.0;
-    let point_pipeline = create_graphics_pipeline(&device, &point_desc).unwrap();
-
-    let mut skybox_desc = point_desc;
-
-    skybox_desc.depth_attachment_format = Some(depth_format); // add this
-    skybox_desc.pipeline_layout = skybox.1;
-    skybox_desc.pipeline_layout = skybox.1;
-    skybox_desc.shaders = &skybox.0;
-    skybox_desc.depth_stencil_state.depth_test_enable = true;
-    skybox_desc.depth_stencil_state.depth_write_enable = false;
-    skybox_desc.depth_stencil_state.depth_compare_op = vk::CompareOp::EQUAL;
-    skybox_desc.color_blend_state = ColorBlendState {
-        logic_op: None,
-        attachments: vec![
-            vk::PipelineColorBlendAttachmentState {
-                blend_enable: vk::FALSE,
-                color_write_mask: vk::ColorComponentFlags::RGBA,
-                ..Default::default()
-            };
-            1
-        ],
-        blend_constants: [0.0; 4],
+    let animated_geometry_desc = GraphicsPipelineDesc {
+        vertex_input_state: VertexInputState {
+            vertex_attribute_descriptions: AnimatedVertex::get_vertex_attributes(),
+            vertex_binding_descriptions: vec![vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: std::mem::size_of::<AnimatedVertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            }],
+        },
+        ..geometry_desc.clone()
     };
 
-    let skybox_pipeline = create_graphics_pipeline(&device, &skybox_desc).unwrap();
+    let lighting_desc = GraphicsPipelineDesc {
+        color_attachment_formats: vec![swapchain_image_format],
+        color_blend_state: ColorBlendState {
+            logic_op: None,
+            blend_constants: [0.0; 4],
+            attachments: vec![
+                vk::PipelineColorBlendAttachmentState {
+                    color_blend_op: vk::BlendOp::ADD,
+                    src_color_blend_factor: vk::BlendFactor::ONE,
+                    dst_color_blend_factor: vk::BlendFactor::ONE,
+                    alpha_blend_op: vk::BlendOp::MAX,
+                    src_alpha_blend_factor: vk::BlendFactor::ONE,
+                    dst_alpha_blend_factor: vk::BlendFactor::ONE,
+                    color_write_mask: vk::ColorComponentFlags::RGBA,
+                    blend_enable: vk::TRUE,
+                };
+                1
+            ],
+        },
+        depth_stencil_state: DepthStencilState {
+            depth_write_enable: false,
+            depth_compare_op: vk::CompareOp::ALWAYS,
+            ..geometry_desc.depth_stencil_state.clone()
+        },
+        ..geometry_desc.clone()
+    };
 
-    let mut pipelines = Vec::new();
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: static_geometry_pipeline,
-        layout: static_geometry.1,
-        descriptor_set_layouts: static_geometry.2,
-        write_data_and_build_draw_jobs: Box::new(
+    let skybox_desc = GraphicsPipelineDesc {
+        color_blend_state: ColorBlendState {
+            logic_op: None,
+            attachments: vec![
+                vk::PipelineColorBlendAttachmentState {
+                    blend_enable: vk::FALSE,
+                    color_write_mask: vk::ColorComponentFlags::RGBA,
+                    ..Default::default()
+                };
+                1
+            ],
+            blend_constants: [0.0; 4],
+        },
+        depth_stencil_state: DepthStencilState {
+            depth_write_enable: false,
+            depth_compare_op: vk::CompareOp::EQUAL,
+            ..geometry_desc.depth_stencil_state.clone()
+        },
+        ..lighting_desc.clone()
+    };
+
+    let mut pipeline_manager = PipelineManager::new(device.clone());
+    let static_geometry = pipeline_manager.add_pipeline(
+        "static_geometry",
+        Path::new("shaders/static_geometry_vert.spv"),
+        Path::new("shaders/geometry_frag.spv"),
+        &geometry_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -361,14 +308,14 @@ pub fn create_builtin_graphics_pipelines(
                 jobs
             },
         ),
-    });
+    );
 
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: animated_geometry_pipeline,
-        layout: animated_geometry.1,
-        descriptor_set_layouts: animated_geometry.2,
-        write_data_and_build_draw_jobs: Box::new(
+    let animated_geometry = pipeline_manager.add_pipeline(
+        "animated_geometry",
+        Path::new("shaders/animated_geometry_vert.spv"),
+        Path::new("shaders/geometry_frag.spv"),
+        &animated_geometry_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -416,111 +363,109 @@ pub fn create_builtin_graphics_pipelines(
                         continue;
                     }
                     if let Some(animation) = animation
-                        && let Some(current) = &animation.current_playing {
-                            let animation_impl = &resource_manager.animation_resources.animations
-                                [animation.skeleton.id][current.id];
-                            let skeleton_impl = &mut resource_manager.animation_resources.skeletons
-                                [animation.skeleton.id];
-                            animation.time += 0.013333;
-                            for channel in &animation_impl.channels {
-                                if animation.time > *channel.timestamps.last().unwrap() {
-                                    animation.time = 0.0;
+                        && let Some(current) = &animation.current_playing
+                    {
+                        let animation_impl = &resource_manager.animation_resources.animations
+                            [animation.skeleton.id][current.id];
+                        let skeleton_impl = &mut resource_manager.animation_resources.skeletons
+                            [animation.skeleton.id];
+                        animation.time += 0.013333;
+                        for channel in &animation_impl.channels {
+                            if animation.time > *channel.timestamps.last().unwrap() {
+                                animation.time = 0.0;
+                            }
+                            let next_timestamp_idx = channel
+                                .timestamps
+                                .iter()
+                                .position(|x| *x > animation.time)
+                                .unwrap_or(channel.timestamps.len() - 1);
+
+                            let current_timestamp_idx = next_timestamp_idx.saturating_sub(1);
+
+                            match &channel.keyframes {
+                                Keyframes::Translation(translation_frames) => {
+                                    assert_eq!(translation_frames.len(), channel.timestamps.len());
+
+                                    // less than current_time
+                                    let t1 = channel.timestamps[current_timestamp_idx];
+                                    // more than current_time
+                                    let t2 = channel.timestamps[next_timestamp_idx];
+                                    let frame_1 = translation_frames[current_timestamp_idx];
+                                    let frame_2 = translation_frames[next_timestamp_idx];
+
+                                    let time_between = t2 - t1;
+                                    let time_since_t1 = animation.time - t1;
+
+                                    let mut percent = time_since_t1 / time_between;
+                                    if time_between < 1e-6 {
+                                        percent = 0.0;
+                                    }
+
+                                    // standard lerp(i am ignoring cubic bezier or step options
+                                    // for now)
+                                    let interpolated =
+                                        frame_1 * (1.0 - percent) + frame_2 * percent;
+
+                                    skeleton_impl.joints[channel.target_joint_index].position =
+                                        interpolated;
                                 }
-                                let next_timestamp_idx = channel
-                                    .timestamps
-                                    .iter()
-                                    .position(|x| *x > animation.time)
-                                    .unwrap_or(channel.timestamps.len() - 1);
+                                Keyframes::Rotation(rotation_frames) => {
+                                    assert_eq!(rotation_frames.len(), channel.timestamps.len());
 
-                                let current_timestamp_idx = next_timestamp_idx.saturating_sub(1);
+                                    // less than current_time
+                                    let t1 = channel.timestamps[current_timestamp_idx];
+                                    // more than current_time
+                                    let t2 = channel.timestamps[next_timestamp_idx];
+                                    let frame_1 = rotation_frames[current_timestamp_idx];
+                                    let frame_2 = rotation_frames[next_timestamp_idx];
 
-                                match &channel.keyframes {
-                                    Keyframes::Translation(translation_frames) => {
-                                        assert_eq!(
-                                            translation_frames.len(),
-                                            channel.timestamps.len()
-                                        );
+                                    let time_between = t2 - t1;
+                                    let time_since_t1 = animation.time - t1;
 
-                                        // less than current_time
-                                        let t1 = channel.timestamps[current_timestamp_idx];
-                                        // more than current_time
-                                        let t2 = channel.timestamps[next_timestamp_idx];
-                                        let frame_1 = translation_frames[current_timestamp_idx];
-                                        let frame_2 = translation_frames[next_timestamp_idx];
-
-                                        let time_between = t2 - t1;
-                                        let time_since_t1 = animation.time - t1;
-
-                                        let mut percent = time_since_t1 / time_between;
-                                        if time_between < 1e-6 {
-                                            percent = 0.0;
-                                        }
-
-                                        // standard lerp(i am ignoring cubic bezier or step options
-                                        // for now)
-                                        let interpolated =
-                                            frame_1 * (1.0 - percent) + frame_2 * percent;
-
-                                        skeleton_impl.joints[channel.target_joint_index].position =
-                                            interpolated;
+                                    let mut percent = time_since_t1 / time_between;
+                                    if time_between < 1e-6 {
+                                        percent = 0.0;
                                     }
-                                    Keyframes::Rotation(rotation_frames) => {
-                                        assert_eq!(rotation_frames.len(), channel.timestamps.len());
 
-                                        // less than current_time
-                                        let t1 = channel.timestamps[current_timestamp_idx];
-                                        // more than current_time
-                                        let t2 = channel.timestamps[next_timestamp_idx];
-                                        let frame_1 = rotation_frames[current_timestamp_idx];
-                                        let frame_2 = rotation_frames[next_timestamp_idx];
+                                    // standard lerp(i am ignoring cubic bezier or step options
+                                    // for now)
+                                    let interpolated = frame_1.slerp(frame_2, percent);
 
-                                        let time_between = t2 - t1;
-                                        let time_since_t1 = animation.time - t1;
+                                    skeleton_impl.joints[channel.target_joint_index].rotation =
+                                        interpolated;
+                                }
+                                Keyframes::Scale(scale_frames) => {
+                                    assert_eq!(scale_frames.len(), channel.timestamps.len());
 
-                                        let mut percent = time_since_t1 / time_between;
-                                        if time_between < 1e-6 {
-                                            percent = 0.0;
-                                        }
+                                    // less than current_time
+                                    let t1 = channel.timestamps[current_timestamp_idx];
+                                    // more than current_time
+                                    let t2 = channel.timestamps[next_timestamp_idx];
+                                    let frame_1 = scale_frames[current_timestamp_idx];
+                                    let frame_2 = scale_frames[next_timestamp_idx];
 
-                                        // standard lerp(i am ignoring cubic bezier or step options
-                                        // for now)
-                                        let interpolated = frame_1.slerp(frame_2, percent);
+                                    let time_between = t2 - t1;
+                                    let time_since_t1 = animation.time - t1;
 
-                                        skeleton_impl.joints[channel.target_joint_index].rotation =
-                                            interpolated;
+                                    let mut percent = time_since_t1 / time_between;
+                                    if time_between < 1e-6 {
+                                        percent = 0.0;
                                     }
-                                    Keyframes::Scale(scale_frames) => {
-                                        assert_eq!(scale_frames.len(), channel.timestamps.len());
 
-                                        // less than current_time
-                                        let t1 = channel.timestamps[current_timestamp_idx];
-                                        // more than current_time
-                                        let t2 = channel.timestamps[next_timestamp_idx];
-                                        let frame_1 = scale_frames[current_timestamp_idx];
-                                        let frame_2 = scale_frames[next_timestamp_idx];
+                                    // standard lerp(i am ignoring cubic bezier or step options
+                                    // for now)
+                                    let interpolated =
+                                        frame_1 * (1.0 - percent) + frame_2 * percent;
 
-                                        let time_between = t2 - t1;
-                                        let time_since_t1 = animation.time - t1;
-
-                                        let mut percent = time_since_t1 / time_between;
-                                        if time_between < 1e-6 {
-                                            percent = 0.0;
-                                        }
-
-                                        // standard lerp(i am ignoring cubic bezier or step options
-                                        // for now)
-                                        let interpolated =
-                                            frame_1 * (1.0 - percent) + frame_2 * percent;
-
-                                        skeleton_impl.joints[channel.target_joint_index].scale =
-                                            interpolated;
-                                    }
+                                    skeleton_impl.joints[channel.target_joint_index].scale =
+                                        interpolated;
                                 }
                             }
-                            skeleton_impl.update_global_transforms();
+                        }
+                        skeleton_impl.update_global_transforms();
 
-                            resource_manager.animation_resources.write_bones();
-                        };
+                        resource_manager.animation_resources.write_bones();
+                    };
 
                     let model_set = builder.add_uniform_buffer::<ModelUBO>(
                         resource_manager,
@@ -553,13 +498,13 @@ pub fn create_builtin_graphics_pipelines(
                 jobs
             },
         ),
-    });
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: heightmap_pipeline,
-        layout: heightmap.1,
-        descriptor_set_layouts: heightmap.2,
-        write_data_and_build_draw_jobs: Box::new(
+    );
+    let terrain = pipeline_manager.add_pipeline(
+        "terrain",
+        Path::new("shaders/terrain_vert.spv"),
+        Path::new("shaders/terrain_frag.spv"),
+        &geometry_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -615,14 +560,14 @@ pub fn create_builtin_graphics_pipelines(
                 jobs
             },
         ),
-    });
+    );
 
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: ambient_pipeline,
-        layout: ambient.1,
-        descriptor_set_layouts: ambient.2,
-        write_data_and_build_draw_jobs: Box::new(
+    let ambient = pipeline_manager.add_pipeline(
+        "ambient",
+        Path::new("shaders/ambient_vert.spv"),
+        Path::new("shaders/ambient_frag.spv"),
+        &lighting_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -646,13 +591,13 @@ pub fn create_builtin_graphics_pipelines(
                 }]
             },
         ),
-    });
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: directional_pipeline,
-        layout: directional_layouts.1,
-        descriptor_set_layouts: directional_layouts.2,
-        write_data_and_build_draw_jobs: Box::new(
+    );
+    let directional = pipeline_manager.add_pipeline(
+        "directional",
+        Path::new("shaders/directional_vert.spv"),
+        Path::new("shaders/directional_frag.spv"),
+        &lighting_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -676,13 +621,13 @@ pub fn create_builtin_graphics_pipelines(
                 }]
             },
         ),
-    });
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: point_pipeline,
-        layout: point.1,
-        descriptor_set_layouts: point.2,
-        write_data_and_build_draw_jobs: Box::new(
+    );
+    let point = pipeline_manager.add_pipeline(
+        "point",
+        Path::new("shaders/point_vert.spv"),
+        Path::new("shaders/point_frag.spv"),
+        &lighting_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -713,13 +658,13 @@ pub fn create_builtin_graphics_pipelines(
                 jobs
             },
         ),
-    });
-    pipelines.push(PipelineBundle {
-        device: device.clone(),
-        pipeline: skybox_pipeline,
-        layout: skybox.1,
-        descriptor_set_layouts: skybox.2,
-        write_data_and_build_draw_jobs: Box::new(
+    );
+    let skybox = pipeline_manager.add_pipeline(
+        "skybox",
+        Path::new("shaders/skybox_vert.spv"),
+        Path::new("shaders/skybox_frag.spv"),
+        &skybox_desc,
+        Box::new(
             |device,
              resource_manager,
              descriptor_pool,
@@ -751,16 +696,107 @@ pub fn create_builtin_graphics_pipelines(
                 }]
             },
         ),
+    );
+    let mut graph = RenderGraph::new();
+
+    let mut final_color = graph.add_image(ImageDesc::Imported {
+        name: "final_color",
+        format: swapchain_image_format,
     });
-    pipelines
+    let mut albedo = graph.add_image(ImageDesc::Managed {
+        name: "albedo",
+        format: vk::Format::A2B10G10R10_UNORM_PACK32,
+    });
+    let mut normal = graph.add_image(ImageDesc::Managed {
+        name: "normal",
+        format: vk::Format::R16G16B16A16_SFLOAT,
+    });
+    let mut position = graph.add_image(ImageDesc::Managed {
+        name: "position",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
+    let mut depth = graph.add_image(ImageDesc::Managed {
+        name: "depth",
+        format: vk::Format::D32_SFLOAT,
+    });
+    let graph = graph
+        .add_pipeline("static_geometry")
+        .pipeline(static_geometry)
+        .writes(&mut albedo)
+        .writes(&mut normal)
+        .writes(&mut position)
+        .writes_depth(&mut depth)
+        .build();
+    let graph = graph
+        .add_pipeline("animated_geometry")
+        .pipeline(animated_geometry)
+        .writes(&mut albedo)
+        .writes(&mut normal)
+        .writes(&mut position)
+        .writes_depth(&mut depth)
+        .build();
+    let graph = graph
+        .add_pipeline("terrain")
+        .pipeline(terrain)
+        .writes(&mut albedo)
+        .writes(&mut normal)
+        .writes(&mut position)
+        .writes_depth(&mut depth)
+        .build();
+    let graph = graph
+        .add_pipeline("ambient_light")
+        .pipeline(ambient)
+        .reads(&albedo)
+        .reads(&normal)
+        .reads(&position)
+        .reads_depth(&depth)
+        .writes(&mut final_color)
+        .build();
+    let graph = graph
+        .add_pipeline("directional_light")
+        .pipeline(directional)
+        .reads(&albedo)
+        .reads(&normal)
+        .reads(&position)
+        .reads_depth(&depth)
+        .writes(&mut final_color)
+        .build();
+    let graph = graph
+        .add_pipeline("point_light")
+        .pipeline(point)
+        .reads(&albedo)
+        .reads(&normal)
+        .reads(&position)
+        .reads_depth(&depth)
+        .writes(&mut final_color)
+        .build();
+
+    let graph = graph
+        .add_pipeline("skybox")
+        .pipeline(skybox)
+        .writes(&mut final_color)
+        .reads_depth(&depth)
+        .build();
+    (
+        graph,
+        pipeline_manager,
+        Ids {
+            albedo: albedo.id,
+            position: position.id,
+            normal: normal.id,
+            final_color: final_color.id,
+        },
+    )
 }
 
 /*--------------PIPELINE CREATION HELPERS-------------
 -----------------------------------------------------*/
+#[derive(Clone)]
 pub struct VertexInputState {
     pub vertex_binding_descriptions: Vec<vk::VertexInputBindingDescription>,
     pub vertex_attribute_descriptions: Vec<vk::VertexInputAttributeDescription>,
 }
+#[derive(Clone)]
 pub struct InputAssemblyState {
     pub topology: vk::PrimitiveTopology,
     pub primitive_restart_enable: bool,
@@ -769,6 +805,7 @@ pub struct SpecalizationInfo {
     pub map_entries: Vec<vk::SpecializationMapEntry>,
     pub data: Vec<u8>,
 }
+#[derive(Clone)]
 pub struct Viewport {
     pub viewport: Vec<vk::Viewport>,
     pub scissor: Vec<vk::Rect2D>,
@@ -792,6 +829,7 @@ impl Drop for ShaderStage {
     }
 }
 
+#[derive(Clone)]
 pub struct RasterState {
     pub depth_clamp_enable: bool,
     pub rasterizer_discard_enable: bool,
@@ -805,6 +843,7 @@ pub struct RasterState {
     pub line_width: f32,
 }
 
+#[derive(Clone)]
 pub struct MultisampleState {
     pub rasterization_samples: vk::SampleCountFlags,
     pub sample_shading_enable: bool,
@@ -814,11 +853,13 @@ pub struct MultisampleState {
     pub alpha_to_one_enable: bool,
 }
 
+#[derive(Clone)]
 pub struct ColorBlendState {
     pub logic_op: Option<vk::LogicOp>,
     pub attachments: Vec<vk::PipelineColorBlendAttachmentState>,
     pub blend_constants: [f32; 4],
 }
+#[derive(Clone)]
 pub struct DepthStencilState {
     pub depth_test_enable: bool,
     pub depth_write_enable: bool,
@@ -831,12 +872,13 @@ pub struct DepthStencilState {
     pub max_depth_bounds: f32,
 }
 
+#[derive(Clone)]
 pub struct TesselationState {
     pub patch_control_points: u32,
 }
 
-pub struct GraphicsPipelineDesc<'a> {
-    pub shaders: &'a [ShaderStage],
+#[derive(Clone)]
+pub struct GraphicsPipelineDesc {
     pub vertex_input_state: VertexInputState,
     pub input_assembly: InputAssemblyState,
     pub viewport_state: Option<Viewport>,
@@ -846,7 +888,6 @@ pub struct GraphicsPipelineDesc<'a> {
     pub color_blend_state: ColorBlendState,
     pub dynamic_state: Vec<vk::DynamicState>,
     pub tesselation_state: Option<TesselationState>,
-    pub pipeline_layout: vk::PipelineLayout,
     pub color_attachment_formats: Vec<vk::Format>,
     pub depth_attachment_format: Option<vk::Format>,
 }
@@ -854,24 +895,22 @@ pub struct GraphicsPipelineDesc<'a> {
 pub fn create_graphics_pipeline(
     device: &ash::Device,
     desc: &GraphicsPipelineDesc,
+    shaders: &[ShaderStage],
+    pipeline_layout: vk::PipelineLayout,
 ) -> Result<vk::Pipeline, (vk::Pipeline, vk::Result)> {
     let mut stages = Vec::new();
-    for shader in desc.shaders {
-        let specalization_info;
-        match &shader.specalization_info {
-            Some(info) => {
-                specalization_info = Some(vk::SpecializationInfo {
+    for shader in shaders {
+        let specalization_info =
+            shader
+                .specalization_info
+                .as_ref()
+                .map(|info| vk::SpecializationInfo {
                     map_entry_count: info.map_entries.len() as u32,
                     p_map_entries: info.map_entries.as_ptr(),
                     p_data: info.data.as_ptr() as *const c_void,
                     data_size: info.data.len(),
                     _marker: marker::PhantomData,
                 });
-            }
-            None => {
-                specalization_info = None;
-            }
-        }
 
         stages.push(vk::PipelineShaderStageCreateInfo {
             p_specialization_info: specalization_info.as_ref().map_or(ptr::null(), |info| info),
@@ -985,11 +1024,14 @@ pub fn create_graphics_pipeline(
         ..Default::default()
     };
 
-    let tesselation_state = desc.tesselation_state.as_ref().map(|x| vk::PipelineTessellationStateCreateInfo {
-            patch_control_points: x.patch_control_points,
+    let tesselation_state =
+        desc.tesselation_state
+            .as_ref()
+            .map(|x| vk::PipelineTessellationStateCreateInfo {
+                patch_control_points: x.patch_control_points,
 
-            ..Default::default()
-        });
+                ..Default::default()
+            });
     let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo {
         color_attachment_count: desc.color_attachment_formats.len() as u32,
         p_color_attachment_formats: desc.color_attachment_formats.as_ptr(),
@@ -1036,7 +1078,7 @@ pub fn create_graphics_pipeline(
             .as_ref()
             .map_or(ptr::null(), |x| x as *const _),
 
-        layout: desc.pipeline_layout,
+        layout: pipeline_layout,
 
         // if deriving from a graphics pipeline, the index
         base_pipeline_index: 0,
@@ -1255,169 +1297,12 @@ fn load_path_data(path: &path::Path) -> Reflection {
 fn get_entry_name(reflection: &Reflection) -> ffi::CString {
     let entry_point_name =
         reflection.0.entry_points[0].operands[ASM_ENTRY_POINT_NAME_IDX].unwrap_literal_string();
-    
+
     ffi::CString::new(entry_point_name).unwrap()
 }
 fn get_shader_kind(reflection: &Reflection) -> vk::ShaderStageFlags {
     let raw_stage = reflection.0.entry_points[0].operands[ASM_ENTRY_POINT_EXECUTION_MODEL_IDX]
         .unwrap_execution_model();
-    
+
     vk::ShaderStageFlags::from_raw(0b1 << (raw_stage as u32))
-}
-
-/// helper for making descriptor writes
-/// besides being extremely boilerplate heavy, making descriptor writes requires managing stable
-/// memory addresses for the bufferinfo sub structs, so this abstracts that away
-struct DescriptorWriteBuilder<'a> {
-    buffer_infos: Vec<Box<vk::DescriptorBufferInfo>>,
-    image_infos: Vec<Box<vk::DescriptorImageInfo>>,
-    writes: Vec<vk::WriteDescriptorSet<'a>>,
-}
-
-impl DescriptorWriteBuilder<'_> {
-    fn new() -> Self {
-        Self {
-            buffer_infos: Vec::new(),
-            image_infos: Vec::new(),
-            writes: Vec::new(),
-        }
-    }
-
-    fn add_uniform_buffer<T: bytemuck::Pod>(
-        &mut self,
-        resource_manager: &mut ResourceManager,
-        descriptor_pool: vk::DescriptorPool,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-        binding: u32,
-        data: &T,
-    ) -> vk::DescriptorSet {
-        let size = size_of::<T>();
-        let (buffer, offset) = resource_manager.ubo_ring_buffer.allocate(size);
-        resource_manager.ubo_ring_buffer.write(data, offset);
-
-        let descriptor_set =
-            resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
-
-        // Store buffer info (we need stable addresses)
-        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer,
-            offset,
-            range: size as u64,
-        }));
-
-        // Record the write
-        self.writes.push(vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: binding,
-            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
-            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 1,
-            dst_array_element: 0,
-            ..Default::default()
-        });
-
-        descriptor_set
-    }
-
-    fn add_texture(
-        &mut self,
-        resource_manager: &mut ResourceManager,
-        descriptor_pool: vk::DescriptorPool,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-        binding: u32,
-        texture: Option<Material>,
-    ) -> vk::DescriptorSet {
-        let descriptor_set =
-            resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
-
-        let image = match texture {
-            Some(x) => resource_manager
-                .get_texture(x.albedo)
-                .expect("texture should exist"),
-            None => resource_manager.default_texture(),
-        };
-
-        self.image_infos.push(Box::new(vk::DescriptorImageInfo {
-            sampler: image.sampler,
-            image_view: image.image_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }));
-
-        self.writes.push(vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: binding,
-            p_image_info: self.image_infos.last().unwrap().as_ref(),
-            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
-            dst_array_element: 0,
-            ..Default::default()
-        });
-
-        descriptor_set
-    }
-
-    fn add_ssbo(
-        &mut self,
-        resource_manager: &mut ResourceManager,
-        descriptor_pool: vk::DescriptorPool,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-        binding: u32,
-        buffer: vk::Buffer,
-        range: u64,
-        offset: u64,
-    ) -> vk::DescriptorSet {
-        let descriptor_set =
-            resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
-
-        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer,
-            range,
-            offset,
-        }));
-
-        self.writes.push(vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: binding,
-            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
-            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 1,
-            dst_array_element: 0,
-            ..Default::default()
-        });
-
-        descriptor_set
-    }
-
-    fn add_ssbo_binding(
-        &mut self,
-        descriptor_set: vk::DescriptorSet,
-        binding: u32,
-        buffer: vk::Buffer,
-        range: u64,
-        offset: u64,
-    ) -> vk::DescriptorSet {
-        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer,
-            range,
-            offset,
-        }));
-
-        self.writes.push(vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: binding,
-            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
-            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 1,
-            dst_array_element: 0,
-            ..Default::default()
-        });
-
-        descriptor_set
-    }
-
-    fn submit(self, device: &ash::Device) {
-        unsafe {
-            device.update_descriptor_sets(&self.writes, &[]);
-        }
-    }
 }

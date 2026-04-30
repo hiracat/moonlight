@@ -61,8 +61,8 @@ pub struct PipelineBuilder {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ImageVersion {
     pub id: ImageId,
+    pub name: &'static str,
     desc: ImageDesc,
-    name: &'static str,
     // starts at 0, increment every time the image is written to to prevent ambiguous if there are
     // multiple writes and multiple reads
     version: usize,
