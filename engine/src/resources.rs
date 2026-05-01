@@ -11,6 +11,7 @@ use proc_macros::LuaRef;
 use ultraviolet as uv;
 
 use crate::{
+    animations::PlaybackMode,
     renderers::world::draw::{alloc_buffers, instant_submit_command_buffer},
     vulkan::{QueueFamilyIndex, SharedAllocator, VulkanContext},
 };
@@ -223,13 +224,17 @@ impl AnimationResources {
 #[derive(Debug, Clone, LuaRef)]
 #[lua(no_default)]
 pub struct Animated {
-    pub time: f32,
-    pub stopping_time: f32,
-    //PERF: this could possible be put into the resource manager since it can be large, but not
-    //necesary for now
-    pub animations: Vec<Animation>,
-    pub current_playing: Option<Animation>,
     pub skeleton: Skeleton,
+    pub mode: PlaybackMode,
+    /// playback speed multiplier, can be negative
+    pub speed: f32,
+    /// how long cross-fades and bind-pose blends take in seconds
+    pub blend_duration: f32,
+    /// current playback time within the active animation
+    pub time: f32,
+    /// how far we are through blending back to bind pose when Stopped (0..=blend_duration)
+    pub stop_blend_progress: f32,
+    pub available_animations: Vec<Animation>,
 }
 
 #[derive(Debug, Clone)]
@@ -935,11 +940,13 @@ impl ResourceManager {
 
         (
             Animated {
-                stopping_time: 0.0,
+                speed: 1.0,
+                blend_duration: 0.5,
                 time: 0.0,
-                animations: animation_ids,
-                current_playing: None,
+                available_animations: animation_ids,
                 skeleton: skeleton_id,
+                mode: PlaybackMode::Stopped,
+                stop_blend_progress: 0.0,
             },
             gltf_joint_to_engine,
         )
@@ -1016,11 +1023,13 @@ impl ResourceManager {
                 offset,
             );
             animated = Some(Animated {
-                stopping_time: 0.0,
-                current_playing: None,
-                animations: animations.animations,
-                skeleton: animations.skeleton,
+                mode: PlaybackMode::Stopped,
+                stop_blend_progress: 0.0,
+                speed: 1.0,
+                blend_duration: 0.5,
                 time: 0.0,
+                available_animations: animations.available_animations,
+                skeleton: animations.skeleton,
             });
             is_animated = true;
         } else {

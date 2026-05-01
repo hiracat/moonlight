@@ -1,3 +1,4 @@
+use moonlight::animations::PlaybackMode;
 use moonlight::ecs;
 use moonlight::lua;
 use proc_macros::LuaVal;
@@ -139,7 +140,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         .resource_manager
         .load_gltf_asset("data/models/animated_fox.glb");
     let mut fox_animations = fox_animations.unwrap();
-    fox_animations.current_playing = Some(fox_animations.animations[0]);
+    fox_animations.mode = PlaybackMode::Loop(fox_animations.available_animations[0]);
     // fox_animations.current_playing = None;
     world.add(fox, fox_model).unwrap();
     world.add(fox, fox_animations).unwrap();

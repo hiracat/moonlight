@@ -14,6 +14,7 @@ use winit::{
 };
 
 use crate::{
+    animations::update_animations,
     components::{Camera, Time},
     ecs::World,
     lua::{LuaVM, PrintOnError},
@@ -709,6 +710,11 @@ impl ApplicationHandler for App {
                 });
 
                 engine.ui_renderer.full_output = Some(full_output);
+                update_animations(
+                    &mut self.world,
+                    &mut engine.resource_manager.animation_resources,
+                    &mut engine.resource_manager.ssbo_registry,
+                );
                 engine.draw(&mut self.world);
 
                 self.world.get_mut_resource::<Time>().unwrap().delta_time =

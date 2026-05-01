@@ -11,9 +11,13 @@ function Update(world, engine)
 		local animated = p.Animated ---@type Animated
 		local control = p.Controllable ---@type Controllable
 		if velocity.x == 0.0 and velocity.z == 0.0 then
-			animated.current_playing = nil
+			animated.mode = { type = "Stopped" }
+			animated.stop_blend_progress = 0.0
+			animated.blend_duration = 0.1
 		else
-			animated.current_playing = animated.animations[1]
+			local speed = math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z) * 0.20
+			animated.speed = speed
+			animated.mode = { type = "Loop", data = animated.available_animations[1] }
 		end
 		Index = Index + 1
 		local transform = p.Transform ---@type Transform

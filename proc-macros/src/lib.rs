@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use quote::{format_ident, quote};
+use syn::{DeriveInput, parse_macro_input};
 
 #[proc_macro_derive(LuaRef, attributes(lua))]
 pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
@@ -326,35 +326,119 @@ pub fn derive_lua_union(input: TokenStream) -> TokenStream {
         let v_name = &variant.ident;
         let v_str = v_name.to_string();
 
-        let ty = match &variant.fields {
-            syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                &fields.unnamed.first().unwrap().ty
-            }
-            _ => panic!("LuaUnion only supports tuple variants with exactly one field"),
+        let fields = match &variant.fields {
+            syn::Fields::Unnamed(fields) => Some(&fields.unnamed),
+            syn::Fields::Unit => None,
+            _ => panic!("LuaUnion only supports tuple + unit variants"),
         };
+        if let Some(fields) = fields {
+            // tuple variant logic
+            let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
 
-        variant_names.push(v_str.clone());
-        data_types.push(quote!(#ty));
+            variant_names.push(v_str.clone());
 
-        to_lua_arms.push(quote! {
-            #name::#v_name(inner) => {
-                table.set("type".to_string(), #v_str)?;
-                let lua_val = #krate::lua::LuaSeralize::to_lua(inner, lua)?;
-                table.set("data".to_string(), lua_val)?;
+            if field_types.len() == 1 {
+                let ty = &field_types[0];
+                data_types.push(quote!(#ty).to_string());
+            } else {
+                let joined = field_types
+                    .iter()
+                    .map(|ty| quote!(#ty).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                data_types.push(joined);
             }
-        });
+            let bindings: Vec<syn::Ident> = (0..field_types.len())
+                .map(|i| format_ident!("field_{}", i))
+                .collect();
 
-        from_lua_arms.push(quote! {
-            #v_str => Ok(#name::#v_name(<#ty as #krate::lua::LuaSeralize>::from_lua(&data)?)),
-        });
+            // serialization
+            let to_lua_body = if field_types.len() == 1 {
+                let binding = &bindings[0];
+                quote! {
+                    let lua_val = #krate::lua::LuaSeralize::to_lua(#binding, lua)?;
+                    table.set("data".to_string(), lua_val)?;
+                }
+            } else {
+                let sets = bindings.iter().enumerate().map(|(i, binding)| {
+                    let idx = i + 1;
+                    quote! {
+                        arr.set(#idx, #krate::lua::LuaSeralize::to_lua(#binding, lua)?)?;
+                    }
+                });
+
+                quote! {
+                    let arr = lua.create_table()?;
+                    #(#sets)*
+                    table.set("data".to_string(), arr)?;
+                }
+            };
+
+            to_lua_arms.push(quote! {
+                #name::#v_name(#(#bindings),*) => {
+                    table.set("type".to_string(), #v_str)?;
+                    #to_lua_body
+                }
+            });
+
+            // deserialization
+            let from_lua_body = if field_types.len() == 1 {
+                let ty = &field_types[0];
+                quote! {
+                    Ok(#name::#v_name(
+                        <#ty as #krate::lua::LuaSeralize>::from_lua(&data)?
+                    ))
+                }
+            } else {
+                let reads = field_types.iter().enumerate().map(|(i, ty)| {
+                    let idx = i + 1;
+                    quote! {
+                        <#ty as #krate::lua::LuaSeralize>::from_lua(
+                            &arr.get::<::mlua::Value>(#idx)?
+                        )?
+                    }
+                });
+
+                quote! {
+                    let arr = data.as_table().ok_or_else(|| {
+                        ::mlua::Error::RuntimeError(format!(
+                            "expected tuple table for variant {}",
+                            #v_str
+                        ))
+                    })?;
+
+                    Ok(#name::#v_name(
+                        #(#reads),*
+                    ))
+                }
+            };
+
+            from_lua_arms.push(quote! {
+                #v_str => {
+                    #from_lua_body
+                },
+            });
+        } else {
+            variant_names.push(v_str.clone());
+            data_types.push(String::new());
+
+            to_lua_arms.push(quote! {
+                #name::#v_name => {
+                    table.set("type".to_string(), #v_str)?;
+                }
+            });
+
+            from_lua_arms.push(quote! {
+                #v_str => Ok(#name::#v_name),
+            });
+        }
     }
 
-    // Build "Aabb | Obb" string for docs
-    let data_union_str = variant_names
+    let variant_entries: Vec<_> = variant_names
         .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(" | ");
+        .zip(data_types.iter())
+        .map(|(name, ty)| quote!((#name, #ty)))
+        .collect();
 
     let result = quote! {
         impl #krate::lua::LuaSeralize for #name {
@@ -408,15 +492,11 @@ pub fn derive_lua_union(input: TokenStream) -> TokenStream {
             }
         }
         inventory::submit! {
-            #krate::lua::LuaTypeDoc {
+        #krate::lua::LuaUnionDoc {
                 name: #name_str,
-                fields: &[
-                    ("type", "string"),
-                    ("data", #data_union_str),
-                ],
+                variants: &[#(#variant_entries),*],
             }
         }
-
 
         const _: fn() = || {
             fn assert_clone<T: Clone>() {}
@@ -428,7 +508,6 @@ pub fn derive_lua_union(input: TokenStream) -> TokenStream {
 }
 
 fn get_field_type_string_name(field_type: &syn::Type) -> String {
-    
     match field_type {
         syn::Type::Path(type_path) => {
             let last = type_path.path.segments.last().unwrap();
@@ -448,6 +527,8 @@ fn get_field_type_string_name(field_type: &syn::Type) -> String {
                         match name.as_str() {
                             "Vec" => format!("{}[]", inner_str),
                             "Option" => format!("{}?", inner_str),
+                            "Box" => inner_str,
+
                             _ => name,
                         }
                     } else {

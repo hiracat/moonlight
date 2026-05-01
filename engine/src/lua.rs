@@ -35,6 +35,27 @@ pub fn write_lua_docs(path: &str) {
         output.push('\n');
     }
 
+    for reg in inventory::iter::<LuaUnionDoc>() {
+        // one class per variant
+        for (variant_name, data_type) in reg.variants {
+            let class_name = format!("{}_{}", reg.name, variant_name);
+            output.push_str(&format!("---@class {}\n", class_name));
+            output.push_str(&format!("---@field type \"{}\"\n", variant_name));
+            if !data_type.is_empty() {
+                output.push_str(&format!("---@field data {}\n", data_type));
+            }
+            output.push('\n');
+        }
+        // alias unioning them all
+        let union_str = reg
+            .variants
+            .iter()
+            .map(|(v, _)| format!("{}_{}", reg.name, v))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        output.push_str(&format!("---@alias {} {}\n\n", reg.name, union_str));
+    }
+
     std::fs::write(path, output).expect("failed to write lua docs");
 }
 
@@ -122,10 +143,17 @@ pub struct TypeRegistration {
 pub struct TypeRegistry {
     pub registrations: HashMap<String, &'static TypeRegistration>,
 }
+
+pub struct LuaUnionDoc {
+    pub name: &'static str,
+    pub variants: &'static [(&'static str, &'static str)], // (variant_name, data_type or "")
+}
+
 pub struct LuaTypeDoc {
     pub name: &'static str,
     pub fields: &'static [(&'static str, &'static str)],
 }
+inventory::collect!(LuaUnionDoc);
 inventory::collect!(TypeRegistration);
 inventory::collect!(LuaTypeDoc);
 
@@ -364,7 +392,7 @@ impl LuaSeralize for uv::Rotor3 {
                 return Err(::mlua::Error::RuntimeError(format!(
                     "expected Rotor3 userdata or table, found {}",
                     value.type_name()
-                )))
+                )));
             }
         };
         Ok(uv::Rotor3::from_euler_angles(roll, pitch, yaw))
@@ -528,5 +556,13 @@ impl<T: LuaSeralize> LuaSeralize for Option<T> {
             Some(v) => v.to_lua(lua),
             None => Ok(mlua::Value::Nil),
         }
+    }
+}
+impl<T: LuaSeralize> LuaSeralize for Box<T> {
+    fn from_lua(value: &mlua::Value) -> mlua::Result<Self> {
+        Ok(Box::new(T::from_lua(value)?))
+    }
+    fn to_lua(&mut self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
+        (**self).to_lua(lua)
     }
 }
