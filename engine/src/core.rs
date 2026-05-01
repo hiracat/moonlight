@@ -263,10 +263,10 @@ impl Engine {
             world,
             &self.vulkan_context.device,
             frame.command_buffer,
-            frame.transient_pool,
             window_size_v,
             &mut self.resource_manager,
             self.swapchain_image_index,
+            self.frame_in_flight,
         );
 
         let swapchain_image_view = self.swapchain.swapchain_image_views[self.swapchain_image_index];

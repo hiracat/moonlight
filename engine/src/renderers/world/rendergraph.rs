@@ -186,10 +186,11 @@ impl PipelineBuilder {
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct CompiledRenderGraph {
+    pub sampler: vk::Sampler,
+    pub commands: Vec<GraphCommand>,
     image_size: vk::Extent2D,
     execution_order: Vec<usize>,
     image_states: Vec<TrackedImageState>,
-    commands: Vec<GraphCommand>,
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
 
@@ -247,6 +248,13 @@ pub struct ImportedImageBinding {
 }
 
 impl CompiledRenderGraph {
+    pub fn get_image_info(&self, id: &ImageId) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo {
+            sampler: self.sampler,
+            image_view: self.get_view_from_id(id),
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }
+    }
     pub fn compile(
         graph: &RenderGraph,
         device: Arc<ash::Device>,
@@ -536,7 +544,23 @@ impl CompiledRenderGraph {
             ));
             commands.push(GraphCommand::EndRendering);
         }
+        let sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo {
+                    mag_filter: vk::Filter::NEAREST,
+                    min_filter: vk::Filter::NEAREST,
+                    mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+                    address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    ..Default::default()
+                },
+                None,
+            )
+        }
+        .unwrap();
         CompiledRenderGraph {
+            sampler,
             image_size: vk::Extent2D {
                 width: image_width,
                 height: image_height,
@@ -547,9 +571,6 @@ impl CompiledRenderGraph {
             device,
             depth: graph.depth,
         }
-    }
-    pub fn commands(&self) -> &Vec<GraphCommand> {
-        &self.commands
     }
     pub fn get_image_from_id(&self, id: &ImageId) -> vk::Image {
         match &self.image_states[id.arr_idx].image {
@@ -577,7 +598,7 @@ fn is_depth_format(format: vk::Format) -> bool {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RenderingAttachmentInfo {
     view: vk::ImageView,
     load_op: vk::AttachmentLoadOp,
@@ -596,7 +617,7 @@ impl RenderingAttachmentInfo {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GraphCommand {
     BeginRendering {
         color_attachments: Vec<RenderingAttachmentInfo>,

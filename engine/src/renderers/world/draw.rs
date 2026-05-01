@@ -2,12 +2,12 @@
 
 use super::pipelines::create_builtin_graphics_pipelines;
 use crate::ecs::World;
-use crate::renderers::world::pipelines::PipelineManager;
+use crate::renderers::world::descriptors::{BindingHandle, DescriptorManager};
+use crate::renderers::world::pipelines::{PipelineHandle, PipelineManager};
 use crate::renderers::world::rendergraph::{
     CompiledRenderGraph, GraphCommand, ImageId, ImportedImageBinding, RenderGraph,
 };
-use crate::renderers::world::swapchain::update_attachment_descriptor_sets;
-use crate::renderers::world::swapchain::{SwapchainResources, create_attachment_descriptor_sets};
+use crate::renderers::world::swapchain::SwapchainResources;
 use crate::resources::{Mesh, ResourceManager};
 use crate::vulkan::{SharedAllocator, VulkanContext};
 use ash::vk::{self};
@@ -30,46 +30,28 @@ pub struct Ids {
 
 pub struct WorldRenderer {
     swapchain_image_id: ImageId,
-    image_attachment_order: [ImageId; 3],
 
     // indexed by PipelineHandle
-    pub pipelines: PipelineManager,
+    pub pipeline_manager: PipelineManager,
     pub rendergraph_config: RenderGraph,
     // one per swapchain image
     pub graph: Vec<CompiledRenderGraph>,
 
-    pub per_swapchain_image_descriptor_sets: Vec<vk::DescriptorSet>,
-    pub per_swapchain_image_set_layout: vk::DescriptorSetLayout,
-    pub image_descriptor_set_pool: vk::DescriptorPool,
-    pub sampler: vk::Sampler,
+    pub descriptor_manager: [DescriptorManager; FRAMES_IN_FLIGHT],
+
     device: Arc<ash::Device>,
 }
 
 #[derive(Debug)]
 pub struct DrawJob {
     pub mesh: DrawStyle,
-    // shaders set indices are required to be contiguous
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
+    pub descriptor_sets: Vec<BindingHandle>,
 }
 
 #[derive(Debug)]
 pub enum DrawStyle {
     Mesh(Mesh),
     VertexCount(u32),
-}
-
-impl Drop for WorldRenderer {
-    fn drop(&mut self) {
-        unsafe {
-            self.device
-                .destroy_descriptor_pool(self.image_descriptor_set_pool, None);
-            self.device.destroy_sampler(self.sampler, None);
-            // this is destroyed by pipelienbundle::drop, because its a random index that happens
-            // to correspond with the final color output, but is really owned by them
-            // self.device
-            //     .destroy_descriptor_set_layout(self.per_swapchain_image_set_layout, None);
-        }
-    }
 }
 
 impl WorldRenderer {
@@ -79,18 +61,13 @@ impl WorldRenderer {
         world: &mut World,
         device: &ash::Device,
         command_buffer: vk::CommandBuffer,
-        descriptor_pool: vk::DescriptorPool,
         window_size: vk::Extent2D,
         resource_manager: &mut ResourceManager,
         swapchain_image_index: usize,
+        frame_in_flight: usize,
     ) {
-        let jobs = self.setup_gpu_build_draw_jobs(
-            device,
-            swapchain_image_index,
-            resource_manager,
-            descriptor_pool,
-            world,
-        );
+        self.descriptor_manager[frame_in_flight].begin_frame();
+        let jobs = self.setup_gpu_build_draw_jobs(resource_manager, world, frame_in_flight);
         let scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: window_size,
@@ -104,8 +81,8 @@ impl WorldRenderer {
             min_depth: 0.0,
         };
 
-        let graph = &self.graph[swapchain_image_index];
-        for cmd in graph.commands() {
+        let graph = &mut self.graph[swapchain_image_index];
+        for cmd in &graph.commands {
             match cmd {
                 GraphCommand::BeginRendering {
                     color_attachments,
@@ -146,7 +123,7 @@ impl WorldRenderer {
                     aspect_mask,
                 } => {
                     let image_barriers = [vk::ImageMemoryBarrier2 {
-                        image: graph.get_image_from_id(image_id),
+                        image: graph.get_image_from_id(&image_id),
                         old_layout: *src_layout,
                         new_layout: *dst_layout,
                         src_stage_mask: *src_stage,
@@ -175,7 +152,10 @@ impl WorldRenderer {
                     }
                 }
                 GraphCommand::BindPipeline(pipeline_bind_point, pipeline_handle) => {
-                    let pipeline = self.pipelines.pipelines[pipeline_handle.arr_index].pipeline;
+                    let pipeline = self.pipeline_manager.pipelines[pipeline_handle.arr_index]
+                        .as_ref()
+                        .unwrap()
+                        .pipeline;
                     unsafe {
                         device.cmd_bind_pipeline(command_buffer, *pipeline_bind_point, pipeline);
                         device.cmd_set_viewport(command_buffer, 0, &[viewport]);
@@ -183,21 +163,20 @@ impl WorldRenderer {
                     }
                     let job_list = &jobs[pipeline_handle.arr_index];
                     for job in job_list {
-                        assert_eq!(
-                            job.descriptor_sets.len(),
-                            self.pipelines.pipelines[pipeline_handle.arr_index]
-                                .descriptor_set_layouts
-                                .len(),
-                            "must be an equal amount of descriptor sets as descriptor set layouts"
-                        );
-
+                        let (pipeline_layout, set_layout) =
+                            &self.descriptor_manager[frame_in_flight].bind(
+                                resource_manager,
+                                graph,
+                                *pipeline_handle,
+                                &job.descriptor_sets,
+                            );
                         unsafe {
                             device.cmd_bind_descriptor_sets(
                                 command_buffer,
                                 vk::PipelineBindPoint::GRAPHICS,
-                                self.pipelines.pipelines[pipeline_handle.arr_index].layout,
+                                *pipeline_layout,
                                 0,
-                                &job.descriptor_sets,
+                                set_layout.as_ref(),
                                 &[],
                             );
                         }
@@ -241,23 +220,19 @@ impl WorldRenderer {
     // this is sorta like a frame graph builder kinda thing
     fn setup_gpu_build_draw_jobs(
         &mut self,
-        device: &ash::Device,
-        swapchain_image_index: usize,
         resource_manager: &mut ResourceManager,
-        pool: vk::DescriptorPool,
         world: &mut World,
+        frame_in_flight: usize,
     ) -> Vec<Vec<DrawJob>> {
         // indexed by pipelinekey, then just everything that belongs in that pipeline
-        let mut jobs: Vec<Vec<DrawJob>> = Vec::with_capacity(self.pipelines.pipelines.len());
+        let mut jobs: Vec<Vec<DrawJob>> = Vec::with_capacity(self.pipeline_manager.pipelines.len());
 
-        for pipeline in &self.pipelines.pipelines {
-            let job_set = (pipeline.write_data_and_build_draw_jobs)(
-                device,
-                resource_manager,
-                pool,
+        for (index, pipeline) in self.pipeline_manager.pipelines.iter().enumerate() {
+            let job_set = (pipeline.as_ref().unwrap().write_data_and_build_draw_jobs)(
                 world,
-                &pipeline.descriptor_set_layouts,
-                &self.per_swapchain_image_descriptor_sets[swapchain_image_index],
+                resource_manager,
+                &mut self.descriptor_manager[frame_in_flight],
+                PipelineHandle { arr_index: index },
             );
             jobs.push(job_set);
         }
@@ -271,62 +246,20 @@ impl WorldRenderer {
             vk::Format::R16G16B16A16_SFLOAT,
             vk::Format::R32G32B32A32_SFLOAT,
         ];
-        let (graph, pipelines, ids) = create_builtin_graphics_pipelines(
-            context.device.clone(),
-            swapchain_resources.swapchain_image_format.format,
-            vk::Format::D32_SFLOAT,
-            &color_formats,
-        );
-        //HACK: yes this is a magic number, but its defined in the shader, so not resonable to fix
-        // Index 3 = ambient pipeline (first lighting pipeline), set 0 = gbuffer input attachments
-        let per_swapchain_image_set_layout = pipelines.pipelines[3].descriptor_set_layouts[0];
-        let sampler = unsafe {
-            context.device.create_sampler(
-                &vk::SamplerCreateInfo {
-                    mag_filter: vk::Filter::NEAREST,
-                    min_filter: vk::Filter::NEAREST,
-                    mipmap_mode: vk::SamplerMipmapMode::NEAREST,
-                    address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    ..Default::default()
-                },
-                None,
-            )
-        }
-        .unwrap();
-
-        // one set per swapchain image, * 4 for color normal position and final_color * 3 for
-        // safety
-        let required_sets: u32 = (swapchain_resources.swapchain_images.len() * 4 * 3) as u32;
-
-        let pool_sizes = [vk::DescriptorPoolSize {
-            // per uniform buffer, so six descriptors per
-            // set(2x what is needed for safety
-            descriptor_count: 6 * required_sets,
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        }];
-
-        let input_descriptor_pool = unsafe {
-            context
-                .device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo {
-                        max_sets: required_sets,
-                        p_pool_sizes: pool_sizes.as_ptr(),
-                        pool_size_count: pool_sizes.len() as u32,
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .unwrap()
-        };
+        let (graph, pipelines, descriptor_managers, final_color) =
+            create_builtin_graphics_pipelines(
+                context.device.clone(),
+                context.allocator(),
+                swapchain_resources.swapchain_image_format.format,
+                vk::Format::D32_SFLOAT,
+                &color_formats,
+            );
 
         let mut graphs = Vec::new();
         for i in 0..swapchain_resources.swapchain_images.len() {
             let mut imported_images = HashMap::new();
             imported_images.insert(
-                ids.final_color,
+                final_color,
                 ImportedImageBinding {
                     pre_initialized: false,
                     image: swapchain_resources.swapchain_images[i],
@@ -345,43 +278,13 @@ impl WorldRenderer {
             ));
         }
 
-        let albedo_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&ids.albedo))
-            .collect();
-        let normal_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&ids.normal))
-            .collect();
-        let position_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&ids.position))
-            .collect();
-
-        let descriptor_sets = create_attachment_descriptor_sets(
-            &context.device,
-            sampler,
-            input_descriptor_pool,
-            per_swapchain_image_set_layout,
-            &[
-                albedo_views.as_slice(),
-                normal_views.as_slice(),
-                position_views.as_slice(),
-            ],
-            &[0, 1, 2],
-        );
-
         WorldRenderer {
-            image_attachment_order: [ids.albedo, ids.normal, ids.position],
-            swapchain_image_id: ids.final_color,
+            descriptor_manager: descriptor_managers.try_into().unwrap(),
+            swapchain_image_id: final_color,
             graph: graphs,
             rendergraph_config: graph,
             device: context.device.clone(),
-            pipelines,
-            per_swapchain_image_descriptor_sets: descriptor_sets,
-            image_descriptor_set_pool: input_descriptor_pool,
-            per_swapchain_image_set_layout,
-            sampler,
+            pipeline_manager: pipelines,
         }
     }
 
@@ -412,31 +315,6 @@ impl WorldRenderer {
                 swapchain_resources.image_size.height,
             ));
         }
-
-        let albedo_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&self.image_attachment_order[0]))
-            .collect();
-        let normal_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&self.image_attachment_order[1]))
-            .collect();
-        let position_views: Vec<vk::ImageView> = graphs
-            .iter()
-            .map(|g| g.get_view_from_id(&self.image_attachment_order[2]))
-            .collect();
-
-        update_attachment_descriptor_sets(
-            &context.device,
-            &self.per_swapchain_image_descriptor_sets,
-            &[
-                albedo_views.as_slice(),
-                normal_views.as_slice(),
-                position_views.as_slice(),
-            ],
-            &[0, 1, 2],
-            self.sampler,
-        );
 
         self.graph = graphs;
     }

@@ -4,6 +4,7 @@ use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
+use educe::Educe;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
 use proc_macros::LuaRef;
@@ -16,16 +17,55 @@ use crate::{
 
 const MAX_SCENE_BONES: usize = 2048;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SsboHandle {
+    idx: usize,
+}
+pub struct SsboBinding {
+    pub buffer: vk::Buffer,
+    pub allocation: Allocation,
+    pub offset: u64,
+    pub size: u64,
+}
+
+pub struct SsboRegistry {
+    ssbo_registry: Vec<SsboBinding>,
+    device: Arc<ash::Device>,
+    allocator: SharedAllocator,
+}
+impl SsboRegistry {
+    fn new(device: Arc<ash::Device>, allocator: SharedAllocator) -> Self {
+        Self {
+            ssbo_registry: Vec::new(),
+            device,
+            allocator,
+        }
+    }
+    pub fn register_ssbo(&mut self, binding: SsboBinding) -> SsboHandle {
+        let id = self.ssbo_registry.len();
+        self.ssbo_registry.push(binding);
+        SsboHandle { idx: id }
+    }
+
+    pub fn get_ssbo_binding_mut(&mut self, handle: SsboHandle) -> &mut SsboBinding {
+        &mut self.ssbo_registry[handle.idx]
+    }
+    pub fn get_ssbo_binding(&self, handle: SsboHandle) -> &SsboBinding {
+        &self.ssbo_registry[handle.idx]
+    }
+}
+
 pub struct ResourceManager {
     device: Arc<ash::Device>,
     queue: vk::Queue,
     queue_family_index: QueueFamilyIndex,
     allocator: SharedAllocator,
 
+    pub ssbo_registry: SsboRegistry,
+
     meshes: Vec<Option<GpuMesh>>,
 
     textures: Vec<Option<GpuTexture>>,
-    default_texture: GpuTexture,
 
     pub(crate) animation_resources: AnimationResources,
 
@@ -34,6 +74,19 @@ pub struct ResourceManager {
 
     one_time_submit_pool: vk::CommandPool,
     one_time_submit_buffer: vk::CommandBuffer,
+}
+
+impl Drop for SsboRegistry {
+    fn drop(&mut self) {
+        for binding in &mut self.ssbo_registry {
+            unsafe {
+                self.device.destroy_buffer(binding.buffer, None);
+            }
+            let alloc = std::mem::replace(&mut binding.allocation, unsafe { std::mem::zeroed() });
+            let mut allocator = self.allocator.lock().unwrap();
+            allocator.free(alloc).unwrap();
+        }
+    }
 }
 
 pub enum TextureFormat {
@@ -63,36 +116,14 @@ pub(crate) struct AnimationResources {
     // use the same indices as the skeletons, with multiple animations per skeleton possible
     pub(crate) animations: Vec<Vec<AnimationImpl>>,
 
-    pub(crate) skeleton_transform_buffer: vk::Buffer,
-    pub(crate) skeleton_transform_allocation: Allocation,
-
-    pub(crate) skeleton_normal_buffer: vk::Buffer,
-    pub(crate) skeleton_normal_allocation: Allocation,
+    pub(crate) skeleton_transform_handle: SsboHandle,
+    pub(crate) skeleton_normal_handle: SsboHandle,
 
     allocator: SharedAllocator,
     device: Arc<ash::Device>,
 }
-impl Drop for AnimationResources {
-    fn drop(&mut self) {
-        unsafe {
-            self.device
-                .destroy_buffer(self.skeleton_transform_buffer, None);
-            self.device
-                .destroy_buffer(self.skeleton_normal_buffer, None);
-        }
-        let transform_alloc = std::mem::replace(&mut self.skeleton_transform_allocation, unsafe {
-            std::mem::zeroed()
-        });
-        let normal_alloc = std::mem::replace(&mut self.skeleton_normal_allocation, unsafe {
-            std::mem::zeroed()
-        });
-        let mut allocator = self.allocator.lock().unwrap();
-        allocator.free(transform_alloc).unwrap();
-        allocator.free(normal_alloc).unwrap();
-    }
-}
 impl AnimationResources {
-    pub(crate) fn write_bones(&mut self) {
+    pub(crate) fn write_bones(&mut self, ssbo_registry: &mut SsboRegistry) {
         let transform_matrices: Vec<uv::Mat4> = self
             .skeletons
             .iter()
@@ -111,7 +142,9 @@ impl AnimationResources {
 
         write(
             &transform_matrices,
-            self.skeleton_transform_allocation
+            ssbo_registry
+                .get_ssbo_binding_mut(self.skeleton_transform_handle)
+                .allocation
                 .mapped_slice_mut()
                 .unwrap(),
             0,
@@ -119,14 +152,22 @@ impl AnimationResources {
 
         write(
             &normal_matrices,
-            self.skeleton_normal_allocation.mapped_slice_mut().unwrap(),
+            ssbo_registry
+                .get_ssbo_binding_mut(self.skeleton_normal_handle)
+                .allocation
+                .mapped_slice_mut()
+                .unwrap(),
             0,
         );
     }
-    fn create(device: Arc<ash::Device>, memory_allocator: SharedAllocator) -> Self {
+    fn create(
+        device: Arc<ash::Device>,
+        memory_allocator: SharedAllocator,
+        registry: &mut SsboRegistry,
+    ) -> Self {
         let transform_size = (size_of::<uv::Mat4>() * MAX_SCENE_BONES) as u64;
         let normal_size = (size_of::<uv::Mat3>() * MAX_SCENE_BONES) as u64;
-        let (mut transform_buffer, mut transform_allocation) = alloc_buffers(
+        let (transform_buffer, mut transform_allocation) = alloc_buffers(
             memory_allocator.clone(),
             1,
             transform_size,
@@ -139,7 +180,7 @@ impl AnimationResources {
             cast_slice(&[uv::Mat4::identity()]),
             "transform memory",
         );
-        let (mut normal_buffer, mut normal_allocation) = alloc_buffers(
+        let (normal_buffer, mut normal_allocation) = alloc_buffers(
             memory_allocator.clone(),
             1,
             normal_size,
@@ -152,12 +193,22 @@ impl AnimationResources {
             cast_slice(&[uv::Mat3::identity()]),
             "normal memory",
         );
+        let transform_handle = registry.register_ssbo(SsboBinding {
+            buffer: transform_buffer[0],
+            allocation: transform_allocation.swap_remove(0),
+            size: transform_size,
+            offset: 0,
+        });
+        let normal_handle = registry.register_ssbo(SsboBinding {
+            buffer: normal_buffer[0],
+            allocation: normal_allocation.swap_remove(0),
+            size: normal_size,
+            offset: 0,
+        });
 
         Self {
-            skeleton_transform_buffer: transform_buffer.pop().unwrap(),
-            skeleton_transform_allocation: transform_allocation.pop().unwrap(),
-            skeleton_normal_buffer: normal_buffer.pop().unwrap(),
-            skeleton_normal_allocation: normal_allocation.pop().unwrap(),
+            skeleton_transform_handle: transform_handle,
+            skeleton_normal_handle: normal_handle,
             skeletons: Vec::new(),
             animations: Vec::new(),
             device: device.clone(),
@@ -172,9 +223,10 @@ impl AnimationResources {
 #[derive(Debug, Clone, LuaRef)]
 #[lua(no_default)]
 pub struct Animated {
+    pub time: f32,
+    pub stopping_time: f32,
     //PERF: this could possible be put into the resource manager since it can be large, but not
     //necesary for now
-    pub time: f32,
     pub animations: Vec<Animation>,
     pub current_playing: Option<Animation>,
     pub skeleton: Skeleton,
@@ -214,6 +266,10 @@ pub(crate) struct Joint {
     pub(crate) position: uv::Vec3,
     pub(crate) rotation: uv::Rotor3,
     pub(crate) scale: uv::Vec3,
+
+    pub bind_position: uv::Vec3,
+    pub bind_rotation: uv::Rotor3,
+    pub bind_scale: uv::Vec3,
 
     // the transform of this joint in world space, accounting for animations
     pub(crate) global_transform: uv::Mat4,
@@ -268,8 +324,7 @@ fn load_joints(
             // without unwrapping
             buffers.get(buffer.index()).map(|data| &data.0[..])
         }) {
-        iter.map(uv::Mat4::from)
-            .collect()
+        iter.map(uv::Mat4::from).collect()
     } else {
         panic!("Failed to read inverse bind matrices");
     };
@@ -351,6 +406,11 @@ fn build_hierarchy(
         position: position.into(),
         rotation: uv::Rotor3::from_quaternion_array(rotation),
         scale: scale.into(),
+
+        bind_position: position.into(),
+        bind_rotation: uv::Rotor3::from_quaternion_array(rotation),
+        bind_scale: scale.into(),
+
         // needs to be filled later
         children_indices: Vec::new(),
         inverse_bind_matrix: inverse_bind_matrices[*gltf_node_to_gltf_joint
@@ -381,12 +441,26 @@ pub struct Material {
     pub albedo: Texture,
 }
 
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            albedo: Default::default(),
+        }
+    }
+}
+
 #[derive(LuaRef, Debug, Clone, Copy)]
-#[lua(no_default)]
 pub struct Texture {
     #[lua(skip)]
     id: usize,
 }
+impl Default for Texture {
+    fn default() -> Self {
+        // the first textue is always going to be a white 1x1 texture so this is fine
+        Self { id: 0 }
+    }
+}
+
 #[derive(LuaRef, Debug, Clone, Copy)]
 #[lua(no_default)]
 pub struct Skybox {
@@ -564,12 +638,15 @@ impl Drop for GpuMesh {
     }
 }
 
+#[derive(Educe)]
+#[educe(Debug)]
 pub struct UniformRingBuffer {
     buffer: vk::Buffer,
     memory: Allocation,
     size: u64,
     alignment: usize,
     current: u64,
+    #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
     allocator: SharedAllocator,
 }
@@ -583,7 +660,7 @@ impl Drop for UniformRingBuffer {
     }
 }
 impl UniformRingBuffer {
-    fn create(allocator: SharedAllocator, device: &Arc<ash::Device>, size: u64) -> Self {
+    pub fn create(allocator: SharedAllocator, device: &Arc<ash::Device>, size: u64) -> Self {
         let sharing_mode = vk::SharingMode::EXCLUSIVE;
         let mut buffers = alloc_buffers(
             allocator.clone(),
@@ -641,6 +718,15 @@ impl UniformRingBuffer {
             .expect("memory should be host visable");
         let data_segment = &mut memory[offset..offset + size];
         data_segment.copy_from_slice(data);
+    }
+    pub fn push_raw(&mut self, data: &[u8]) -> (vk::Buffer, u64) {
+        let (buffer, offset) = self.allocate(data.len());
+        let memory = self
+            .memory
+            .mapped_slice_mut()
+            .expect("memory should be host visible");
+        memory[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+        (buffer, offset)
     }
 }
 
@@ -702,8 +788,15 @@ impl ResourceManager {
             context.one_time_submit_pool,
             context.one_time_submit_buffer,
         );
+        let mut ssbo_registry = SsboRegistry::new(context.device.clone(), context.allocator());
+        let animation_resources = AnimationResources::create(
+            context.device.clone(),
+            context.allocator().clone(),
+            &mut ssbo_registry,
+        );
 
         ResourceManager {
+            ssbo_registry,
             queue_family_index: context.queue_family_index,
             one_time_submit_buffer: context.one_time_submit_buffer,
             one_time_submit_pool: context.one_time_submit_pool,
@@ -711,13 +804,9 @@ impl ResourceManager {
             device: context.device.clone(),
             allocator: context.allocator().clone(),
             ubo_ring_buffer: ring_buffer,
-            default_texture: default,
             meshes: Vec::new(),
-            textures: Vec::new(),
-            animation_resources: AnimationResources::create(
-                context.device.clone(),
-                context.allocator().clone(),
-            ),
+            textures: vec![Some(default)],
+            animation_resources,
         }
     }
     pub fn load_animations(
@@ -826,8 +915,9 @@ impl ResourceManager {
 
         write(
             &transform_matrices,
-            self.animation_resources
-                .skeleton_transform_allocation
+            self.ssbo_registry
+                .get_ssbo_binding_mut(self.animation_resources.skeleton_transform_handle)
+                .allocation
                 .mapped_slice_mut()
                 .unwrap(),
             0,
@@ -835,8 +925,9 @@ impl ResourceManager {
 
         write(
             &normal_matrices,
-            self.animation_resources
-                .skeleton_normal_allocation
+            self.ssbo_registry
+                .get_ssbo_binding_mut(self.animation_resources.skeleton_normal_handle)
+                .allocation
                 .mapped_slice_mut()
                 .unwrap(),
             0,
@@ -844,6 +935,7 @@ impl ResourceManager {
 
         (
             Animated {
+                stopping_time: 0.0,
                 time: 0.0,
                 animations: animation_ids,
                 current_playing: None,
@@ -853,9 +945,6 @@ impl ResourceManager {
         )
     }
 
-    pub(crate) fn default_texture(&mut self) -> &GpuTexture {
-        &self.default_texture
-    }
     pub fn create_texture(&mut self, path: &str, format: TextureFormat) -> Texture {
         let image = ImageReader::open(Path::new(path))
             .unwrap()
@@ -927,6 +1016,7 @@ impl ResourceManager {
                 offset,
             );
             animated = Some(Animated {
+                stopping_time: 0.0,
                 current_playing: None,
                 animations: animations.animations,
                 skeleton: animations.skeleton,
@@ -1003,7 +1093,6 @@ impl ResourceManager {
             "index buffer",
         );
 
-        
         GpuMesh {
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
@@ -1085,7 +1174,6 @@ impl ResourceManager {
             "index buffer",
         );
 
-        
         GpuMesh {
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
