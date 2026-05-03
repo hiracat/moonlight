@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     sync::Arc,
 };
 
@@ -50,6 +51,19 @@ pub struct DescriptorManager {
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
     descriptor_sets: Vec<vk::DescriptorSet>,
+}
+
+impl Drop for DescriptorManager {
+    fn drop(&mut self) {
+        unsafe {
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+
+            for (_, layout) in self.set_layout_cache.iter() {
+                self.device.destroy_descriptor_set_layout(*layout, None);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -157,7 +171,19 @@ impl DescriptorManager {
 
         let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = set_indices
             .iter()
-            .map(|set_index| pipeline_resources.set_layouts[set_index])
+            .map(|set_index| {
+                *pipeline_resources
+                    .set_layouts
+                    .get(set_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "pipeline {:?} has no layout for set index {}, available sets: {:?}",
+                            pipeline,
+                            set_index,
+                            pipeline_resources.set_layouts.keys().collect::<Vec<_>>()
+                        )
+                    })
+            })
             .collect();
 
         let descriptor_sets = unsafe {
@@ -197,8 +223,8 @@ impl DescriptorManager {
                         range: data.len() as u64,
                     });
                 }
-                BindingData::Texture { material } => {
-                    let texture = resource_manager.get_texture(material.albedo).unwrap();
+                BindingData::Texture { texture } => {
+                    let texture = resource_manager.get_texture(*texture).unwrap();
                     image_infos.push(vk::DescriptorImageInfo {
                         sampler: texture.sampler,
                         image_view: texture.image_view,
@@ -409,17 +435,31 @@ impl DescriptorManager {
             requested_bind_cmds: BTreeMap::new(),
             set_layouts,
             pipeline_layout,
+            device: self.device.clone(),
         });
         pipeline_layout
     }
 }
 
-#[derive(Debug)]
+#[derive(Educe)]
+#[educe(Debug)]
 struct PipelineResources {
     // indexed by set, binding
     requested_bind_cmds: BTreeMap<u32, BTreeMap<u32, BindingData>>,
     set_layouts: HashMap<u32, vk::DescriptorSetLayout>,
     pipeline_layout: vk::PipelineLayout,
+    #[educe(Debug(ignore))]
+    device: Arc<ash::Device>,
+}
+
+impl Drop for PipelineResources {
+    fn drop(&mut self) {
+        // set layouts are copied here, so dont need to be destroyed
+        unsafe {
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+    }
 }
 
 impl From<&rr::BindingCount> for BindingCount {
@@ -432,12 +472,30 @@ impl From<&rr::BindingCount> for BindingCount {
     }
 }
 
-#[derive(Debug)]
 pub enum BindingData {
     Uniform { data: Vec<u8> },
-    Texture { material: Material },
+    Texture { texture: Texture },
     Ssbo { buffer: SsboHandle },
     RenderGraphImage { id: ImageId },
+}
+impl fmt::Debug for BindingData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uniform { data } => {
+                let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+                f.debug_struct("Uniform")
+                    .field("data", &format_args!("0x{hex}"))
+                    .finish()
+            }
+            Self::Texture { texture } => {
+                f.debug_struct("Texture").field("texture", texture).finish()
+            }
+            Self::Ssbo { buffer } => f.debug_struct("Ssbo").field("buffer", buffer).finish(),
+            Self::RenderGraphImage { id } => {
+                f.debug_struct("RenderGraphImage").field("id", id).finish()
+            }
+        }
+    }
 }
 
 /// helper for making descriptor writes

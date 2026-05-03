@@ -12,10 +12,8 @@ winit = { version = "0.30.11", features = ["rwh_06"] }
 ash = "0.38.0"
 ash-window = "0.13.0"
 gpu-allocator = "0.28.0"
-half = { version = "2.6.0", features = ["bytemuck"] }
-gltf = "1.4.1"
+gltf = {version = "1.4.1", features = ["KHR_texture_transform"] } 
 rspirv-reflect = "0.9.0"
-smallvec = "1.15.1"
 egui = "0.33.0"
 egui-winit = "0.33.0"
 mlua = { version = "0.11.6", features = ["lua54", "vendored"] }

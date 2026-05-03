@@ -197,6 +197,14 @@ pub struct CompiledRenderGraph {
     depth: Option<ImageId>,
 }
 
+impl Drop for CompiledRenderGraph {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_sampler(self.sampler, None);
+        }
+    }
+}
+
 #[derive(Educe)]
 #[educe(Debug)]
 struct TrackedImageState {
@@ -664,6 +672,4 @@ fn build_test() {
         .reads(&depth)
         .writes(&mut final_color)
         .build();
-
-    dbg!(graph);
 }

@@ -42,6 +42,11 @@ pub struct WorldRenderer {
     device: Arc<ash::Device>,
 }
 
+pub enum PipelineJob {
+    Graphics(Vec<DrawJob>),
+    Compute(ComputeDispatch),
+}
+
 #[derive(Debug)]
 pub struct DrawJob {
     pub mesh: DrawStyle,
@@ -53,6 +58,8 @@ pub enum DrawStyle {
     Mesh(Mesh),
     VertexCount(u32),
 }
+
+pub struct ComputeDispatch {}
 
 impl WorldRenderer {
     #[allow(clippy::too_many_lines)]
@@ -81,7 +88,7 @@ impl WorldRenderer {
             min_depth: 0.0,
         };
 
-        let graph = &mut self.graph[swapchain_image_index];
+        let graph = &self.graph[swapchain_image_index];
         for cmd in &graph.commands {
             match cmd {
                 GraphCommand::BeginRendering {
@@ -123,7 +130,7 @@ impl WorldRenderer {
                     aspect_mask,
                 } => {
                     let image_barriers = [vk::ImageMemoryBarrier2 {
-                        image: graph.get_image_from_id(&image_id),
+                        image: graph.get_image_from_id(image_id),
                         old_layout: *src_layout,
                         new_layout: *dst_layout,
                         src_stage_mask: *src_stage,
@@ -162,55 +169,60 @@ impl WorldRenderer {
                         device.cmd_set_scissor(command_buffer, 0, &[scissor]);
                     }
                     let job_list = &jobs[pipeline_handle.arr_index];
-                    for job in job_list {
-                        let (pipeline_layout, set_layout) =
-                            &self.descriptor_manager[frame_in_flight].bind(
-                                resource_manager,
-                                graph,
-                                *pipeline_handle,
-                                &job.descriptor_sets,
-                            );
-                        unsafe {
-                            device.cmd_bind_descriptor_sets(
-                                command_buffer,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                *pipeline_layout,
-                                0,
-                                set_layout.as_ref(),
-                                &[],
-                            );
-                        }
-                        match job.mesh {
-                            DrawStyle::Mesh(x) => {
-                                let mesh = resource_manager.get_mesh(x).unwrap();
-
+                    match job_list {
+                        PipelineJob::Graphics(draw_jobs) => {
+                            for job in draw_jobs {
+                                let (pipeline_layout, set_layout) =
+                                    &self.descriptor_manager[frame_in_flight].bind(
+                                        resource_manager,
+                                        graph,
+                                        *pipeline_handle,
+                                        &job.descriptor_sets,
+                                    );
                                 unsafe {
-                                    device.cmd_bind_vertex_buffers(
+                                    device.cmd_bind_descriptor_sets(
                                         command_buffer,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        *pipeline_layout,
                                         0,
-                                        &[mesh.vertex_buffer],
-                                        &[0],
-                                    );
-                                    device.cmd_bind_index_buffer(
-                                        command_buffer,
-                                        mesh.index_buffer,
-                                        0,
-                                        vk::IndexType::UINT32,
-                                    );
-                                    device.cmd_draw_indexed(
-                                        command_buffer,
-                                        mesh.index_count,
-                                        1,
-                                        0,
-                                        0,
-                                        0,
+                                        set_layout.as_ref(),
+                                        &[],
                                     );
                                 }
+                                match job.mesh {
+                                    DrawStyle::Mesh(x) => {
+                                        let mesh = resource_manager.get_mesh(x).unwrap();
+
+                                        unsafe {
+                                            device.cmd_bind_vertex_buffers(
+                                                command_buffer,
+                                                0,
+                                                &[mesh.vertex_buffer],
+                                                &[0],
+                                            );
+                                            device.cmd_bind_index_buffer(
+                                                command_buffer,
+                                                mesh.index_buffer,
+                                                0,
+                                                vk::IndexType::UINT32,
+                                            );
+                                            device.cmd_draw_indexed(
+                                                command_buffer,
+                                                mesh.index_count,
+                                                1,
+                                                0,
+                                                0,
+                                                0,
+                                            );
+                                        }
+                                    }
+                                    DrawStyle::VertexCount(count) => unsafe {
+                                        device.cmd_draw(command_buffer, count, 1, 0, 0);
+                                    },
+                                }
                             }
-                            DrawStyle::VertexCount(count) => unsafe {
-                                device.cmd_draw(command_buffer, count, 1, 0, 0);
-                            },
                         }
+                        PipelineJob::Compute(compute_dispatch) => todo!(),
                     }
                 }
             }
@@ -223,18 +235,21 @@ impl WorldRenderer {
         resource_manager: &mut ResourceManager,
         world: &mut World,
         frame_in_flight: usize,
-    ) -> Vec<Vec<DrawJob>> {
-        // indexed by pipelinekey, then just everything that belongs in that pipeline
-        let mut jobs: Vec<Vec<DrawJob>> = Vec::with_capacity(self.pipeline_manager.pipelines.len());
+    ) -> Vec<PipelineJob> {
+        let mut jobs: Vec<PipelineJob> = Vec::with_capacity(self.pipeline_manager.pipelines.len());
 
         for (index, pipeline) in self.pipeline_manager.pipelines.iter().enumerate() {
             let job_set = (pipeline.as_ref().unwrap().write_data_and_build_draw_jobs)(
                 world,
                 resource_manager,
                 &mut self.descriptor_manager[frame_in_flight],
-                PipelineHandle { arr_index: index },
+                PipelineHandle {
+                    is_compute: false,
+                    arr_index: index,
+                    name: self.pipeline_manager.pipeline_names[index],
+                },
             );
-            jobs.push(job_set);
+            jobs.push(PipelineJob::Graphics(job_set));
         }
         jobs
     }

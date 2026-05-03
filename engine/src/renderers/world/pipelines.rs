@@ -12,18 +12,17 @@ use ash::vk;
 use bytemuck::bytes_of;
 use educe::Educe;
 use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
-use ultraviolet::Slerp;
 
 use crate::core::TerrainMap;
-use crate::ecs::{Not, Opt, OptM, ReqM, World};
+use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
 use crate::renderers::world::descriptors::{BindingData, DescriptorManager};
 use crate::renderers::world::draw::{DrawStyle, FRAMES_IN_FLIGHT};
 use crate::renderers::world::rendergraph::{ImageDesc, ImageId, RenderGraph};
-use crate::resources::{Animated, AnimatedVertex, IsVertex, Keyframes, ResourceManager, Vertex};
+use crate::resources::{Animated, AnimatedVertex, IsVertex, ResourceManager, Vertex};
 use crate::resources::{Material, Mesh, Skybox};
 use crate::ubo::{
-    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, ModelUBO, PointLightUBO,
-    TerrainUBO,
+    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, MaterialUBO, ModelUBO,
+    PointLightUBO, TerrainUBO,
 };
 use crate::vulkan::SharedAllocator;
 use crate::{
@@ -33,42 +32,79 @@ use crate::{
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PipelineHandle {
+    pub is_compute: bool,
     pub arr_index: usize,
+    pub name: &'static str,
 }
 
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct PipelineManager {
     pub pipelines: Vec<Option<PipelineBundle>>,
+    pub pipeline_names: Vec<&'static str>,
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
 }
 impl PipelineManager {
     fn new(device: Arc<ash::Device>) -> Self {
         Self {
+            pipeline_names: Vec::new(),
             pipelines: Vec::new(),
             device,
         }
     }
-    fn allocate_handle(&mut self) -> PipelineHandle {
+    fn allocate_handle(&mut self, name: &'static str) -> PipelineHandle {
         self.pipelines.push(None);
+        self.pipeline_names.push(name);
         PipelineHandle {
+            is_compute: false,
+            name,
             arr_index: self.pipelines.len() - 1,
         }
+    }
+    fn allocate_compute_handle(&mut self, name: &'static str) -> PipelineHandle {
+        self.pipelines.push(None);
+        self.pipeline_names.push(name);
+        PipelineHandle {
+            is_compute: true,
+            name,
+            arr_index: self.pipelines.len() - 1,
+        }
+    }
+    fn add_compute_pipeline(
+        &mut self,
+        handle: PipelineHandle,
+        shader: ShaderStage,
+        layout: vk::PipelineLayout,
+        pipeline_fn: PipelineFn,
+    ) {
+        assert!(handle.is_compute);
+
+        let pipeline = create_compute_pipeline(&self.device, shader, layout).unwrap();
+
+        let bundle = PipelineBundle {
+            name: handle.name,
+            pipeline,
+            is_compute: false,
+            write_data_and_build_draw_jobs: pipeline_fn,
+            device: self.device.clone(),
+        };
+        self.pipelines[handle.arr_index] = Some(bundle);
     }
     fn add_pipeline(
         &mut self,
         handle: PipelineHandle,
-        name: &'static str,
         desc: &GraphicsPipelineDesc,
         shaders: &[ShaderStage],
         layout: vk::PipelineLayout,
         pipeline_fn: PipelineFn,
     ) {
+        assert!(!handle.is_compute);
         let pipeline = create_graphics_pipeline(&self.device, desc, shaders, layout).unwrap();
 
         let bundle = PipelineBundle {
-            name,
+            name: handle.name,
+            is_compute: true,
             pipeline,
             write_data_and_build_draw_jobs: pipeline_fn,
             device: self.device.clone(),
@@ -91,6 +127,7 @@ type PipelineFn = Box<
 pub struct PipelineBundle {
     pub name: &'static str,
     pub pipeline: vk::Pipeline,
+    is_compute: bool,
 
     #[educe(Debug(ignore))]
     pub write_data_and_build_draw_jobs: PipelineFn,
@@ -132,7 +169,7 @@ pub fn create_builtin_graphics_pipelines(
             alpha_to_one_enable: true,
         },
         raster_state: RasterState {
-            cull_mode: vk::CullModeFlags::NONE,
+            cull_mode: vk::CullModeFlags::BACK,
             front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             line_width: 1.0,
             depth_clamp_enable: false,
@@ -190,6 +227,21 @@ pub fn create_builtin_graphics_pipelines(
                 stride: std::mem::size_of::<AnimatedVertex>() as u32,
                 input_rate: vk::VertexInputRate::VERTEX,
             }],
+        },
+        ..geometry_desc.clone()
+    };
+    let clipped_geometry_desc = GraphicsPipelineDesc {
+        raster_state: RasterState {
+            cull_mode: vk::CullModeFlags::NONE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            line_width: 1.0,
+            depth_clamp_enable: false,
+            rasterizer_discard_enable: false,
+            polygon_mode: vk::PolygonMode::FILL,
+            depth_bias_enable: false,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_clamp: 0.0,
+            depth_bias_slope_factor: 0.0,
         },
         ..geometry_desc.clone()
     };
@@ -253,6 +305,11 @@ pub fn create_builtin_graphics_pipelines(
         Path::new("shaders/animated_geometry_vert.spv"),
         Path::new("shaders/geometry_frag.spv"),
     );
+    let clipped_geometry_data = get_pipeline_data(
+        device.clone(),
+        Path::new("shaders/static_geometry_vert.spv"),
+        Path::new("shaders/clipped_geometry_frag.spv"),
+    );
     let terrain_data = get_pipeline_data(
         device.clone(),
         Path::new("shaders/terrain_vert.spv"),
@@ -281,13 +338,14 @@ pub fn create_builtin_graphics_pipelines(
     let mut pipeline_manager = PipelineManager::new(device.clone());
 
     // --- allocate handles ---
-    let static_geometry = pipeline_manager.allocate_handle();
-    let animated_geometry = pipeline_manager.allocate_handle();
-    let terrain = pipeline_manager.allocate_handle();
-    let ambient = pipeline_manager.allocate_handle();
-    let directional = pipeline_manager.allocate_handle();
-    let point = pipeline_manager.allocate_handle();
-    let skybox = pipeline_manager.allocate_handle();
+    let static_geometry = pipeline_manager.allocate_handle("static_geometry");
+    let animated_geometry = pipeline_manager.allocate_handle("animated_geometry");
+    let clipped_geometry = pipeline_manager.allocate_handle("clipped_geometry");
+    let terrain = pipeline_manager.allocate_handle("terrain");
+    let ambient = pipeline_manager.allocate_handle("ambient");
+    let directional = pipeline_manager.allocate_handle("directional");
+    let point = pipeline_manager.allocate_handle("point");
+    let skybox = pipeline_manager.allocate_handle("skybox");
 
     // --- build descriptor managers, get layouts ---
     let mut descriptor_managers: Vec<DescriptorManager> = (0..FRAMES_IN_FLIGHT)
@@ -314,6 +372,11 @@ pub fn create_builtin_graphics_pipelines(
         animated_geometry,
         animated_geometry_data.1,
         animated_geometry_data.2,
+    );
+    let clipped_geometry_layout = register(
+        clipped_geometry,
+        clipped_geometry_data.1,
+        clipped_geometry_data.2,
     );
     let terrain_layout = register(terrain, terrain_data.1, terrain_data.2);
     let ambient_layout = register(ambient, ambient_data.1, ambient_data.2);
@@ -348,16 +411,10 @@ pub fn create_builtin_graphics_pipelines(
     let normal_id = normal.id;
     let position_id = position.id;
 
-    let pipeline_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/static_geometry_vert.spv"),
-        Path::new("shaders/geometry_frag.spv"),
-    );
     pipeline_manager.add_pipeline(
         static_geometry,
-        "static_geometry",
         &geometry_desc,
-        pipeline_data.0.as_ref(),
+        static_geometry_data.0.as_ref(),
         static_geometry_layout,
         Box::new(
             |world: &mut World,
@@ -383,6 +440,11 @@ pub fn create_builtin_graphics_pipelines(
                     if mesh.animated {
                         continue;
                     }
+                    if let Some(material) = material
+                        && material.alpha_clip.is_some()
+                    {
+                        continue;
+                    }
 
                     let model_handle = descriptor_manager.request_bind(
                         handle,
@@ -397,7 +459,7 @@ pub fn create_builtin_graphics_pipelines(
                         2,
                         0,
                         BindingData::Texture {
-                            material: material.copied().unwrap_or_default(),
+                            texture: material.map(|x| x.albedo).unwrap_or_default(),
                         },
                     );
 
@@ -414,7 +476,6 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         animated_geometry,
-        "animated_geometry",
         &animated_geometry_desc,
         &animated_geometry_data.0,
         animated_geometry_layout,
@@ -442,6 +503,11 @@ pub fn create_builtin_graphics_pipelines(
                     if !mesh.animated {
                         continue;
                     }
+                    if let Some(ref material) = material
+                        && material.alpha_clip.is_some()
+                    {
+                        continue;
+                    }
 
                     let model_handle = descriptor_manager.request_bind(
                         handle,
@@ -456,7 +522,7 @@ pub fn create_builtin_graphics_pipelines(
                         2,
                         0,
                         BindingData::Texture {
-                            material: material.copied().unwrap_or_default(),
+                            texture: material.map(|x| x.albedo).unwrap_or_default(),
                         },
                     );
                     let transform_handle = descriptor_manager.request_bind(
@@ -496,8 +562,82 @@ pub fn create_builtin_graphics_pipelines(
     );
 
     pipeline_manager.add_pipeline(
+        clipped_geometry,
+        &clipped_geometry_desc,
+        &clipped_geometry_data.0,
+        clipped_geometry_layout,
+        Box::new(
+            |world: &mut World,
+             resource_manager: &mut ResourceManager,
+             descriptor_manager: &mut DescriptorManager,
+             handle: PipelineHandle| {
+                let mut jobs = Vec::new();
+                let camera = world.get_resource::<Camera>().unwrap();
+
+                let camera_handle = descriptor_manager.request_bind(
+                    handle,
+                    1,
+                    0,
+                    BindingData::Uniform {
+                        data: bytes_of(&CameraUBO::from(camera)).to_vec(),
+                    },
+                );
+
+                for entity in world
+                    .query_mut::<(ReqM<Mesh>, ReqM<Transform>, ReqM<Material>, NotM<Animated>)>()
+                {
+                    let (_entityid, (mesh, transform, material)) = entity;
+                    if material.alpha_clip.is_none() {
+                        continue;
+                    }
+
+                    if mesh.animated {
+                        continue;
+                    }
+
+                    let model_handle = descriptor_manager.request_bind(
+                        handle,
+                        0,
+                        0,
+                        BindingData::Uniform {
+                            data: bytes_of(&ModelUBO::from(&*transform)).to_vec(),
+                        },
+                    );
+                    let image_handle = descriptor_manager.request_bind(
+                        handle,
+                        2,
+                        0,
+                        BindingData::Texture {
+                            texture: material.albedo,
+                        },
+                    );
+                    let material_handle = descriptor_manager.request_bind(
+                        handle,
+                        2,
+                        1,
+                        BindingData::Uniform {
+                            data: bytes_of(&Into::<MaterialUBO>::into(&*material)).to_owned(),
+                        },
+                    );
+
+                    jobs.push(DrawJob {
+                        mesh: DrawStyle::Mesh(*mesh),
+                        descriptor_sets: vec![
+                            model_handle,
+                            camera_handle,
+                            image_handle,
+                            material_handle,
+                        ],
+                    });
+                }
+
+                jobs
+            },
+        ),
+    );
+
+    pipeline_manager.add_pipeline(
         terrain,
-        "terrain",
         &geometry_desc,
         &terrain_data.0,
         terrain_layout,
@@ -530,9 +670,7 @@ pub fn create_builtin_graphics_pipelines(
                     2,
                     0,
                     BindingData::Texture {
-                        material: Material {
-                            albedo: heightmap.map,
-                        },
+                        texture: heightmap.map,
                     },
                 );
 
@@ -548,7 +686,6 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         ambient,
-        "ambient",
         &lighting_desc,
         &ambient_data.0,
         ambient_layout,
@@ -601,7 +738,6 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         directional,
-        "directional",
         &lighting_desc,
         &directional_data.0,
         directional_layout,
@@ -654,7 +790,6 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         point,
-        "point",
         &lighting_desc,
         &point_data.0,
         point_layout,
@@ -714,7 +849,6 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         skybox,
-        "skybox",
         &skybox_desc,
         &skybox_data.0,
         skybox_layout,
@@ -739,7 +873,7 @@ pub fn create_builtin_graphics_pipelines(
                     1,
                     0,
                     BindingData::Texture {
-                        material: cubemap.material,
+                        texture: cubemap.material.albedo,
                     },
                 );
 
@@ -762,6 +896,14 @@ pub fn create_builtin_graphics_pipelines(
     let graph = graph
         .add_pipeline("animated_geometry")
         .pipeline(animated_geometry)
+        .writes(&mut albedo)
+        .writes(&mut normal)
+        .writes(&mut position)
+        .writes_depth(&mut depth)
+        .build();
+    let graph = graph
+        .add_pipeline("clipped_geometry")
+        .pipeline(clipped_geometry)
         .writes(&mut albedo)
         .writes(&mut normal)
         .writes(&mut position)
@@ -1131,6 +1273,55 @@ pub fn create_graphics_pipeline(
     }
 }
 
+pub fn create_compute_pipeline(
+    device: &ash::Device,
+    shader: ShaderStage,
+    pipeline_layout: vk::PipelineLayout,
+) -> Result<vk::Pipeline, (vk::Pipeline, vk::Result)> {
+    let specalization_info =
+        shader
+            .specalization_info
+            .as_ref()
+            .map(|info| vk::SpecializationInfo {
+                map_entry_count: info.map_entries.len() as u32,
+                p_map_entries: info.map_entries.as_ptr(),
+                p_data: info.data.as_ptr() as *const c_void,
+                data_size: info.data.len(),
+                _marker: marker::PhantomData,
+            });
+
+    let stage = vk::PipelineShaderStageCreateInfo {
+        p_specialization_info: specalization_info.as_ref().map_or(ptr::null(), |info| info),
+        stage: shader.kind,
+        module: shader.shader,
+        p_name: shader.entry_point.as_ptr(),
+        ..Default::default()
+    };
+
+    let create_info = vk::ComputePipelineCreateInfo {
+        layout: pipeline_layout,
+        // if deriving from a graphics pipeline, the index
+        base_pipeline_index: 0,
+        // and the handle to that pipeline
+        base_pipeline_handle: vk::Pipeline::null(),
+        stage,
+        ..Default::default()
+    };
+
+    unsafe {
+        Ok(
+            match device.create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None) {
+                Ok(it) => it[0],
+                Err(err) => {
+                    let pipeline = err.0[0];
+                    let err = err.1;
+                    return Err((pipeline, err));
+                }
+            },
+        )
+    }
+}
+
 pub fn get_pipeline_data(
     device: Arc<ash::Device>,
     vertex_path: &path::Path,
@@ -1194,93 +1385,47 @@ pub fn get_pipeline_data(
 
     let vertex_descriptor_sets = vertex_reflection.get_descriptor_sets().unwrap();
     let fragment_descriptor_sets = fragment_reflection.get_descriptor_sets().unwrap();
-    let max_set = *vertex_descriptor_sets
-        .keys()
-        .max()
-        .unwrap_or(&0)
-        .max(fragment_descriptor_sets.keys().max().unwrap_or(&0));
-    for set_index in 0..=max_set {
-        let mut bindings = Vec::new();
-        let vertex_bindings = vertex_descriptor_sets.get(&set_index);
-        let fragment_bindings = fragment_descriptor_sets.get(&set_index);
-
-        let max_binding = {
-            let max_vertex = vertex_bindings.and_then(|x| x.keys().max());
-            let max_fragment = fragment_bindings.and_then(|x| x.keys().max());
-            assert!(max_vertex.is_some() || max_fragment.is_some());
-            *max_vertex.unwrap_or(&0).max(max_fragment.unwrap_or(&0))
-        };
-
-        for binding_index in 0..=max_binding {
-            let vertex_binding_info = vertex_bindings.and_then(|x| x.get(&binding_index));
-            let fragment_binding_info = fragment_bindings.and_then(|x| x.get(&binding_index));
-
-            if vertex_binding_info.is_none() && fragment_binding_info.is_none() {
-                continue;
-            }
-
-            let mut accumulated_binding = vk::DescriptorSetLayoutBinding {
-                stage_flags: vk::ShaderStageFlags::empty(),
-                binding: binding_index,
-                descriptor_type: vk::DescriptorType::from_raw(0),
-                descriptor_count: 0,
-                p_immutable_samplers: ptr::null(),
-                ..Default::default()
-            };
-
-            if let Some(info) = vertex_binding_info {
-                accumulated_binding = vk::DescriptorSetLayoutBinding {
-                    descriptor_count: match info.binding_count {
-                        rspirv_reflect::BindingCount::One => 1,
-                        rspirv_reflect::BindingCount::StaticSized(x) => x as u32,
-                        rspirv_reflect::BindingCount::Unbounded => 1024,
-                    },
-                    stage_flags: accumulated_binding.stage_flags | vk::ShaderStageFlags::VERTEX,
-                    descriptor_type: vk::DescriptorType::from_raw(info.ty.0 as i32),
-                    ..accumulated_binding
-                }
-            }
-            if let Some(info) = fragment_binding_info {
-                accumulated_binding = vk::DescriptorSetLayoutBinding {
-                    descriptor_count: match info.binding_count {
-                        rspirv_reflect::BindingCount::One => 1,
-                        rspirv_reflect::BindingCount::StaticSized(x) => x as u32,
-                        rspirv_reflect::BindingCount::Unbounded => 1024,
-                    },
-                    stage_flags: accumulated_binding.stage_flags | vk::ShaderStageFlags::FRAGMENT,
-                    descriptor_type: vk::DescriptorType::from_raw(info.ty.0 as i32),
-                    ..accumulated_binding
-                }
-            }
-            bindings.push(accumulated_binding);
-        }
-    }
-    let mut push_constant_ranges = Vec::new();
-
-    // PERF: better to make them
-    // not overlap if posslbe tho later
-    if let Some(range) = vertex_reflection.get_push_constant_range().unwrap() {
-        let range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX,
-            size: range.size,
-            offset: range.offset,
-        };
-        push_constant_ranges.push(range);
-    }
-    if let Some(range) = fragment_reflection.get_push_constant_range().unwrap() {
-        let range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-            size: range.size,
-            offset: range.offset,
-        };
-        push_constant_ranges.push(range);
-    }
 
     (
         vec![vertex_stage, fragment_stage],
         vertex_descriptor_sets,
         fragment_descriptor_sets,
     )
+}
+
+pub fn get_compute_data(
+    device: Arc<ash::Device>,
+    compute_path: &path::Path,
+) -> (
+    ShaderStage,
+    BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
+) {
+    let compute_reflection = load_path_data(compute_path);
+    assert_eq!(
+        compute_reflection.0.entry_points.len(),
+        1,
+        "only single entry point supported"
+    );
+    let code = compute_reflection.0.assemble();
+    let compute_module_create_info = vk::ShaderModuleCreateInfo {
+        p_code: code.as_ptr(),
+        code_size: code.len() * 4,
+        ..Default::default()
+    };
+    let compute_module = unsafe {
+        device
+            .create_shader_module(&compute_module_create_info, None)
+            .unwrap()
+    };
+    let compute_stage = ShaderStage {
+        shader: compute_module,
+        kind: vk::ShaderStageFlags::COMPUTE,
+        entry_point: get_entry_name(&compute_reflection),
+        specalization_info: None,
+        device: device.clone(),
+    };
+    let compute_descriptor_sets = compute_reflection.get_descriptor_sets().unwrap();
+    (compute_stage, compute_descriptor_sets)
 }
 
 /*-------------------SHADER REFLECTION----------------

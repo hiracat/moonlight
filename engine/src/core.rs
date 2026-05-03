@@ -136,49 +136,39 @@ impl Engine {
                 .unwrap();
         };
 
-        loop {
-            let is_suboptimal;
-            (self.swapchain_image_index, is_suboptimal) = unsafe {
-                match self.swapchain.swapchain_loader.acquire_next_image(
-                    self.swapchain.swapchain,
-                    u64::MAX,
-                    frame.image_available,
-                    vk::Fence::null(),
-                ) {
-                    Ok((index, suboptimal)) => (index as usize, suboptimal),
-                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                        self.swapchain_resized = true;
-                        return;
-                    }
-                    Err(e) => panic!("failed to acquire next image: {e}"),
-                }
-            };
+        let acquire_result = unsafe {
+            self.swapchain.swapchain_loader.acquire_next_image(
+                self.swapchain.swapchain,
+                u64::MAX,
+                frame.image_available,
+                vk::Fence::null(),
+            )
+        };
 
-            if is_suboptimal {
+        self.swapchain_image_index = match acquire_result {
+            Ok((index, false)) => index as usize,
+            Ok((index, true)) => {
                 self.swapchain_resized = true;
-            } else {
-                break;
+                index as usize
             }
-
-            if self.swapchain_resized {
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 unsafe {
                     self.vulkan_context.device.device_wait_idle().unwrap();
                 }
-                // Use the new dimensions of the window.
                 self.swapchain = SwapchainResources::create(
                     &self.vulkan_context,
                     Some(self.swapchain.swapchain),
                 );
                 self.world_renderer
                     .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+                return;
             }
-        }
+            Err(e) => panic!("failed to acquire next image: {e}"),
+        };
 
         if self.swapchain.image_size.width == 0 || self.swapchain.image_size.height == 0 {
             return;
         }
-
-        self.frame_count += 1;
 
         // check size after swapchain resize
 
@@ -392,14 +382,14 @@ impl Engine {
                 .swapchain_loader
                 .queue_present(self.vulkan_context.queue, &present_info)
         };
-        let is_resized = match result {
-            Ok(_) => self.swapchain_resized,
-            Err(vk_result) => match vk_result {
-                vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
-                _ => panic!("Failed to execute queue present."),
-            },
+
+        let is_suboptimal = match result {
+            Ok(suboptimal) => suboptimal || self.swapchain_resized,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => true,
+            Err(e) => panic!("Failed to execute queue present: {e}"),
         };
-        if is_resized {
+
+        if is_suboptimal {
             self.swapchain_resized = false;
             unsafe {
                 self.vulkan_context.device.device_wait_idle().unwrap();
@@ -845,5 +835,18 @@ impl TerrainMap {
         let t = top * (1.0 - tz) + bot * tz;
 
         t * self.height
+    }
+    pub fn get_normal_at(&self, x: f32, z: f32) -> Vec3 {
+        // step size in world space - smaller = more detailed normals
+        let step = self.size / self.cpu_map.width() as f32;
+
+        let dx = self.get_height_at(x + step, z) - self.get_height_at(x - step, z);
+        let dz = self.get_height_at(x, z + step) - self.get_height_at(x, z - step);
+
+        let nx = -dx;
+        let ny = 2.0 * step; // scale by step so slope sensitivity is world-space consistent
+        let nz = -dz;
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        Vec3::new(nx / len, ny / len, nz / len)
     }
 }

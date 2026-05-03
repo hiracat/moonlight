@@ -384,9 +384,8 @@ impl UIRenderer {
                     color_blend_op: vk::BlendOp::ADD,
                     alpha_blend_op: vk::BlendOp::ADD,
                     color_write_mask: vk::ColorComponentFlags::RGBA,
-                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                    src_color_blend_factor: vk::BlendFactor::ONE,
                     dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-
                     src_alpha_blend_factor: vk::BlendFactor::ONE,
                     dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 }],

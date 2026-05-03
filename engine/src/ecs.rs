@@ -5,12 +5,14 @@
 
 use std::{
     any::{Any, TypeId},
-    collections::{hash_map::HashMap, HashSet},
+    collections::{HashSet, hash_map::HashMap},
     marker::PhantomData,
     mem::offset_of,
     slice,
     time::Instant,
 };
+
+use proc_macros::{LuaRef, LuaVal};
 macro_rules! assert_unique_types {
     ($($ty:ident)+) => {
         {
@@ -356,7 +358,7 @@ impl_fetch_mut!(req: [T], opt: [], not: [U, V, W]);
 pub trait DynamicComponent {
     fn as_any(self: Box<Self>) -> Box<dyn Any>;
     fn add_to_world(self: Box<Self>, world: &mut World, entity: EntityId)
-        -> Result<(), WorldError>;
+    -> Result<(), WorldError>;
 }
 
 impl<T: 'static> DynamicComponent for T {
@@ -377,6 +379,17 @@ pub struct EntityId(u32);
 impl Default for EntityId {
     fn default() -> Self {
         EntityId(u32::MAX)
+    }
+}
+
+#[derive(Debug, Ord, PartialOrd, Eq, Hash, PartialEq, Clone, LuaVal)]
+#[lua(no_default)]
+pub struct EntityName {
+    pub name: String,
+}
+impl From<String> for EntityName {
+    fn from(name: String) -> Self {
+        Self { name }
     }
 }
 
@@ -478,7 +491,9 @@ impl<T: 'static> Fetch for (T,) {
         }
     }
     fn get<'w>(entity: EntityId, world: &'w World) -> Self::LookupResult<'w> {
-        let storage = world.get_storage().ok_or(WorldError::ComponentTypeMissing)?;
+        let storage = world
+            .get_storage()
+            .ok_or(WorldError::ComponentTypeMissing)?;
         storage
             .get(entity)
             .ok_or(WorldError::EntityMissingComponent)
@@ -734,7 +749,8 @@ impl<'a> Cursor<'a> {
     }
     fn new<T: 'static>(storage: &ComponentStorage<T>) -> Self {
         let first_entity = storage
-            .data.first()
+            .data
+            .first()
             .map(|x| x.0)
             .unwrap_or(EntityId(u32::MAX));
         let storage = unsafe {
@@ -803,7 +819,8 @@ impl<'a> CursorMut<'a> {
     }
     fn new<T: 'static>(storage: &mut ComponentStorage<T>) -> Self {
         let first_entity = storage
-            .data.first()
+            .data
+            .first()
             .map(|x| x.0)
             .unwrap_or(EntityId(u32::MAX));
         let storage = unsafe {
@@ -1020,7 +1037,7 @@ impl World {
     pub fn name(&mut self, name: &str) {
         self.name = name.to_string();
     }
-    pub fn spawn(&mut self) -> EntityId {
+    pub fn spawn_unnamed(&mut self) -> EntityId {
         let free = {
             if self.last_dead.is_empty() {
                 let tmp = self.next_free;
@@ -1032,7 +1049,25 @@ impl World {
         };
         self.entities.insert(EntityId(free));
 
-        EntityId(free)
+        let id = EntityId(free);
+        self.add::<EntityName>(id, "".to_string().into()).unwrap();
+        id
+    }
+    pub fn spawn(&mut self, name: &str) -> EntityId {
+        let free = {
+            if self.last_dead.is_empty() {
+                let tmp = self.next_free;
+                self.next_free += 1;
+                tmp
+            } else {
+                self.last_dead.pop().unwrap() // litterally just checked so is safe
+            }
+        };
+        self.entities.insert(EntityId(free));
+
+        let id = EntityId(free);
+        self.add::<EntityName>(id, name.to_string().into()).unwrap();
+        id
     }
     pub fn despawn(&mut self, entity: EntityId) -> Result<(), WorldError> {
         //HACK: this needs to be replaced with a proper id allocator later, maybe a list of
@@ -1077,6 +1112,15 @@ impl World {
                 x.remove(entity)
             })
     }
+    pub fn find(&self, name: &str) -> Option<EntityId> {
+        let storage = self.get_storage::<EntityName>()?;
+        storage
+            .data
+            .iter()
+            .find(|(_, n)| n.name == name)
+            .map(|(id, _)| id)
+            .copied()
+    }
     pub fn remove_dyn(&mut self, entity: EntityId, typeid: TypeId) -> Result<(), WorldError> {
         self.get_storage_dyn_mut(typeid)
             .ok_or(WorldError::EntityMissingComponent)?
@@ -1101,9 +1145,7 @@ impl World {
                 x.insert(resource);
                 Ok(())
             }
-            std::collections::hash_map::Entry::Occupied(_) => {
-                Err(WorldError::ResourceAlreadyAdded)
-            }
+            std::collections::hash_map::Entry::Occupied(_) => Err(WorldError::ResourceAlreadyAdded),
         }
     }
     pub fn remove_resource<T: 'static>(&mut self) -> Option<T> {
@@ -1189,10 +1231,7 @@ impl World {
                     .expect("should be able to downcast if it exists")
             })
     }
-    fn get_storage_dyn_mut(
-        &mut self,
-        typeid: TypeId,
-    ) -> Option<&mut dyn ErasedComponentStorage> {
+    fn get_storage_dyn_mut(&mut self, typeid: TypeId) -> Option<&mut dyn ErasedComponentStorage> {
         self.component_storages.get_mut(&typeid).map(|x| x.as_mut())
     }
 }
@@ -1232,7 +1271,7 @@ fn benchmark() {
             let mut world = World::init();
             let mut counter = 0u64;
             for _ in 0..n {
-                let e = world.spawn();
+                let e = world.spawn_unnamed();
                 world.add(e, (3.14f64, 42u32)).unwrap(); // comp A
                 world.add(e, [1.0f64; 16]).unwrap(); // comp B
                 world.add(e, "hello").unwrap(); // comp C
@@ -1244,7 +1283,7 @@ fn benchmark() {
         // Prepare a world with all entities pre-populated
         let mut world = World::init();
         for _ in 0..n {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             world.add(e, (3.14f64, 1u32)).unwrap();
             world.add(e, [1.0f64; 16]).unwrap();
             world.add(e, "hello").unwrap();
@@ -1263,7 +1302,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Req<&str>)>();
 
                 for item in query {
-                    counter += item.1 .1[0];
+                    counter += item.1.1[0];
                     std::hint::black_box(counter);
                 }
             },
@@ -1279,7 +1318,7 @@ fn benchmark() {
                 let query = world.query::<(Req<(f64, u32)>, Req<[f64; 16]>, Opt<i64>)>();
 
                 for item in query {
-                    counter += item.1 .2.unwrap_or(&0);
+                    counter += item.1.2.unwrap_or(&0);
                     std::hint::black_box(counter);
                 }
             },
@@ -1368,7 +1407,7 @@ fn correctness() {
     // Test 2: Single entity with all component variations
     {
         let mut world = World::init();
-        let entity = world.spawn();
+        let entity = world.spawn_unnamed();
 
         // Add components of different types
         world.add(entity, String::from("test")).unwrap();
@@ -1394,7 +1433,7 @@ fn correctness() {
     // Test 3: Component type conflicts and overwriting
     {
         let mut world = World::init();
-        let entity = world.spawn();
+        let entity = world.spawn_unnamed();
 
         // Add initial component
         world.add(entity, 100u32).unwrap();
@@ -1426,7 +1465,7 @@ fn correctness() {
 
         // Create entities with various optional component patterns
         for i in 0..20 {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             all_entities.push(e);
 
             // All entities get these base components
@@ -1486,7 +1525,7 @@ fn correctness() {
 
         // Create entities for mutation testing
         for i in 0..5 {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             entities.push(e);
             world.add(e, i as u32).unwrap();
             world.add(e, format!("original-{}", i)).unwrap();
@@ -1525,7 +1564,7 @@ fn correctness() {
 
         // Create entities with multiple components
         for i in 0..10 {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             entities.push(e);
             world.add(e, i as u32).unwrap();
             world.add(e, format!("entity-{}", i)).unwrap();
@@ -1573,7 +1612,7 @@ fn correctness() {
 
         // Create a bunch of entities
         for i in 0..15 {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             entities.push(e);
             world.add(e, i as u32).unwrap();
             world.add(e, format!("entity-{}", i)).unwrap();
@@ -1622,7 +1661,7 @@ fn correctness() {
 
         // Create entities
         for i in 0..8 {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             entities.push(e);
             world.add(e, i as u32).unwrap();
         }
@@ -1654,8 +1693,8 @@ fn correctness() {
         let mut world = World::init();
 
         // Using unit type as zero-sized component
-        let e1 = world.spawn();
-        let e2 = world.spawn();
+        let e1 = world.spawn_unnamed();
+        let e2 = world.spawn_unnamed();
 
         world.add(e1, ()).unwrap(); // Unit type component
         world.add(e1, 42u32).unwrap();
@@ -1699,7 +1738,7 @@ fn correctness() {
 
         // Create many entities with varied component patterns
         for i in 0..entity_count {
-            let e = world.spawn();
+            let e = world.spawn_unnamed();
             all_entities.push(e);
 
             // Base components for all
@@ -1780,7 +1819,7 @@ fn correctness() {
     // Test 11: Error condition testing
     {
         let mut world = World::init();
-        let entity = world.spawn();
+        let entity = world.spawn_unnamed();
 
         // Test removing non-existent component
         let remove_result = world.remove::<String>(entity);
@@ -1814,19 +1853,19 @@ fn main() {
     let mut world = World::init();
 
     // Create entities with different component combinations
-    let e0 = world.spawn();
+    let e0 = world.spawn_unnamed();
     world.add(e0, 1u32).unwrap();
     world.add(e0, "has_string".to_string()).unwrap();
 
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 2u32).unwrap();
     // No string component
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 3u32).unwrap();
     world.add(e2, "also_has_string".to_string()).unwrap();
 
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 4u32).unwrap();
     // No string component
 
@@ -1842,16 +1881,16 @@ fn not_filter_mutable() {
     let mut world = World::init();
 
     // Create entities
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 10u32).unwrap();
     world.add(e1, 1.0f64).unwrap();
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 20u32).unwrap();
     world.add(e2, 2.0f64).unwrap();
     world.add(e2, "excluded".to_string()).unwrap(); // This should exclude e2
 
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 30u32).unwrap();
     world.add(e3, 3.0f64).unwrap();
 
@@ -1891,27 +1930,27 @@ fn not_filter_multiple_exclusions() {
 
     // Create entities with various component combinations
     // e1: u32 only
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
 
     // e2: u32 + String (should be excluded)
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
     world.add(e2, "has_string".to_string()).unwrap();
 
     // e3: u32 + f64 (should be excluded)
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 3u32).unwrap();
     world.add(e3, 3.0f64).unwrap();
 
     // e4: u32 + String + f64 (should be excluded)
-    let e4 = world.spawn();
+    let e4 = world.spawn_unnamed();
     world.add(e4, 4u32).unwrap();
     world.add(e4, "also_has_string".to_string()).unwrap();
     world.add(e4, 4.0f64).unwrap();
 
     // e5: u32 only (another one)
-    let e5 = world.spawn();
+    let e5 = world.spawn_unnamed();
     world.add(e5, 5u32).unwrap();
 
     // Query for u32 but NOT String and NOT f64
@@ -1938,22 +1977,22 @@ fn not_filter_with_optional() {
     let mut world = World::init();
 
     // e1: u32 + optional bool
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
     world.add(e1, true).unwrap();
 
     // e2: u32 + optional bool + String (excluded by Not<String>)
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
     world.add(e2, false).unwrap();
     world.add(e2, "excluded".to_string()).unwrap();
 
     // e3: u32 only (no optional bool)
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 3u32).unwrap();
 
     // e4: u32 + String (excluded, no optional bool)
-    let e4 = world.spawn();
+    let e4 = world.spawn_unnamed();
     world.add(e4, 4u32).unwrap();
     world.add(e4, "also_excluded".to_string()).unwrap();
 
@@ -2004,7 +2043,7 @@ fn not_filter_all_entities_excluded() {
 
     // Create entities that all have the excluded component
     for i in 0..5 {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         world.add(e, i as u32).unwrap();
         world.add(e, "all_have_this".to_string()).unwrap(); // All have String
     }
@@ -2030,7 +2069,7 @@ fn not_filter_none_excluded() {
     // Create entities without the excluded component
     let mut entities = Vec::new();
     for i in 0..5 {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         entities.push(e);
         world.add(e, i as u32).unwrap();
         world.add(e, i as f64).unwrap();
@@ -2055,10 +2094,10 @@ fn not_filter_none_excluded() {
 fn not_filter_add_excluded_component_after() {
     let mut world = World::init();
 
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
 
     // Initially, both should appear in Not<String> query
@@ -2080,11 +2119,11 @@ fn not_filter_add_excluded_component_after() {
 fn not_filter_remove_excluded_component() {
     let mut world = World::init();
 
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
     world.add(e1, "initially_excluded".to_string()).unwrap();
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
 
     // Initially, only e2 should appear
@@ -2114,7 +2153,7 @@ fn not_filter_large_scale() {
 
     // Create many entities
     for i in 0..entity_count {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         world.add(e, i as u32).unwrap();
 
         // Every 3rd entity gets the excluded component
@@ -2160,7 +2199,7 @@ fn not_filter_large_scale_mutable() {
 
     // Create entities
     for i in 0..entity_count {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         world.add(e, i as u32).unwrap();
         world.add(e, i as f64).unwrap();
 
@@ -2220,14 +2259,14 @@ fn not_filter_large_scale_mutable() {
 fn not_filter_with_entity_destruction() {
     let mut world = World::init();
 
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
     world.add(e2, "excluded".to_string()).unwrap();
 
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 3u32).unwrap();
 
     // Query should find e1 and e3
@@ -2258,15 +2297,15 @@ fn not_filter_zero_sized_types() {
     let mut world = World::init();
 
     // Using unit type as zero-sized marker component
-    let e1 = world.spawn();
+    let e1 = world.spawn_unnamed();
     world.add(e1, 1u32).unwrap();
     world.add(e1, ()).unwrap(); // Marker component
 
-    let e2 = world.spawn();
+    let e2 = world.spawn_unnamed();
     world.add(e2, 2u32).unwrap();
     // No marker
 
-    let e3 = world.spawn();
+    let e3 = world.spawn_unnamed();
     world.add(e3, 3u32).unwrap();
     world.add(e3, ()).unwrap(); // Marker component
 
@@ -2302,7 +2341,7 @@ fn not_filter_query_consistency() {
 
     // Create a stable set of entities
     for i in 0..20 {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         world.add(e, i as u32).unwrap();
 
         if i % 2 == 0 {
@@ -2336,7 +2375,7 @@ fn not_filter_nested_queries() {
 
     // Create entities
     for i in 0..10 {
-        let e = world.spawn();
+        let e = world.spawn_unnamed();
         world.add(e, i as u32).unwrap();
         world.add(e, i as f64).unwrap();
 

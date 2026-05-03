@@ -440,30 +440,17 @@ fn build_hierarchy(
     }
 }
 
-#[derive(LuaRef, Debug, Clone, Copy)]
+#[derive(Default, LuaRef, Debug, Clone, Copy)]
 #[lua(no_default)]
 pub struct Material {
     pub albedo: Texture,
+    pub alpha_clip: Option<f32>,
 }
 
-impl Default for Material {
-    fn default() -> Self {
-        Self {
-            albedo: Default::default(),
-        }
-    }
-}
-
-#[derive(LuaRef, Debug, Clone, Copy)]
+#[derive(Default, LuaRef, Debug, Clone, Copy)]
 pub struct Texture {
     #[lua(skip)]
     id: usize,
-}
-impl Default for Texture {
-    fn default() -> Self {
-        // the first textue is always going to be a white 1x1 texture so this is fine
-        Self { id: 0 }
-    }
 }
 
 #[derive(LuaRef, Debug, Clone, Copy)]
@@ -474,13 +461,16 @@ pub struct Skybox {
 impl Skybox {
     pub fn new(cubemap: Texture) -> Self {
         Self {
-            material: Material { albedo: cubemap },
+            material: Material {
+                albedo: cubemap,
+                alpha_clip: None,
+            },
         }
     }
 }
 impl Material {
-    pub fn create(albedo: Texture) -> Self {
-        Self { albedo }
+    pub fn create(albedo: Texture, alpha_clip: Option<f32>) -> Self {
+        Self { albedo, alpha_clip }
     }
 }
 #[derive(LuaRef, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

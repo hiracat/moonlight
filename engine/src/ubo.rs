@@ -7,6 +7,7 @@ use ultraviolet as uv;
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     core::TerrainMap,
+    resources::Material,
 };
 
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
@@ -39,6 +40,20 @@ impl From<&Transform> for ModelUBO {
         ModelUBO {
             model,
             normal: model.inversed().transposed(),
+        }
+    }
+}
+
+#[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct MaterialUBO {
+    alpha_clip: f32,
+}
+
+impl From<&Material> for MaterialUBO {
+    fn from(material: &Material) -> Self {
+        Self {
+            alpha_clip: material.alpha_clip.unwrap_or(0.0),
         }
     }
 }

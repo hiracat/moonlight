@@ -1,8 +1,13 @@
+use egui::epaint::text;
 use moonlight::animations::PlaybackMode;
 use moonlight::ecs;
 use moonlight::lua;
+use moonlight::resources::Texture;
+use proc_macros::LuaUnion;
 use proc_macros::LuaVal;
+use std::collections::HashMap;
 use std::f32::consts::PI;
+use ultraviolet::Bivec3;
 
 use image::ImageReader;
 use moonlight::{
@@ -30,18 +35,6 @@ pub fn setup_game() -> App {
     app.game.on_update.push(System::Lua("Update".to_string()));
     app.game.on_ui.push(ui);
     app
-}
-
-#[derive(LuaVal, Default, Clone)]
-struct Slider {
-    label: String,
-    value: f32,
-    min: f32,
-    max: f32,
-}
-#[derive(LuaRef, Default, Clone)]
-struct UIStuff {
-    sliders: Vec<Slider>,
 }
 
 #[derive(LuaRef, Clone, Copy)]
@@ -109,7 +102,7 @@ fn start(world: &mut World, engine: &mut Engine) {
 
     // fox — stays Rust because Controllable, Collider, RigidBody, Animated
     // are all engine-side components that Lua can't fully construct yet
-    let fox = world.spawn();
+    let fox = world.spawn("fox");
     world
         .add(
             fox,
@@ -148,14 +141,16 @@ fn start(world: &mut World, engine: &mut Engine) {
         "data/models/textures/animated_fox_texture.png",
         resources::TextureFormat::Srgba,
     );
-    world.add(fox, Material::create(fox_albedo)).unwrap();
+    world.add(fox, Material::create(fox_albedo, None)).unwrap();
 
-    let ground = world.spawn();
+    let ground = world.spawn("ground");
     let ground_tex = engine.resource_manager.create_texture(
         "data/models/textures/ground_roots.png",
         resources::TextureFormat::Srgba,
     );
-    world.add(ground, Material::create(ground_tex)).unwrap();
+    world
+        .add(ground, Material::create(ground_tex, None))
+        .unwrap();
     world
         .add(
             ground,
@@ -182,7 +177,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         .unwrap();
 
     // lights — could move to Lua but no reason to
-    let blue_light = world.spawn();
+    let blue_light = world.spawn("blue_light");
     world
         .add(
             blue_light,
@@ -196,7 +191,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         )
         .unwrap();
 
-    let warm_light = world.spawn();
+    let warm_light = world.spawn("warm_light");
     world
         .add(
             warm_light,
@@ -209,6 +204,32 @@ fn start(world: &mut World, engine: &mut Engine) {
             Transform::from(Some(Vec3::new(0.0, 3.0, 0.0)), None, None),
         )
         .unwrap();
+
+    let tree = world.spawn("tree");
+    world
+        .add(
+            tree,
+            Transform::from(Some(Vec3::new(0.0, 150.0, 0.0)), None, None),
+        )
+        .unwrap();
+    world
+        .add(
+            tree,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/maple_tree.glb")
+                .0,
+        )
+        .unwrap();
+    world
+        .add(
+            tree,
+            Material {
+                albedo: Texture::default(),
+                alpha_clip: Some(0.5),
+            },
+        )
+        .unwrap();
 }
 
 fn game_update(world: &mut World, _engine: &mut Engine) {
@@ -219,20 +240,193 @@ fn game_update(world: &mut World, _engine: &mut Engine) {
     camera_update(world, delta_time, camera_offset);
 }
 
-fn ui(world: &mut World, context: &egui::Context) {
-    egui::CentralPanel::default().show(context, |_ui| {
-        if let Some(ui_stuff) = world.get_mut_resource::<UIStuff>() {
-            for slider in &mut ui_stuff.sliders {
-                egui::Window::new(&slider.label).show(context, |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut slider.value, slider.min..=slider.max)
-                            .text(&slider.label)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-                });
+#[derive(LuaVal, Default, Clone)]
+pub struct Slider {
+    value: f32,
+    min: f32,
+    max: f32,
+    label: Option<String>,
+}
+
+#[derive(LuaVal, Default, Clone)]
+pub struct Button {
+    clicked: bool,
+    label: Option<String>,
+}
+
+#[derive(LuaVal, Default, Clone)]
+pub struct Label {
+    text: String,
+}
+#[derive(LuaVal, Default, Clone)]
+pub struct TextInput {
+    value: String,
+    label: Option<String>,
+}
+#[derive(LuaVal, Default, Clone)]
+pub struct NumberInput {
+    value: f32,
+    min: f32,
+    max: f32,
+    label: Option<String>,
+}
+
+#[derive(LuaRef, Clone, Default)]
+#[lua(no_default)]
+struct UIStuff {
+    // path to widget
+    widgets: HashMap<String, Widget>,
+    schema: UISchema,
+    show_settings: bool,
+}
+
+#[derive(LuaVal, Default, Clone)]
+struct UISchema {
+    windows: Vec<WindowSchema>,
+}
+
+#[derive(LuaVal, Default, Clone)]
+struct WindowSchema {
+    name: String,
+    fields: Vec<LayoutItem>,
+}
+#[derive(LuaUnion, Clone, Hash, PartialEq, Eq)]
+#[lua(no_default)]
+pub enum LayoutItem {
+    Field(String),
+    Row(Row),
+    Column(Collumn),
+}
+#[derive(LuaVal, Clone, Hash, PartialEq, Eq)]
+#[lua(no_default)]
+pub struct Row {
+    items: Vec<LayoutItem>,
+}
+#[derive(LuaVal, Clone, Hash, PartialEq, Eq)]
+#[lua(no_default)]
+pub struct Collumn {
+    items: Vec<LayoutItem>,
+}
+
+#[derive(LuaUnion, Clone)]
+#[lua(no_default)]
+pub enum Widget {
+    Slider(Slider),
+    Button(Button),
+    Label(Label),
+    TextInput(TextInput),
+    NumberInput(NumberInput),
+    Separator,
+}
+impl Widget {
+    fn label(&self) -> Option<&str> {
+        match self {
+            Widget::Slider(slider) => slider.label.as_deref(),
+            Widget::Button(button) => button.label.as_deref(),
+            Widget::Label(label) => Some(label.text.as_ref()),
+            Widget::TextInput(text_input) => text_input.label.as_deref(),
+            Widget::NumberInput(number_input) => number_input.label.as_deref(),
+            Widget::Separator => None,
+        }
+    }
+}
+
+fn default_label(path: &str) -> &str {
+    path.split(".").last().unwrap()
+}
+
+fn draw_widget(ui: &mut egui::Ui, path: &str, widget: &mut Widget) {
+    let label = widget
+        .label()
+        .unwrap_or_else(|| default_label(path))
+        .to_owned();
+
+    match widget {
+        Widget::Slider(s) => {
+            ui.add(egui::Slider::new(&mut s.value, s.min..=s.max).text(label));
+        }
+
+        Widget::Button(b) => {
+            if ui.button(label).clicked() {
+                b.clicked = true;
             }
         }
-    });
+
+        Widget::Label(v) => {
+            ui.label(&v.text);
+        }
+
+        Widget::TextInput(t) => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.text_edit_singleline(&mut t.value);
+            });
+        }
+
+        Widget::NumberInput(n) => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.add(egui::DragValue::new(&mut n.value).range(n.min..=n.max));
+            });
+        }
+        Widget::Separator => {
+            ui.separator();
+        }
+    }
+}
+fn draw_item(ui: &mut egui::Ui, item: &LayoutItem, ui_stuff: &mut UIStuff) {
+    match item {
+        LayoutItem::Field(name) => {
+            if let Some(widget) = ui_stuff.widgets.get_mut(name) {
+                draw_widget(ui, name, widget);
+            } else {
+                eprintln!("missing wiget {}", name)
+            }
+        }
+        LayoutItem::Row(row) => {
+            ui.horizontal(|ui| {
+                for item in &row.items {
+                    draw_item(ui, item, ui_stuff);
+                }
+            });
+        }
+
+        LayoutItem::Column(col) => {
+            ui.vertical(|ui| {
+                for item in &col.items {
+                    draw_item(ui, item, ui_stuff);
+                }
+            });
+        }
+    }
+}
+
+fn ui(world: &mut World, context: &egui::Context) {
+    if let Some(ui_stuff) = world.get_mut_resource::<UIStuff>() {
+        if ui_stuff.show_settings {
+            print!("{}", ui_stuff.show_settings);
+            egui::Window::new("Settings").show(context, |ui| {
+                context.settings_ui(ui);
+            });
+        };
+        for item in ui_stuff.widgets.values_mut() {
+            if let Widget::Button(button) = item {
+                button.clicked = false;
+            }
+        }
+
+        let windows = ui_stuff.schema.windows.clone();
+
+        for window_schema in &windows {
+            let window_name = &window_schema.name;
+
+            egui::Window::new(window_name).show(context, |ui| {
+                for item in &window_schema.fields {
+                    draw_item(ui, item, ui_stuff);
+                }
+            });
+        }
+    }
 }
 
 // this on down is human written code though
@@ -254,7 +448,9 @@ fn physics_update(world: &mut World, delta_time: f32) {
                 rigidbody.velocity.z = 0.0;
             } else {
                 let direction = horizontal_velocity.normalized();
-                rigidbody.velocity -= direction * frame_decel;
+                let decel = direction * frame_decel;
+                rigidbody.velocity.x -= decel.x;
+                rigidbody.velocity.z -= decel.z;
             }
         }
         // NOTE: APPLIES GRAVITY, GROUNDED FLAGS DONT MATTER BECAUSE WILL BE CORRECTED FOR IN
@@ -367,6 +563,22 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
 }
 
 fn player_update(world: &mut World, delta_time: f32) {
+    // first pass: get player position
+    let player_pos = {
+        let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>)>();
+        let (_, (_, transform)) = binding.next().unwrap();
+        transform.position
+    };
+
+    // sample terrain while we have no other borrows
+    let (terrain_normal, terrain_height) = {
+        let terrainmap = world.get_resource::<TerrainMap>().unwrap();
+        (
+            terrainmap.get_normal_at(player_pos.x, player_pos.z),
+            terrainmap.get_height_at(player_pos.x, player_pos.z),
+        )
+    };
+
     let keyboard = world
         .get_resource::<Keyboard>()
         .expect("keyboard should have been added during resumed")
@@ -402,28 +614,50 @@ fn player_update(world: &mut World, delta_time: f32) {
     }
     if !(delta_v == Vec3::zero()) {
         delta_v = camera_rotation * delta_v;
+        delta_v.normalize();
         delta_v = Vec3 {
             x: delta_v.x,
             y: 0.0,
             z: delta_v.z,
         };
-
         delta_v.normalize();
 
-        let forward = -Vec3::unit_z();
-        let face_direction = if forward.dot(delta_v) < -1.0 + 0.0001 {
-            Rotor3::from_rotation_xz(PI)
+        let on_ground = (terrain_height - player_pos.y).abs() < 0.6;
+        let n = terrain_normal.normalized();
+        dbg!(n);
+        // rotor 1: tilts from flat ground to terrain slope — only pitch/roll, no yaw
+        let tilt = if n.dot(Vec3::unit_y()) < -1.0 + 1e-6 {
+            // terrain is exactly upside down — rotate 180° around any horizontal axis
+            Rotor3::from_rotation_between(Vec3::unit_y(), Vec3::unit_x())
+                * Rotor3::from_rotation_between(Vec3::unit_x(), n)
         } else {
-            Rotor3::from_rotation_between(forward, delta_v)
+            Rotor3::from_rotation_between(Vec3::unit_y(), n)
+        };
+        let face_direction = {
+            // rotor 2: spins to face movement direction — only yaw, no pitch/roll
+            let forward = Vec3::new(0.0, 0.0, -1.0);
+            let yaw = if delta_v.dot(forward) < -1.0 + 1e-6 {
+                // moving exactly backwards — rotate 180° around Y
+                Rotor3::from_angle_plane(PI, Bivec3::from_normalized_axis(Vec3::unit_y()))
+            } else {
+                Rotor3::from_rotation_between(forward, delta_v)
+            };
+
+            // compose: apply yaw first, then tilt on top
+            (tilt.scaled_by(if on_ground { 1.0 } else { 0.0 }) * yaw).normalized()
         };
 
-        let mut horizontal_velocity = rigidbody.velocity;
-        horizontal_velocity.y = 0.0;
-
+        let horizontal_velocity = rigidbody.velocity - n * n.dot(rigidbody.velocity);
+        dbg!(horizontal_velocity);
         let speed_remaining = (max_speed - horizontal_velocity.mag()).clamp(0.0, max_speed);
+        dbg!(speed_remaining);
         let acceleration = 20.0;
 
+        dbg!(delta_v);
+        delta_v = if on_ground { tilt * delta_v } else { delta_v };
+        dbg!(delta_v);
         delta_v *= speed_remaining * delta_time * acceleration;
+        dbg!(delta_v);
         rigidbody.velocity += delta_v;
 
         let rotation_speed = 5.0;
