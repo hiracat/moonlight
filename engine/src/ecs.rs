@@ -140,7 +140,8 @@ macro_rules! impl_fetch {
 
                     // get the val of each returning err if storage doesnt have it
                     $(
-                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get(entity).ok_or(WorldError::EntityMissingComponent) {
+                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get(entity).ok_or(WorldError::EntityMissingComponent(std::any::type_name::<T>())
+) {
                             Ok(it) => it,
                             Err(err) => return Err(err),
                         };
@@ -286,7 +287,7 @@ macro_rules! impl_fetch_mut {
 
                     // get the val of each returning err if storage doesnt have it
                     $(
-                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get_mut(entity).ok_or(WorldError::EntityMissingComponent) {
+                        let [<val_ $req_ty:lower>] = match [<storage_ $req_ty:lower>].get_mut(entity).ok_or(WorldError::EntityMissingComponent(std::any::type_name::<T>())) {
                             Ok(it) => it,
                             Err(err) => return Err(err),
                         };
@@ -396,7 +397,7 @@ impl From<String> for EntityName {
 #[derive(Debug)]
 pub enum WorldError {
     ComponentAlreadyAdded,
-    EntityMissingComponent,
+    EntityMissingComponent(&'static str),
     EntityMissing,
     ComponentTypeMissing,
     ResourceAlreadyAdded,
@@ -496,7 +497,9 @@ impl<T: 'static> Fetch for (T,) {
             .ok_or(WorldError::ComponentTypeMissing)?;
         storage
             .get(entity)
-            .ok_or(WorldError::EntityMissingComponent)
+            .ok_or(WorldError::EntityMissingComponent(
+                std::any::type_name::<T>(),
+            ))
     }
 }
 impl<T: 'static> FetchMut for (T,) {
@@ -513,7 +516,9 @@ impl<T: 'static> FetchMut for (T,) {
             .ok_or(WorldError::ComponentTypeMissing)?;
         storage
             .get_mut(entity)
-            .ok_or(WorldError::EntityMissingComponent)
+            .ok_or(WorldError::EntityMissingComponent(
+                std::any::type_name::<T>(),
+            ))
     }
 
     fn fetch<'w>(world: &'w mut World) -> Self::Iter<'w> {
@@ -908,7 +913,9 @@ impl<T: 'static> ComponentStorage<T> {
                 }
                 Ok(())
             }
-            Err(_) => Err(WorldError::EntityMissingComponent),
+            Err(_) => Err(WorldError::EntityMissingComponent(
+                std::any::type_name::<T>(),
+            )),
         }
     }
     pub fn get(&self, entity: EntityId) -> Option<&T> {
@@ -1079,7 +1086,7 @@ impl World {
                     self.last_dead.push(entity.0);
                 }
                 for storage in &mut self.component_storages {
-                    storage.1.remove_entity(entity)?;
+                    let _ = storage.1.remove_entity(entity); // ignore missing component errors
                 }
                 Ok(())
             }
@@ -1108,9 +1115,7 @@ impl World {
     //PERF: this should be replaced with some kind of batch removal system
     pub fn remove<T: 'static>(&mut self, entity: EntityId) -> Result<(), WorldError> {
         self.get_storage_mut::<T>()
-            .map_or(Err(WorldError::EntityMissingComponent), |x| {
-                x.remove(entity)
-            })
+            .map_or(Err(WorldError::ComponentTypeMissing), |x| x.remove(entity))
     }
     pub fn find(&self, name: &str) -> Option<EntityId> {
         let storage = self.get_storage::<EntityName>()?;
@@ -1123,7 +1128,7 @@ impl World {
     }
     pub fn remove_dyn(&mut self, entity: EntityId, typeid: TypeId) -> Result<(), WorldError> {
         self.get_storage_dyn_mut(typeid)
-            .ok_or(WorldError::EntityMissingComponent)?
+            .ok_or(WorldError::ComponentTypeMissing)?
             .remove_entity(entity)
     }
 
@@ -1379,6 +1384,61 @@ fn benchmark() {
             }
         });
     }
+}
+
+#[test]
+fn id_reuse_after_despawn() {
+    let mut world = World::init();
+
+    let e1 = world.spawn_unnamed();
+    world.add(e1, 42u32).unwrap();
+    world.add(e1, "hello".to_string()).unwrap();
+
+    // despawn e1, its ID goes into last_dead
+    world.despawn(e1).unwrap();
+
+    // spawn new entity — should reuse e1's ID
+    let e2 = world.spawn_unnamed();
+    assert_eq!(e1, e2, "ID should be reused");
+
+    // e2 should have NO components from e1
+    let count = world.query::<(Req<u32>,)>().count();
+    assert_eq!(count, 0, "reused ID should have no leftover components");
+
+    // adding components to e2 should work cleanly
+    world.add(e2, 99u32).unwrap();
+    for (e, (val,)) in world.query::<(u32,)>() {
+        assert_eq!(*val, 99u32, "should only see e2's component, not e1's");
+    }
+
+    println!("✅ ID reuse test passed");
+}
+
+#[test]
+fn despawn_entity_missing_some_components() {
+    let mut world = World::init();
+
+    let e1 = world.spawn_unnamed();
+    world.add(e1, 1u32).unwrap();
+    // notably does NOT have String, f64, etc
+
+    let e2 = world.spawn_unnamed();
+    world.add(e2, 2u32).unwrap();
+    world.add(e2, "hello".to_string()).unwrap();
+
+    // despawning e1 should succeed even though it's missing String storage
+    world.despawn(e1).unwrap();
+
+    // e2 should be unaffected
+    let count = world.query::<(Req<u32>,)>().count();
+    assert_eq!(count, 1);
+
+    // e1 should not appear anywhere
+    for (e, _) in world.query::<(u32,)>() {
+        assert_ne!(e, e1, "despawned entity should not appear");
+    }
+
+    println!("✅ Despawn with missing components test passed");
 }
 
 // Test what happens with non-consecutive entity IDs

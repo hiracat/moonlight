@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::{DeriveInput, parse_macro_input};
 
 #[proc_macro_derive(LuaRef, attributes(lua))]
@@ -35,7 +35,10 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
         quote!(Some(|| Box::new(<#name>::default()) as Box<dyn #krate::ecs::DynamicComponent>))
     };
 
+    let owned_name = quote::format_ident!("{}Owned", name);
+
     let mut user_data_fields = Vec::new();
+    let mut owned_data_fields = Vec::new();
     let mut lua_types = Vec::new();
 
     for field in fields {
@@ -81,9 +84,8 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
             });
 
             fields.add_field_method_set(#field_name_str, |_lua, this, val: ::mlua::Value| {
-                let world_ref = unsafe { &mut *this.world };
-                let result = <#field_type as #krate::lua::LuaSeralize>::from_lua(&val, world_ref)?;
                 let world = unsafe { &mut *this.world };
+                let result = <#field_type as #krate::lua::LuaSeralize>::from_lua(&val, world)?;
                 let comp = match this.source {
                     #krate::lua::ComponentSource::Entity(entity) => world
                         .get_mut::<(#name,)>(entity)
@@ -100,6 +102,20 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
                 Ok(())
             });
         });
+
+        owned_data_fields.push(quote! {
+            fields.add_field_method_get(#field_name_str, |lua, this| {
+                let world = unsafe { &mut *this.world };
+                <#field_type as #krate::lua::LuaSeralize>::to_lua(&this.value.#field_name, lua, world)
+            });
+
+            fields.add_field_method_set(#field_name_str, |_lua, this, val: ::mlua::Value| {
+                let world = unsafe { &mut *this.world };
+                let result = <#field_type as #krate::lua::LuaSeralize>::from_lua(&val, world)?;
+                this.value.#field_name = result;
+                Ok(())
+            });
+        });
     }
 
     quote! {
@@ -107,8 +123,13 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
             world: *mut #krate::ecs::World,
             source: #krate::lua::ComponentSource,
         }
-        unsafe impl Send for #ref_name {}  
+        unsafe impl Send for #ref_name {}
 
+        pub struct #owned_name {
+            world: *mut #krate::ecs::World,
+            value: #name,
+        }
+        unsafe impl Send for #owned_name {}
 
         impl ::mlua::UserData for #ref_name {
             fn add_fields<F: ::mlua::UserDataFields<Self>>(fields: &mut F) {
@@ -116,28 +137,40 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
             }
         }
 
+        impl ::mlua::UserData for #owned_name {
+            fn add_fields<F: ::mlua::UserDataFields<Self>>(fields: &mut F) {
+                #(#owned_data_fields)*
+            }
+        }
+
         impl #krate::lua::LuaSeralize for #name {
             fn from_lua(value: &::mlua::Value, world: &mut #krate::ecs::World) -> ::mlua::Result<Self> {
                 match value {
                     ::mlua::Value::UserData(data) => {
-                        let data_ref = data.borrow::<#ref_name>()?;
-                        Ok(match data_ref.source {
-                            #krate::lua::ComponentSource::Entity(entity) => {
-                                world.get::<(#name,)>(entity)
-                                    .map(|x|x.clone())
-                                    .map_err(|e| ::mlua::Error::RuntimeError(
-                                            format!("entity missing component {}: {:?}", #name_str, e)
-                                    ))?
-                                    .clone()
-                            },
-                            #krate::lua::ComponentSource::Resource => {
-                                world.get_resource::<#name>()
-                                    .cloned()
-                                    .ok_or_else(|| ::mlua::Error::RuntimeError(
-                                        format!("resource {} missing", #name_str)
-                                    ))?
-                            },
-                        })
+                        if let Ok(data_ref) = data.borrow::<#ref_name>() {
+                            Ok(match data_ref.source {
+                                #krate::lua::ComponentSource::Entity(entity) => {
+                                    world.get::<(#name,)>(entity)
+                                        .map(|x| x.clone())
+                                        .map_err(|e| ::mlua::Error::RuntimeError(
+                                                format!("entity missing component {}: {:?}", #name_str, e)
+                                        ))?
+                                },
+                                #krate::lua::ComponentSource::Resource => {
+                                    world.get_resource::<#name>()
+                                        .cloned()
+                                        .ok_or_else(|| ::mlua::Error::RuntimeError(
+                                            format!("resource {} missing", #name_str)
+                                        ))?
+                                },
+                            })
+                        } else if let Ok(owned) = data.borrow::<#owned_name>() {
+                            Ok(owned.value.clone())
+                        } else {
+                            Err(::mlua::Error::RuntimeError(
+                                format!("expected {} userdata, found {}", #name_str, value.type_name())
+                            ))
+                        }
                     },
                     _ => Err(::mlua::Error::RuntimeError(
                         format!("expected {} userdata, found {}", #name_str, value.type_name())
@@ -145,13 +178,12 @@ pub fn derive_lua_reference(input: TokenStream) -> TokenStream {
                 }
             }
 
-            // Can't convert an owned LuaRef type to lua without an entity handle.
-            // Access fields directly via get_component/query instead.
-            fn to_lua(&self, _lua: &::mlua::Lua, _world: &mut #krate::ecs::World) -> ::mlua::Result<::mlua::Value> {
-                Err(::mlua::Error::RuntimeError(format!(
-                    "cannot convert owned {} to lua — access fields via get_component or query",
-                    #name_str
-                )))
+            fn to_lua(&self, lua: &::mlua::Lua, world: &mut #krate::ecs::World) -> ::mlua::Result<::mlua::Value> {
+                let ud = lua.create_userdata(#owned_name {
+                    world: world as *mut #krate::ecs::World,
+                    value: self.clone(),
+                })?;
+                Ok(::mlua::Value::UserData(ud))
             }
         }
 
@@ -216,18 +248,6 @@ pub fn derive_lua_value(input: TokenStream) -> TokenStream {
     let mut lua_types = Vec::new();
 
     for field in fields {
-        let skip = field.attrs.iter().any(|attr| {
-            if !attr.path().is_ident("lua") {
-                return false;
-            }
-            attr.parse_args::<syn::Ident>()
-                .map(|ident| ident == "skip")
-                .unwrap_or(false)
-        });
-        if skip {
-            continue;
-        }
-
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
         let field_name_str = field_name.to_string();
@@ -552,54 +572,42 @@ pub fn derive_lua_union(input: TokenStream) -> TokenStream {
     }.into()
 }
 
-//NOTE: this should be recursive to handle nested types, but honestly f that for now
+fn generic_arg_to_type_str(arg: &syn::GenericArgument) -> String {
+    match arg {
+        syn::GenericArgument::Type(ty) => get_field_type_string_name(ty),
+        other => panic!("unsupported type arg {}", other.to_token_stream()),
+    }
+}
+
 fn get_field_type_string_name(field_type: &syn::Type) -> String {
     match field_type {
         syn::Type::Path(type_path) => {
             let last = type_path.path.segments.last().unwrap();
             let name = last.ident.to_string();
-
             match &last.arguments {
                 syn::PathArguments::AngleBracketed(args) => {
                     let mut iter = args.args.iter();
-
                     match name.as_str() {
-                        "Vec" => {
-                            let inner = iter.next().unwrap(); 
-                            let inner_str = quote!(#inner).to_string();
-                            format!("{}[]", inner_str)
-                        }
-
-                        "Option" => {
-                            let inner = iter.next().unwrap(); 
-                            let inner_str = quote!(#inner).to_string();
-                            format!("{}?", inner_str)
-                        }
-
-                        "Box" => {
-                            let inner = iter.next().unwrap(); 
-                            quote!(#inner).to_string()
-                        }
-
+                        "Vec" => format!("{}[]", generic_arg_to_type_str(iter.next().unwrap())),
+                        "Option" => format!("{}?", generic_arg_to_type_str(iter.next().unwrap())),
+                        "Box" => generic_arg_to_type_str(iter.next().unwrap()),
                         "HashMap" => {
-                            let k = iter.next().unwrap();
-                            let v = iter.next().unwrap();
-                            let key_str = rust_type_to_lua(&quote!(#k).to_string());
-                            let val_str = rust_type_to_lua(&quote!(#v).to_string());
+                            let key_str =
+                                rust_type_to_lua(&generic_arg_to_type_str(iter.next().unwrap()));
+                            let val_str =
+                                rust_type_to_lua(&generic_arg_to_type_str(iter.next().unwrap()));
                             format!("table<{}, {}>", key_str, val_str)
                         }
-
-
                         _ => name,
                     }
                 }
-
                 _ => name,
             }
         }
-        _ => quote!(#field_type).to_string(),
+        other => panic!("unsupported type arg {}", other.to_token_stream()),
     }
 }
+
 //WARNING: this is duplicated from lua.rs, updates should also go there
 fn rust_type_to_lua(rust_type: &str) -> String {
     let split_idx = rust_type

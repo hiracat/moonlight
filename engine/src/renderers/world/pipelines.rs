@@ -14,7 +14,7 @@ use educe::Educe;
 use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 
 use crate::core::TerrainMap;
-use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
+use crate::ecs::{EntityName, Not, NotM, Opt, OptM, ReqM, World};
 use crate::renderers::world::descriptors::{BindingData, DescriptorManager};
 use crate::renderers::world::draw::{DrawStyle, FRAMES_IN_FLIGHT};
 use crate::renderers::world::rendergraph::{ImageDesc, ImageId, RenderGraph};

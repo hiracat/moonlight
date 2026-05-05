@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
 use educe::Educe;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, EncodableLayout, GenericImage, ImageReader, Rgba};
-use proc_macros::LuaRef;
+use proc_macros::{LuaRef, LuaVal};
 use ultraviolet as uv;
 
 use crate::{
@@ -478,7 +478,7 @@ impl Material {
 pub struct Mesh {
     #[lua(skip)]
     id: usize,
-    pub(crate) animated: bool,
+    pub animated: bool,
 }
 
 #[derive(Debug)]

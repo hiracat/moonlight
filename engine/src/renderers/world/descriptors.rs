@@ -27,6 +27,7 @@ pub struct BindingHandle {
     pipeline_index: usize,
     set_index: u32,
     binding_index: u32,
+    data_index: usize,
 }
 
 // copied from rspirv_reflect, because it doesnt impl hash
@@ -79,15 +80,15 @@ impl DescriptorManager {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1024,
+                descriptor_count: 4196,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 256,
+                descriptor_count: 1024,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 256,
+                descriptor_count: 1024,
             },
         ];
 
@@ -95,7 +96,7 @@ impl DescriptorManager {
             device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo {
-                        max_sets: 256,
+                        max_sets: 1024,
                         pool_size_count: pool_sizes.len() as u32,
                         p_pool_sizes: pool_sizes.as_ptr(),
                         ..Default::default()
@@ -126,16 +127,20 @@ impl DescriptorManager {
         let pipeline_resources = self.pipeline_resources[pipeline.arr_index]
             .as_mut()
             .unwrap();
-        pipeline_resources
+        let vec = pipeline_resources
             .requested_bind_cmds
             .entry(set_index)
-            // fill with an empty btree map if none are there
             .or_default()
-            .insert(binding_index, data);
+            .entry(binding_index)
+            .or_default();
+        let data_index = vec.len();
+        vec.push(data);
+
         BindingHandle {
             pipeline_index: pipeline.arr_index,
             set_index,
             binding_index,
+            data_index,
         }
     }
     /// bind takes all the handles and actually takes gpu state allocates buffers and writes data, so its much more
@@ -210,8 +215,8 @@ impl DescriptorManager {
         let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
 
         for handle in handles {
-            let binding_data =
-                &pipeline_resources.requested_bind_cmds[&handle.set_index][&handle.binding_index];
+            let binding_data = &pipeline_resources.requested_bind_cmds[&handle.set_index]
+                [&handle.binding_index][handle.data_index];
 
             match binding_data {
                 BindingData::Uniform { data } => {
@@ -254,8 +259,8 @@ impl DescriptorManager {
         let mut buffer_info_idx = 0;
         let mut image_info_idx = 0;
         for handle in handles {
-            let binding_data =
-                &pipeline_resources.requested_bind_cmds[&handle.set_index][&handle.binding_index];
+            let binding_data = &pipeline_resources.requested_bind_cmds[&handle.set_index]
+                [&handle.binding_index][handle.data_index];
 
             match binding_data {
                 BindingData::Uniform { .. } => {
@@ -445,7 +450,7 @@ impl DescriptorManager {
 #[educe(Debug)]
 struct PipelineResources {
     // indexed by set, binding
-    requested_bind_cmds: BTreeMap<u32, BTreeMap<u32, BindingData>>,
+    requested_bind_cmds: BTreeMap<u32, BTreeMap<u32, Vec<BindingData>>>,
     set_layouts: HashMap<u32, vk::DescriptorSetLayout>,
     pipeline_layout: vk::PipelineLayout,
     #[educe(Debug(ignore))]

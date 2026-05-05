@@ -15,6 +15,7 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use winit::dpi::PhysicalSize;
 
+use crate::renderers::world::draw::FRAMES_IN_FLIGHT;
 use crate::renderers::world::pipelines::{
     ColorBlendState, DepthStencilState, GraphicsPipelineDesc, InputAssemblyState, MultisampleState,
     RasterState, VertexInputState, create_graphics_pipeline, create_pipeline_layout_from_vert_frag,
@@ -31,10 +32,10 @@ pub struct UIRenderer {
     pub pipeline: vk::Pipeline,
 
     pipeline_layout: vk::PipelineLayout,
-    vertex_buffer: vk::Buffer,
-    index_buffer: vk::Buffer,
-    vertex_memory: Allocation,
-    index_memory: Allocation,
+    vertex_buffers: [vk::Buffer; FRAMES_IN_FLIGHT],
+    index_buffers: [vk::Buffer; FRAMES_IN_FLIGHT],
+    vertex_memories: [Allocation; FRAMES_IN_FLIGHT],
+    index_memories: [Allocation; FRAMES_IN_FLIGHT],
 
     descriptor_set_layout: vk::DescriptorSetLayout,
 
@@ -62,18 +63,21 @@ impl Drop for UIRenderer {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_buffer(self.vertex_buffer, None);
-            self.device.destroy_buffer(self.index_buffer, None);
+            for i in 0..FRAMES_IN_FLIGHT {
+                self.device.destroy_buffer(self.vertex_buffers[i], None);
+                self.device.destroy_buffer(self.index_buffers[i], None);
+            }
         }
         // textures drop themselves via GpuTexture::drop
         self.textures.clear();
 
-        let vertex_memory =
-            std::mem::replace(&mut self.vertex_memory, unsafe { std::mem::zeroed() });
-        let index_memory = std::mem::replace(&mut self.index_memory, unsafe { std::mem::zeroed() });
         let mut allocator = self.allocator.lock().unwrap();
-        allocator.free(vertex_memory).unwrap();
-        allocator.free(index_memory).unwrap();
+        for i in 0..FRAMES_IN_FLIGHT {
+            let vmem = std::mem::replace(&mut self.vertex_memories[i], unsafe { std::mem::zeroed() });
+            let imem = std::mem::replace(&mut self.index_memories[i], unsafe { std::mem::zeroed() });
+            allocator.free(vmem).unwrap();
+            allocator.free(imem).unwrap();
+        }
     }
 }
 struct UIDrawJob {
@@ -92,6 +96,7 @@ impl UIRenderer {
         command_buffer: vk::CommandBuffer,
         pixels_per_point: f32,
         window_size: PhysicalSize<u32>,
+        frame_index: usize,
     ) {
         let screen_size = [window_size.width as f32, window_size.height as f32];
         unsafe {
@@ -111,14 +116,14 @@ impl UIRenderer {
         let mut current_index_byte_offset = 0;
         for item in geometry {
             if let egui::epaint::Primitive::Mesh(x) = &item.primitive {
-                let vertex_memory = self.vertex_memory.mapped_slice_mut().unwrap();
+                let vertex_memory = self.vertex_memories[frame_index].mapped_slice_mut().unwrap();
                 let vertex_writeable_slice = &mut vertex_memory[current_vertex_byte_offset
                     ..current_vertex_byte_offset + x.vertices.len() * size_of::<epaint::Vertex>()];
 
                 let vertex_bytes: &[u8] = cast_slice(&x.vertices);
                 vertex_writeable_slice.copy_from_slice(vertex_bytes);
 
-                let index_memory = self.index_memory.mapped_slice_mut().unwrap();
+                let index_memory = self.index_memories[frame_index].mapped_slice_mut().unwrap();
                 let index_writeable_slice = &mut index_memory[current_index_byte_offset
                     ..current_index_byte_offset + x.indices.len() * size_of::<u32>()];
 
@@ -169,10 +174,10 @@ impl UIRenderer {
 
         for job in draw_jobs {
             unsafe {
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffer], &[0]);
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffers[frame_index]], &[0]);
                 device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.index_buffer,
+                    self.index_buffers[frame_index],
                     0,
                     vk::IndexType::UINT32,
                 );
@@ -417,67 +422,106 @@ impl UIRenderer {
                 swapchain_resources.swapchain_image_format.format,
             );
 
-        let index_buffer_create_info = vk::BufferCreateInfo {
-            size: 0xFFFFF,
-            usage: vk::BufferUsageFlags::INDEX_BUFFER,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            p_queue_family_indices: &context.queue_family_index,
-            queue_family_index_count: 1,
-            ..Default::default()
-        };
-        let index_buffer = unsafe {
-            context
-                .device
-                .create_buffer(&index_buffer_create_info, None)
+        let mut vertex_buffers_vec: Vec<vk::Buffer> = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut index_buffers_vec: Vec<vk::Buffer> = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut vertex_memories_vec: Vec<Allocation> = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut index_memories_vec: Vec<Allocation> = Vec::with_capacity(FRAMES_IN_FLIGHT);
+
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let index_buffer = unsafe {
+                context
+                    .device
+                    .create_buffer(
+                        &vk::BufferCreateInfo {
+                            size: 0xFFFFF,
+                            usage: vk::BufferUsageFlags::INDEX_BUFFER,
+                            sharing_mode: vk::SharingMode::EXCLUSIVE,
+                            p_queue_family_indices: &context.queue_family_index,
+                            queue_family_index_count: 1,
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .unwrap()
+            };
+            let vertex_buffer = unsafe {
+                context
+                    .device
+                    .create_buffer(
+                        &vk::BufferCreateInfo {
+                            size: 0xFFFFF,
+                            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+                            sharing_mode: vk::SharingMode::EXCLUSIVE,
+                            p_queue_family_indices: &context.queue_family_index,
+                            queue_family_index_count: 1,
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .unwrap()
+            };
+
+            let vertex_memory = context
+                .allocator()
+                .lock()
                 .unwrap()
-        };
-        let vertex_buffer_create_info = vk::BufferCreateInfo {
-            size: 0xFFFFF,
-            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            p_queue_family_indices: &context.queue_family_index,
-            queue_family_index_count: 1,
-            ..Default::default()
-        };
-        let vertex_buffer = unsafe {
-            context
-                .device
-                .create_buffer(&vertex_buffer_create_info, None)
+                .allocate(&AllocationCreateDesc {
+                    name: "gui vertex buffer",
+                    linear: true,
+                    location: gpu_allocator::MemoryLocation::CpuToGpu,
+                    requirements: unsafe {
+                        context.device.get_buffer_memory_requirements(vertex_buffer)
+                    },
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+                })
+                .unwrap();
+            let index_memory = context
+                .allocator()
+                .lock()
                 .unwrap()
-        };
-        let vertex_memory_requirements =
-            unsafe { context.device.get_buffer_memory_requirements(vertex_buffer) };
+                .allocate(&AllocationCreateDesc {
+                    name: "gui index buffer",
+                    linear: true,
+                    location: gpu_allocator::MemoryLocation::CpuToGpu,
+                    requirements: unsafe {
+                        context.device.get_buffer_memory_requirements(index_buffer)
+                    },
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+                })
+                .unwrap();
 
-        let vertex_alloc_desc = AllocationCreateDesc {
-            name: "gui vertex buffer",
-            linear: true,
-            location: gpu_allocator::MemoryLocation::CpuToGpu,
-            requirements: vertex_memory_requirements,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        };
-        let vertex_memory = context
-            .allocator()
-            .lock()
-            .unwrap()
-            .allocate(&vertex_alloc_desc)
-            .unwrap();
+            unsafe {
+                context
+                    .device
+                    .bind_buffer_memory(
+                        vertex_buffer,
+                        vertex_memory.memory(),
+                        vertex_memory.offset(),
+                    )
+                    .unwrap();
+                context
+                    .device
+                    .bind_buffer_memory(
+                        index_buffer,
+                        index_memory.memory(),
+                        index_memory.offset(),
+                    )
+                    .unwrap();
+            }
 
-        let index_memory_requirements =
-            unsafe { context.device.get_buffer_memory_requirements(index_buffer) };
+            vertex_buffers_vec.push(vertex_buffer);
+            index_buffers_vec.push(index_buffer);
+            vertex_memories_vec.push(vertex_memory);
+            index_memories_vec.push(index_memory);
+        }
 
-        let index_alloc_desc = AllocationCreateDesc {
-            name: "gui index buffer",
-            linear: true,
-            location: gpu_allocator::MemoryLocation::CpuToGpu,
-            requirements: index_memory_requirements,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        };
-        let index_memory = context
-            .allocator()
-            .lock()
-            .unwrap()
-            .allocate(&index_alloc_desc)
-            .unwrap();
+        let vertex_buffers: [vk::Buffer; FRAMES_IN_FLIGHT] =
+            vertex_buffers_vec.try_into().unwrap();
+        let index_buffers: [vk::Buffer; FRAMES_IN_FLIGHT] = index_buffers_vec.try_into().unwrap();
+        let vertex_memories: [Allocation; FRAMES_IN_FLIGHT] =
+            vertex_memories_vec.try_into().unwrap();
+        let index_memories: [Allocation; FRAMES_IN_FLIGHT] =
+            index_memories_vec.try_into().unwrap();
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 64,
@@ -495,21 +539,6 @@ impl UIRenderer {
                 .create_descriptor_pool(&descriptor_pool_create_info, None)
                 .unwrap()
         };
-        unsafe {
-            context
-                .device
-                .bind_buffer_memory(
-                    vertex_buffer,
-                    vertex_memory.memory(),
-                    vertex_memory.offset(),
-                )
-                .unwrap();
-            context
-                .device
-                .bind_buffer_memory(index_buffer, index_memory.memory(), index_memory.offset())
-                .unwrap();
-        }
-
         UIRenderer {
             device: context.device.clone(),
             ui_ctx,
@@ -524,10 +553,10 @@ impl UIRenderer {
             descriptor_sets: HashMap::new(),
             pipeline: render_pipeline,
             pipeline_layout,
-            index_buffer,
-            index_memory,
-            vertex_buffer,
-            vertex_memory,
+            vertex_buffers,
+            index_buffers,
+            vertex_memories,
+            index_memories,
             descriptor_pool,
             descriptor_set_layout: descriptor_set_layouts[0],
         }

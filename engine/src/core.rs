@@ -149,6 +149,9 @@ impl Engine {
             Ok((index, false)) => index as usize,
             Ok((index, true)) => {
                 self.swapchain_resized = true;
+                let camera = world.get_mut_resource::<Camera>().unwrap();
+                camera.aspect_ratio = self.swapchain.image_size.width as f32
+                    / self.swapchain.image_size.height as f32;
                 index as usize
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -161,6 +164,9 @@ impl Engine {
                 );
                 self.world_renderer
                     .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+                let camera = world.get_mut_resource::<Camera>().unwrap();
+                camera.aspect_ratio = self.swapchain.image_size.width as f32
+                    / self.swapchain.image_size.height as f32;
                 return;
             }
             Err(e) => panic!("failed to acquire next image: {e}"),
@@ -169,8 +175,6 @@ impl Engine {
         if self.swapchain.image_size.width == 0 || self.swapchain.image_size.height == 0 {
             return;
         }
-
-        // check size after swapchain resize
 
         let window_size_v = self.swapchain.image_size;
         let window_size_w = PhysicalSize {
@@ -302,6 +306,7 @@ impl Engine {
             frame.command_buffer,
             full_output.pixels_per_point,
             window_size_w,
+            self.frame_in_flight,
         );
 
         unsafe {
@@ -398,6 +403,9 @@ impl Engine {
                 SwapchainResources::create(&self.vulkan_context, Some(self.swapchain.swapchain));
             self.world_renderer
                 .update_swapchain_resources(&self.vulkan_context, &self.swapchain);
+            let camera = world.get_mut_resource::<Camera>().unwrap();
+            camera.aspect_ratio =
+                self.swapchain.image_size.width as f32 / self.swapchain.image_size.height as f32;
         }
 
         self.ui_renderer
@@ -672,9 +680,6 @@ impl ApplicationHandler for App {
                 engine.swapchain_resized = true;
                 engine.window_size.0 = engine.swapchain.image_size.width;
                 engine.window_size.1 = engine.swapchain.image_size.height;
-                let (width, height) = engine.window_size;
-                world.get_mut_resource::<Camera>().unwrap().aspect_ratio =
-                    width as f32 / height as f32;
             }
             WindowEvent::RedrawRequested => {
                 for sys in &self.game.on_update {

@@ -4,8 +4,8 @@ use mlua::AnyUserData;
 use ultraviolet::{self as uv};
 
 use crate::{
-    core::Engine,
-    ecs::{DynamicComponent, EntityId, QueryInfo, World},
+    core::{Engine, TerrainMap},
+    ecs::{self, DynamicComponent, EntityId, EntityName, QueryInfo, World},
 };
 
 pub struct LuaVM {
@@ -190,6 +190,14 @@ impl mlua::UserData for LuaWorld {
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
+            "get_height",
+            |lua: &mlua::Lua, world: &Self, (x, z)| -> mlua::Result<mlua::Number> {
+                let ecs_world = unsafe { &mut *world.world };
+                let terrain_map = ecs_world.get_resource::<TerrainMap>().unwrap();
+                Ok(terrain_map.get_height_at(x, z).into())
+            },
+        );
+        methods.add_method(
             "spawn",
             |lua: &mlua::Lua, world: &Self, name: String| -> mlua::Result<mlua::AnyUserData> {
                 let ecs_world = unsafe { &mut *world.world };
@@ -200,9 +208,13 @@ impl mlua::UserData for LuaWorld {
         methods.add_method("despawn", |_lua, world, id: AnyUserData| {
             let entity = *id.borrow::<EntityId>()?;
             let ecs_world = unsafe { &mut *world.world };
-            ecs_world
-                .despawn(entity)
-                .map_err(|e| mlua::Error::RuntimeError(format!("{:?}", e)))?;
+            ecs_world.despawn(entity).map_err(|e| {
+                let name = ecs_world.get::<(EntityName,)>(entity);
+                mlua::Error::RuntimeError(format!(
+                    "error: {:?}, id: {:?}, name: {:?}",
+                    e, entity, name
+                ))
+            })?;
             Ok(())
         });
         methods.add_method(

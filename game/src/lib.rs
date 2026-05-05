@@ -1,3 +1,4 @@
+use egui::debug_text::print;
 use egui::epaint::text;
 use moonlight::animations::PlaybackMode;
 use moonlight::ecs;
@@ -54,7 +55,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     let camera = Camera::create(
         Vec3::new(0.0, 5.0, -10.0),
         60.0,
-        1.0,
+        0.1,
         200.0,
         height as f32 / width as f32,
     );
@@ -240,7 +241,7 @@ fn game_update(world: &mut World, _engine: &mut Engine) {
     camera_update(world, delta_time, camera_offset);
 }
 
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 pub struct Slider {
     value: f32,
     min: f32,
@@ -248,22 +249,22 @@ pub struct Slider {
     label: Option<String>,
 }
 
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 pub struct Button {
     clicked: bool,
     label: Option<String>,
 }
 
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 pub struct Label {
     text: String,
 }
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 pub struct TextInput {
     value: String,
     label: Option<String>,
 }
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 pub struct NumberInput {
     value: f32,
     min: f32,
@@ -271,7 +272,7 @@ pub struct NumberInput {
     label: Option<String>,
 }
 
-#[derive(LuaRef, Clone, Default)]
+#[derive(LuaRef, Clone, Default, Debug)]
 #[lua(no_default)]
 struct UIStuff {
     // path to widget
@@ -280,35 +281,42 @@ struct UIStuff {
     show_settings: bool,
 }
 
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 struct UISchema {
     windows: Vec<WindowSchema>,
 }
 
-#[derive(LuaVal, Default, Clone)]
+#[derive(LuaVal, Default, Clone, Debug)]
 struct WindowSchema {
     name: String,
     fields: Vec<LayoutItem>,
 }
-#[derive(LuaUnion, Clone, Hash, PartialEq, Eq)]
+#[derive(LuaUnion, Clone, Hash, PartialEq, Eq, Debug)]
 #[lua(no_default)]
 pub enum LayoutItem {
     Field(String),
     Row(Row),
     Column(Collumn),
+    Scroll(ScrollArea),
 }
-#[derive(LuaVal, Clone, Hash, PartialEq, Eq)]
+#[derive(LuaVal, Debug, Clone, Hash, PartialEq, Eq)]
 #[lua(no_default)]
 pub struct Row {
     items: Vec<LayoutItem>,
 }
-#[derive(LuaVal, Clone, Hash, PartialEq, Eq)]
+#[derive(LuaVal, Clone, Hash, PartialEq, Eq, Debug)]
 #[lua(no_default)]
 pub struct Collumn {
     items: Vec<LayoutItem>,
 }
+#[derive(LuaVal, Clone, Hash, PartialEq, Eq, Debug)]
+#[lua(no_default)]
+pub struct ScrollArea {
+    items: Vec<LayoutItem>,
+    visible_lines: usize,
+}
 
-#[derive(LuaUnion, Clone)]
+#[derive(LuaUnion, Clone, Debug)]
 #[lua(no_default)]
 pub enum Widget {
     Slider(Slider),
@@ -338,6 +346,8 @@ fn default_label(path: &str) -> &str {
 fn draw_widget(ui: &mut egui::Ui, path: &str, widget: &mut Widget) {
     let label = widget
         .label()
+        // im not sure if i should filter out empty lables or leave that as an option
+        //.filter(|&x| x.is_empty())
         .unwrap_or_else(|| default_label(path))
         .to_owned();
 
@@ -394,6 +404,16 @@ fn draw_item(ui: &mut egui::Ui, item: &LayoutItem, ui_stuff: &mut UIStuff) {
         LayoutItem::Column(col) => {
             ui.vertical(|ui| {
                 for item in &col.items {
+                    draw_item(ui, item, ui_stuff);
+                }
+            });
+        }
+        LayoutItem::Scroll(scroll) => {
+            let area = egui::ScrollArea::both().max_height(
+                ui.text_style_height(&egui::TextStyle::Body) * scroll.visible_lines as f32,
+            );
+            area.show(ui, |ui| {
+                for item in &scroll.items {
                     draw_item(ui, item, ui_stuff);
                 }
             });
@@ -531,6 +551,11 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let mouse = *world.get_resource::<MouseState>().unwrap();
     let player = world.query::<(Controllable,)>().next().unwrap().0;
     let player_transform = *world.get::<(Transform,)>(player).unwrap();
+    let camera = *world.get_mut_resource::<Camera>().unwrap();
+    let height = world
+        .get_resource::<TerrainMap>()
+        .unwrap()
+        .get_height_at(camera.position.x, camera.position.z);
     let camera = world.get_mut_resource::<Camera>().unwrap();
 
     let sensativity = 0.002;
@@ -558,6 +583,9 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
 
     let offset = backward * target_distance;
     camera.position = target + offset;
+    if (camera.position.y - height) < 0.5 {
+        camera.position.y = height + 0.5;
+    }
     world.get_mut_resource::<MouseState>().unwrap().x = 0.0;
     world.get_mut_resource::<MouseState>().unwrap().y = 0.0;
 }
