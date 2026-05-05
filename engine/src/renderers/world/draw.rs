@@ -15,6 +15,7 @@ use gpu_allocator::vulkan::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io::Write, ptr};
+use tracing::{instrument, trace};
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
@@ -40,6 +41,7 @@ pub struct WorldRenderer {
     device: Arc<ash::Device>,
 }
 
+#[derive(Debug)]
 pub enum PipelineJob {
     Graphics(Vec<DrawJob>),
     Compute(ComputeDispatch),
@@ -57,6 +59,7 @@ pub enum DrawStyle {
     VertexCount(u32),
 }
 
+#[derive(Debug)]
 pub struct ComputeDispatch {}
 
 impl WorldRenderer {
@@ -157,16 +160,13 @@ impl WorldRenderer {
                     }
                 }
                 GraphCommand::BindPipeline(pipeline_bind_point, pipeline_handle) => {
-                    let pipeline = self.pipeline_manager.pipelines[pipeline_handle.arr_index]
-                        .as_ref()
-                        .unwrap()
-                        .pipeline;
+                    let pipeline = self.pipeline_manager.get(pipeline_handle).pipeline;
                     unsafe {
                         device.cmd_bind_pipeline(command_buffer, *pipeline_bind_point, pipeline);
                         device.cmd_set_viewport(command_buffer, 0, &[viewport]);
                         device.cmd_set_scissor(command_buffer, 0, &[scissor]);
                     }
-                    let job_list = &jobs[pipeline_handle.arr_index];
+                    let job_list = &jobs[pipeline_handle];
                     match job_list {
                         PipelineJob::Graphics(draw_jobs) => {
                             for job in draw_jobs {
@@ -220,34 +220,31 @@ impl WorldRenderer {
                                 }
                             }
                         }
-                        PipelineJob::Compute(compute_dispatch) => todo!(),
+                        PipelineJob::Compute(_compute_dispatch) => todo!(),
                     }
                 }
             }
         }
     }
 
-    // this is sorta like a frame graph builder kinda thing
+    #[instrument(name = "pipeline_setup", skip(self, resource_manager, world))]
     fn setup_gpu_build_draw_jobs(
         &mut self,
         resource_manager: &mut ResourceManager,
         world: &mut World,
         frame_in_flight: usize,
-    ) -> Vec<PipelineJob> {
-        let mut jobs: Vec<PipelineJob> = Vec::with_capacity(self.pipeline_manager.pipelines.len());
+    ) -> HashMap<PipelineHandle, PipelineJob> {
+        let mut jobs: HashMap<PipelineHandle, PipelineJob> = HashMap::new();
 
-        for (index, pipeline) in self.pipeline_manager.pipelines.iter().enumerate() {
-            let job_set = (pipeline.as_ref().unwrap().write_data_and_build_draw_jobs)(
+        for (handle, pipeline) in self.pipeline_manager.all_pipelines() {
+            trace!(?handle, "building draw jobs");
+            let job_set = (pipeline.write_data_and_build_draw_jobs)(
                 world,
                 resource_manager,
                 &mut self.descriptor_manager[frame_in_flight],
-                PipelineHandle {
-                    is_compute: false,
-                    arr_index: index,
-                    name: self.pipeline_manager.pipeline_names[index],
-                },
+                handle,
             );
-            jobs.push(PipelineJob::Graphics(job_set));
+            jobs.insert(handle, job_set);
         }
         jobs
     }
@@ -292,7 +289,7 @@ impl WorldRenderer {
         }
 
         WorldRenderer {
-            descriptor_manager: descriptor_managers.try_into().unwrap(),
+            descriptor_manager: descriptor_managers,
             swapchain_image_id: final_color,
             graph: graphs,
             rendergraph_config: graph,

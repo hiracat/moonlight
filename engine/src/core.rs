@@ -1,4 +1,5 @@
 use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
+use tracing::info;
 
 use ash::vk;
 use image::{ImageBuffer, Luma};
@@ -654,11 +655,11 @@ impl ApplicationHandler for App {
                 .window
                 .request_redraw();
         }
-        let world = &mut self.world;
+        let _world = &mut self.world;
 
         match event {
             WindowEvent::CloseRequested => {
-                println!("The close button was pressed; stopping");
+                info!("close button pressed");
                 for sys in &self.game.on_close {
                     match sys {
                         System::Lua(l) => {

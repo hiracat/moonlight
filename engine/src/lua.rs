@@ -1,4 +1,5 @@
 use std::{any::TypeId, collections::HashMap, sync::Arc};
+use tracing::{debug, error, trace};
 
 use mlua::AnyUserData;
 use ultraviolet::{self as uv};
@@ -80,7 +81,7 @@ impl LuaVM {
         let src = std::fs::read_to_string(path).unwrap();
         let err = lua.load(src).exec();
         err.print_on_error();
-        dbg!(&path);
+        trace!(path, "loaded lua script");
         Self {
             lua,
             path: path.to_string(),
@@ -191,7 +192,7 @@ impl mlua::UserData for LuaWorld {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
             "get_height",
-            |lua: &mlua::Lua, world: &Self, (x, z)| -> mlua::Result<mlua::Number> {
+            |_lua: &mlua::Lua, world: &Self, (x, z)| -> mlua::Result<mlua::Number> {
                 let ecs_world = unsafe { &mut *world.world };
                 let terrain_map = ecs_world.get_resource::<TerrainMap>().unwrap();
                 Ok(terrain_map.get_height_at(x, z).into())
@@ -361,7 +362,7 @@ impl mlua::UserData for LuaWorld {
                     let constructor = registry.default_construct;
                     match constructor {
                         Some(constructor) => {
-                            println!("nil passed for {}, constructing default", type_name);
+                            debug!(type_name, "nil passed, constructing default");
                             constructor()
                         },
                         None => return Err(mlua::Error::RuntimeError(
@@ -418,7 +419,7 @@ pub trait PrintOnError {
 impl<T, E: std::fmt::Debug> PrintOnError for Result<T, E> {
     fn print_on_error(self) {
         if let Err(e) = self {
-            eprintln!("Error: {:?}", e);
+            error!(error = ?e);
         }
     }
 }

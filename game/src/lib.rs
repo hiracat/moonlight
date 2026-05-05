@@ -1,5 +1,3 @@
-use egui::debug_text::print;
-use egui::epaint::text;
 use moonlight::animations::PlaybackMode;
 use moonlight::ecs;
 use moonlight::lua;
@@ -8,6 +6,7 @@ use proc_macros::LuaUnion;
 use proc_macros::LuaVal;
 use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::sync::OnceLock;
 use ultraviolet::Bivec3;
 
 use image::ImageReader;
@@ -19,8 +18,19 @@ use moonlight::{
     resources::{self, Material, Skybox},
 };
 use proc_macros::LuaRef;
+use tracing::{trace, warn};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use ultraviolet::{Rotor3, Slerp, Vec3};
 use winit::keyboard::KeyCode;
+
+type FilterHandle = tracing_subscriber::reload::Handle<
+    EnvFilter,
+    tracing_subscriber::layer::Layered<
+        tracing_subscriber::fmt::Layer<tracing_subscriber::Registry>,
+        tracing_subscriber::Registry,
+    >,
+>;
+static FILTER_HANDLE: OnceLock<FilterHandle> = OnceLock::new();
 
 // ── Resources ────────────────────────────────────────────
 
@@ -28,8 +38,21 @@ use winit::keyboard::KeyCode;
 struct CameraOffset {
     offset: Vec3,
 }
+fn init_tracing() {
+    let filter = EnvFilter::new("info");
+
+    let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(filter);
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter_layer)
+        .init();
+
+    FILTER_HANDLE.set(handle).ok();
+}
 
 pub fn setup_game() -> App {
+    init_tracing();
     let mut app = App::new("data/scripts/main.lua");
     app.game.on_start.push(System::Rust(start));
     app.game.on_update.push(System::Rust(game_update));
@@ -46,6 +69,28 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             gravity_strength: 9.8,
+        }
+    }
+}
+
+#[derive(LuaRef, Clone, Debug)]
+pub struct TracingConfig {
+    pub level: String,
+    pub player: Option<String>,
+    pub physics: Option<String>,
+    pub pipeline: Option<String>,
+    pub ui: Option<String>,
+    pub gpu: Option<String>,
+}
+impl Default for TracingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            player: None,
+            physics: None,
+            pipeline: None,
+            ui: None,
+            gpu: None,
         }
     }
 }
@@ -231,6 +276,7 @@ fn start(world: &mut World, engine: &mut Engine) {
             },
         )
         .unwrap();
+    world.add_resource(TracingConfig::default()).unwrap();
 }
 
 fn game_update(world: &mut World, _engine: &mut Engine) {
@@ -390,7 +436,7 @@ fn draw_item(ui: &mut egui::Ui, item: &LayoutItem, ui_stuff: &mut UIStuff) {
             if let Some(widget) = ui_stuff.widgets.get_mut(name) {
                 draw_widget(ui, name, widget);
             } else {
-                eprintln!("missing wiget {}", name)
+                warn!(name, "missing widget")
             }
         }
         LayoutItem::Row(row) => {
@@ -445,6 +491,60 @@ fn ui(world: &mut World, context: &egui::Context) {
                     draw_item(ui, item, ui_stuff);
                 }
             });
+        }
+    }
+    if let Some(cfg) = world.get_mut_resource::<TracingConfig>() {
+        egui::Window::new("Tracing").show(context, |ui| {
+            ui.heading("Global log level");
+            ui.horizontal(|ui| {
+                for level in ["trace", "debug", "info", "warn"] {
+                    ui.selectable_value(&mut cfg.level, level.to_string(), level);
+                }
+            });
+
+            ui.separator();
+            ui.label("Subsystem overrides");
+
+            let level = cfg.level.clone();
+            for (label, field) in [
+                ("player", &mut cfg.player),
+                ("physics", &mut cfg.physics),
+                ("pipeline", &mut cfg.pipeline),
+                ("ui", &mut cfg.ui),
+                ("gpu", &mut cfg.gpu),
+            ] {
+                ui.horizontal(|ui| {
+                    let mut enabled = field.is_some();
+                    if ui.checkbox(&mut enabled, label).changed() {
+                        *field = enabled.then(|| level.clone());
+                    }
+                    if let Some(subsystem_level) = field {
+                        for lvl in ["trace", "debug", "info", "warn", "off"] {
+                            ui.selectable_value(subsystem_level, lvl.to_string(), lvl);
+                        }
+                    }
+                });
+            }
+        });
+    }
+    if let Some(cfg) = world.get_resource::<TracingConfig>() {
+        let overrides = [
+            ("player", &cfg.player),
+            ("physics", &cfg.physics),
+            ("pipeline", &cfg.pipeline),
+            ("ui", &cfg.ui),
+            ("gpu", &cfg.gpu),
+        ];
+
+        let mut parts = vec![cfg.level.clone()];
+        for (name, level) in overrides {
+            if let Some(l) = level {
+                parts.push(format!("{}={}", name, l));
+            }
+        }
+
+        if let Some(handle) = FILTER_HANDLE.get() {
+            let _ = handle.reload(EnvFilter::new(parts.join(",")));
         }
     }
 }
@@ -652,7 +752,7 @@ fn player_update(world: &mut World, delta_time: f32) {
 
         let on_ground = (terrain_height - player_pos.y).abs() < 0.6;
         let n = terrain_normal.normalized();
-        dbg!(n);
+        trace!(?n);
         // rotor 1: tilts from flat ground to terrain slope — only pitch/roll, no yaw
         let tilt = if n.dot(Vec3::unit_y()) < -1.0 + 1e-6 {
             // terrain is exactly upside down — rotate 180° around any horizontal axis
@@ -676,16 +776,13 @@ fn player_update(world: &mut World, delta_time: f32) {
         };
 
         let horizontal_velocity = rigidbody.velocity - n * n.dot(rigidbody.velocity);
-        dbg!(horizontal_velocity);
         let speed_remaining = (max_speed - horizontal_velocity.mag()).clamp(0.0, max_speed);
-        dbg!(speed_remaining);
         let acceleration = 20.0;
 
-        dbg!(delta_v);
+        trace!(?horizontal_velocity, speed_remaining, ?delta_v);
         delta_v = if on_ground { tilt * delta_v } else { delta_v };
-        dbg!(delta_v);
         delta_v *= speed_remaining * delta_time * acceleration;
-        dbg!(delta_v);
+        trace!(delta_v_final = ?delta_v);
         rigidbody.velocity += delta_v;
 
         let rotation_speed = 5.0;

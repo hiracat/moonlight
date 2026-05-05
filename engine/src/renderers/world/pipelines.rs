@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::ffi::{self, c_void};
+use std::iter::{Enumerate, FilterMap};
+use std::ops::Index;
 use std::path::PathBuf;
+use std::slice::Iter;
 use std::sync::Arc;
 use std::{fs, marker};
 use std::{
@@ -16,7 +19,7 @@ use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 use crate::core::TerrainMap;
 use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
 use crate::renderers::world::descriptors::{BindingData, DescriptorManager};
-use crate::renderers::world::draw::{DrawStyle, FRAMES_IN_FLIGHT};
+use crate::renderers::world::draw::{ComputeDispatch, DrawStyle, FRAMES_IN_FLIGHT, PipelineJob};
 use crate::renderers::world::rendergraph::{ImageDesc, ImageId, RenderGraph};
 use crate::resources::{Animated, AnimatedVertex, IsVertex, ResourceManager, Vertex};
 use crate::resources::{Material, Mesh, Skybox};
@@ -32,16 +35,16 @@ use crate::{
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PipelineHandle {
-    pub is_compute: bool,
-    pub arr_index: usize,
-    pub name: &'static str,
+    is_compute: bool,
+    name: &'static str,
+    arr_index: usize,
 }
 
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct PipelineManager {
-    pub pipelines: Vec<Option<PipelineBundle>>,
-    pub pipeline_names: Vec<&'static str>,
+    pipelines: Vec<Option<PipelineBundle>>,
+    pipeline_names: Vec<&'static str>,
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
 }
@@ -74,7 +77,7 @@ impl PipelineManager {
     fn add_compute_pipeline(
         &mut self,
         handle: PipelineHandle,
-        shader: ShaderStage,
+        shader: &ShaderStage,
         layout: vk::PipelineLayout,
         pipeline_fn: PipelineFn,
     ) {
@@ -85,7 +88,7 @@ impl PipelineManager {
         let bundle = PipelineBundle {
             name: handle.name,
             pipeline,
-            is_compute: false,
+            is_compute: true,
             write_data_and_build_draw_jobs: pipeline_fn,
             device: self.device.clone(),
         };
@@ -104,22 +107,38 @@ impl PipelineManager {
 
         let bundle = PipelineBundle {
             name: handle.name,
-            is_compute: true,
+            is_compute: false,
             pipeline,
             write_data_and_build_draw_jobs: pipeline_fn,
             device: self.device.clone(),
         };
         self.pipelines[handle.arr_index] = Some(bundle);
     }
+    pub fn get(&self, pipeline_handle: &PipelineHandle) -> &PipelineBundle {
+        self.pipelines[pipeline_handle.arr_index]
+            .as_ref()
+            .expect("all pipeline handles should have valid pipelines")
+    }
+    pub fn all_pipelines(&self) -> impl Iterator<Item = (PipelineHandle, &PipelineBundle)> {
+        self.pipelines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bundle)| {
+                let bundle = bundle.as_ref()?;
+                Some((
+                    PipelineHandle {
+                        is_compute: bundle.is_compute,
+                        arr_index: index,
+                        name: bundle.name,
+                    },
+                    bundle,
+                ))
+            })
+    }
 }
 
 type PipelineFn = Box<
-    dyn Fn(
-        &mut World,
-        &mut ResourceManager,
-        &mut DescriptorManager,
-        PipelineHandle,
-    ) -> Vec<DrawJob>,
+    dyn Fn(&mut World, &mut ResourceManager, &mut DescriptorManager, PipelineHandle) -> PipelineJob,
 >;
 
 #[derive(Educe)]
@@ -335,6 +354,7 @@ pub fn create_builtin_graphics_pipelines(
         Path::new("shaders/skybox_vert.spv"),
         Path::new("shaders/skybox_frag.spv"),
     );
+    let invert_data = get_compute_data(device.clone(), Path::new("shaders/invert_color_comp.spv"));
     let mut pipeline_manager = PipelineManager::new(device.clone());
 
     // --- allocate handles ---
@@ -346,6 +366,8 @@ pub fn create_builtin_graphics_pipelines(
     let directional = pipeline_manager.allocate_handle("directional");
     let point = pipeline_manager.allocate_handle("point");
     let skybox = pipeline_manager.allocate_handle("skybox");
+
+    let invert_comp = pipeline_manager.allocate_compute_handle("invert");
 
     // --- build descriptor managers, get layouts ---
     let mut descriptor_managers: Vec<DescriptorManager> = (0..FRAMES_IN_FLIGHT)
@@ -383,6 +405,17 @@ pub fn create_builtin_graphics_pipelines(
     let directional_layout = register(directional, directional_data.1, directional_data.2);
     let point_layout = register(point, point_data.1, point_data.2);
     let skybox_layout = register(skybox, skybox_data.1, skybox_data.2);
+
+    let mut register_comp = |handle: PipelineHandle,
+                             comp: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>|
+     -> vk::PipelineLayout {
+        let layout = descriptor_managers[0].add_compute(handle, comp.clone());
+        for dm in descriptor_managers.iter_mut().skip(1) {
+            dm.add_compute(handle, comp.clone());
+        }
+        layout
+    };
+    let invert_layout = register_comp(invert_comp, invert_data.1);
 
     let mut graph = RenderGraph::new();
 
@@ -469,7 +502,7 @@ pub fn create_builtin_graphics_pipelines(
                     });
                 }
 
-                jobs
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -556,7 +589,7 @@ pub fn create_builtin_graphics_pipelines(
                     });
                 }
 
-                jobs
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -568,7 +601,7 @@ pub fn create_builtin_graphics_pipelines(
         clipped_geometry_layout,
         Box::new(
             |world: &mut World,
-             resource_manager: &mut ResourceManager,
+             _resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
              handle: PipelineHandle| {
                 let mut jobs = Vec::new();
@@ -631,7 +664,7 @@ pub fn create_builtin_graphics_pipelines(
                     });
                 }
 
-                jobs
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -674,12 +707,56 @@ pub fn create_builtin_graphics_pipelines(
                     },
                 );
 
-                vec![DrawJob {
+                let jobs = vec![DrawJob {
                     mesh: DrawStyle::VertexCount(
                         (heightmap.resolution - 1) * (heightmap.resolution - 1) * 6,
                     ),
                     descriptor_sets: vec![height_map_handle, camera_handle, height_texture_handle],
-                }]
+                }];
+                PipelineJob::Graphics(jobs)
+            },
+        ),
+    );
+    pipeline_manager.add_compute_pipeline(
+        invert_comp,
+        &invert_data.0,
+        invert_layout,
+        Box::new(
+            move |world: &mut World,
+                  _resource_manager: &mut ResourceManager,
+                  descriptor_manager: &mut DescriptorManager,
+                  handle: PipelineHandle| {
+                let ambient = world.get_resource::<AmbientLight>().unwrap();
+
+                let gbuffer_albedo = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    0,
+                    BindingData::RenderGraphImage { id: albedo_id },
+                );
+                let gbuffer_normal = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    1,
+                    BindingData::RenderGraphImage { id: normal_id },
+                );
+                let gbuffer_position = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    2,
+                    BindingData::RenderGraphImage { id: position_id },
+                );
+                let ambient_handle = descriptor_manager.request_bind(
+                    handle,
+                    1,
+                    0,
+                    BindingData::Uniform {
+                        data: bytes_of(&AmbientLightUBO::from(ambient)).to_vec(),
+                    },
+                );
+
+                let dispatch = ComputeDispatch {};
+                PipelineJob::Compute(dispatch)
             },
         ),
     );
@@ -723,7 +800,7 @@ pub fn create_builtin_graphics_pipelines(
                     },
                 );
 
-                vec![DrawJob {
+                let jobs = vec![DrawJob {
                     mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![
                         gbuffer_albedo,
@@ -731,7 +808,8 @@ pub fn create_builtin_graphics_pipelines(
                         gbuffer_position,
                         ambient_handle,
                     ],
-                }]
+                }];
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -775,7 +853,7 @@ pub fn create_builtin_graphics_pipelines(
                     },
                 );
 
-                vec![DrawJob {
+                let jobs = vec![DrawJob {
                     mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![
                         gbuffer_albedo,
@@ -783,7 +861,8 @@ pub fn create_builtin_graphics_pipelines(
                         gbuffer_position,
                         directional_handle,
                     ],
-                }]
+                }];
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -842,7 +921,7 @@ pub fn create_builtin_graphics_pipelines(
                     });
                 }
 
-                jobs
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -877,10 +956,11 @@ pub fn create_builtin_graphics_pipelines(
                     },
                 );
 
-                vec![DrawJob {
+                let jobs = vec![DrawJob {
                     mesh: DrawStyle::VertexCount(3),
                     descriptor_sets: vec![camera_handle, cubemap_handle],
-                }]
+                }];
+                PipelineJob::Graphics(jobs)
             },
         ),
     );
@@ -1275,7 +1355,7 @@ pub fn create_graphics_pipeline(
 
 pub fn create_compute_pipeline(
     device: &ash::Device,
-    shader: ShaderStage,
+    shader: &ShaderStage,
     pipeline_layout: vk::PipelineLayout,
 ) -> Result<vk::Pipeline, (vk::Pipeline, vk::Result)> {
     let specalization_info =

@@ -1,6 +1,7 @@
 /// This is for engine side components, anything that interacts with the engine in some special way
 /// is kept here, such as lights, meshes, textures and animations,
 use std::{collections::HashMap, io::Write, path::Path, sync::Arc};
+use tracing::{trace, warn};
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
@@ -69,9 +70,6 @@ pub struct ResourceManager {
     textures: Vec<Option<GpuTexture>>,
 
     pub(crate) animation_resources: AnimationResources,
-
-    // is a ring buffer for all
-    pub(crate) ubo_ring_buffer: UniformRingBuffer,
 
     one_time_submit_pool: vk::CommandPool,
     one_time_submit_buffer: vk::CommandBuffer,
@@ -635,18 +633,26 @@ impl Drop for GpuMesh {
 
 #[derive(Educe)]
 #[educe(Debug)]
-pub struct UniformRingBuffer {
+pub struct LinearAllocator {
     buffer: vk::Buffer,
     memory: Allocation,
-    size: u64,
-    alignment: usize,
+    capacity: u64,
     current: u64,
+    peak: u64,
+    // kept alive until reset() after the fence wait, so GPU can finish reading old descriptors
+    pending_free: Option<(vk::Buffer, Allocation)>,
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
     allocator: SharedAllocator,
 }
-impl Drop for UniformRingBuffer {
+impl Drop for LinearAllocator {
     fn drop(&mut self) {
+        if let Some((buf, alloc)) = self.pending_free.take() {
+            unsafe {
+                self.device.destroy_buffer(buf, None);
+            }
+            self.allocator.lock().unwrap().free(alloc).unwrap();
+        }
         unsafe {
             self.device.destroy_buffer(self.buffer, None);
         }
@@ -654,66 +660,132 @@ impl Drop for UniformRingBuffer {
         self.allocator.lock().unwrap().free(memory).unwrap();
     }
 }
-impl UniformRingBuffer {
-    pub fn create(allocator: SharedAllocator, device: &Arc<ash::Device>, size: u64) -> Self {
-        let sharing_mode = vk::SharingMode::EXCLUSIVE;
+impl LinearAllocator {
+    const ALIGNMENT: u64 = 64;
+
+    pub fn create(allocator: SharedAllocator, device: &Arc<ash::Device>, capacity: u64) -> Self {
         let mut buffers = alloc_buffers(
             allocator.clone(),
             1,
-            size,
+            capacity,
             device,
-            sharing_mode,
+            vk::SharingMode::EXCLUSIVE,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             gpu_allocator::MemoryLocation::CpuToGpu,
             true,
-            &vec![0u8; size as usize],
-            "ring buffer",
+            &vec![0u8; capacity as usize],
+            "linear allocator",
         );
-        let buffer = buffers.0.remove(0);
-        let allocation = buffers.1.remove(0);
-        let alignment = 64;
-
         Self {
-            buffer,
-            memory: allocation,
-            size,
-            alignment,
+            buffer: buffers.0.swap_remove(0),
+            memory: buffers.1.swap_remove(0),
+            capacity,
             current: 0,
+            peak: 0,
+            pending_free: None,
             device: device.clone(),
-            allocator: allocator.clone(),
+            allocator,
         }
     }
-    pub fn allocate(&mut self, size: usize) -> (vk::Buffer, u64) {
-        let overflow = size % self.alignment;
-        let padding = self.alignment - overflow;
-        let aligned_size = size + padding;
-        if self.current + aligned_size as u64 > self.size {
-            eprintln!(
-                "Ring buffer wrapping! current={}, size={}, buffer_size={}",
-                self.current, aligned_size, self.size
-            );
-            self.current = 0;
+
+    pub fn reset(&mut self) {
+        if let Some((buf, alloc)) = self.pending_free.take() {
+            unsafe {
+                self.device.destroy_buffer(buf, None);
+            }
+            self.allocator.lock().unwrap().free(alloc).unwrap();
         }
+        let target = self.peak * 2;
+        if target > self.capacity {
+            warn!(
+                peak = self.peak,
+                old = self.capacity,
+                new = target,
+                "linear allocator growing"
+            );
+            self.grow(target);
+        } else {
+            trace!(
+                peak = self.peak,
+                capacity = self.capacity,
+                "linear allocator reset"
+            );
+        }
+        self.current = 0;
+        self.peak = 0;
+    }
 
+    fn grow(&mut self, new_capacity: u64) {
+        let mut buffers = alloc_buffers(
+            self.allocator.clone(),
+            1,
+            new_capacity,
+            &self.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            &vec![0u8; new_capacity as usize],
+            "linear allocator",
+        );
+        unsafe {
+            self.device.destroy_buffer(self.buffer, None);
+        }
+        let old = std::mem::replace(&mut self.memory, buffers.1.remove(0));
+        self.allocator.lock().unwrap().free(old).unwrap();
+        self.buffer = buffers.0.remove(0);
+        self.capacity = new_capacity;
+    }
+
+    // old buffer kept in pending_free until reset() so GPU can finish reading old descriptor sets
+    fn grow_in_place(&mut self, new_capacity: u64) {
+        let mut buffers = alloc_buffers(
+            self.allocator.clone(),
+            1,
+            new_capacity,
+            &self.device,
+            vk::SharingMode::EXCLUSIVE,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+            true,
+            &vec![0u8; new_capacity as usize],
+            "linear allocator",
+        );
+        let old_buffer = std::mem::replace(&mut self.buffer, buffers.0.remove(0));
+        let old_memory = std::mem::replace(&mut self.memory, buffers.1.remove(0));
+        self.pending_free = Some((old_buffer, old_memory));
+        // fold old buffer's bytes into peak before resetting, so reset() sizes next frame correctly
+        self.peak = self.peak.max(self.current);
+        self.current = 0;
+        warn!(
+            old = self.capacity,
+            new = new_capacity,
+            "linear allocator grew mid-frame"
+        );
+        self.capacity = new_capacity;
+    }
+
+    pub fn allocate(&mut self, size: usize) -> (vk::Buffer, u64) {
+        let aligned = (size as u64).div_ceil(Self::ALIGNMENT) * Self::ALIGNMENT;
+        if self.current + aligned > self.capacity {
+            self.grow_in_place((self.current + aligned) * 2);
+        }
         let offset = self.current;
-        self.current += aligned_size as u64;
-
-        assert_eq!(self.current % self.alignment as u64, 0);
-        assert_eq!(aligned_size as u64 % self.alignment as u64, 0);
+        self.current += aligned;
+        self.peak = self.peak.max(self.current);
         (self.buffer, offset)
     }
-    pub fn write<T: Pod + Zeroable>(&mut self, data: &T, offset: u64) {
-        let offset = offset as usize;
-        let data = bytes_of(data);
-        let size = size_of::<T>();
 
+    pub fn write<T: Pod + Zeroable>(&mut self, data: &T, offset: u64) {
+        let data = bytes_of(data);
+        let offset = offset as usize;
         let memory = self
             .memory
             .mapped_slice_mut()
-            .expect("memory should be host visable");
-        let data_segment = &mut memory[offset..offset + size];
-        data_segment.copy_from_slice(data);
+            .expect("memory should be host visible");
+        memory[offset..offset + data.len()].copy_from_slice(data);
     }
+
     pub fn push_raw(&mut self, data: &[u8]) -> (vk::Buffer, u64) {
         let (buffer, offset) = self.allocate(data.len());
         let memory = self
@@ -768,8 +840,6 @@ impl Vertex {
 
 impl ResourceManager {
     pub(crate) fn init(context: &VulkanContext) -> Self {
-        let ring_buffer =
-            UniformRingBuffer::create(context.allocator().clone(), &context.device, 0xFFFFF);
         let pixel = Rgba::from([255, 255, 255, 0]);
         let mut image = DynamicImage::new_rgb8(1, 1);
         image.put_pixel(0, 0, pixel);
@@ -798,7 +868,6 @@ impl ResourceManager {
             queue: context.queue,
             device: context.device.clone(),
             allocator: context.allocator().clone(),
-            ubo_ring_buffer: ring_buffer,
             meshes: Vec::new(),
             textures: vec![Some(default)],
             animation_resources,

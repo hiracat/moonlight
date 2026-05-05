@@ -16,6 +16,10 @@ fn main() {
     let compiler = shaderc::Compiler::new().expect("Failed to create shader compiler");
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.set_generate_debug_info();
+    options.set_target_env(
+        shaderc::TargetEnv::Vulkan,
+        shaderc::EnvVersion::Vulkan1_3 as u32,
+    );
     // options.add_macro_definition("VK_KHR_shader_non_semantic_info", Some("1"));
 
     for entry in WalkDir::new(shader_dir) {
@@ -35,6 +39,7 @@ fn main() {
             .unwrap_or_else(|_| panic!("invalid file {}", path.to_string_lossy()));
 
         let shader_kind = shader_kind_from_filename(path);
+        println!("Compiling {:?} as {:?}", path, shader_kind);
 
         let result = match compiler.compile_into_spirv(
             &source,
@@ -61,16 +66,31 @@ fn main() {
         fs::write(&file_path, result.as_binary_u8()).expect("Failed to write SPIR-V");
     }
 }
-
 fn shader_kind_from_filename(path: &Path) -> shaderc::ShaderKind {
     let name = path.file_name().unwrap().to_string_lossy();
-    if name.contains("vert") {
-        shaderc::ShaderKind::Vertex
-    } else if name.contains("frag") {
-        shaderc::ShaderKind::Fragment
-    } else if name.contains("comp") {
-        shaderc::ShaderKind::Compute
-    } else {
-        panic!("Unknown shader type for file: {}", name);
+
+    let mut kind = None;
+
+    if name.contains("_vert") {
+        kind = match kind {
+            None => Some(shaderc::ShaderKind::Vertex),
+            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
+        };
     }
+
+    if name.contains("_frag") {
+        kind = match kind {
+            None => Some(shaderc::ShaderKind::Fragment),
+            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
+        };
+    }
+
+    if name.contains("_comp") {
+        kind = match kind {
+            None => Some(shaderc::ShaderKind::Compute),
+            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
+        };
+    }
+
+    kind.unwrap_or_else(|| panic!("Unknown shader type for file: {}", name))
 }

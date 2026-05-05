@@ -6,6 +6,7 @@ use std::{
 };
 
 use ash::vk;
+use tracing::{debug, error, info, trace, warn};
 use gpu_allocator::{
     AllocatorDebugSettings,
     vulkan::{Allocator, AllocatorCreateDesc},
@@ -73,7 +74,7 @@ impl VulkanContext {
         let mut debug_messenger = vk::DebugUtilsMessengerEXT::null();
         if VALIDATION_ENABLE {
             debug_messenger = setup_debug_utils(&debug_utils_loader);
-            eprintln!("set up debug utility");
+            debug!("set up debug utility");
         }
 
         let required_extensions = [
@@ -221,21 +222,19 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut std::ffi::c_void,
 ) -> vk::Bool32 {
-    let severity = match message_severity {
-        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "[Verbose]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "[Warning]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "[Error]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "[Info]",
-        _ => "[Unknown]",
+    let kind = match message_type {
+        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "general",
+        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "performance",
+        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "validation",
+        _ => "unknown",
     };
-    let types = match message_type {
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "[General]",
-        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "[Performance]",
-        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "[Validation]",
-        _ => "[Unknown]",
-    };
-    let message = unsafe { CStr::from_ptr((*p_callback_data).p_message) };
-    println!("{}{}{:?}", severity, types, message);
+    let msg = unsafe { CStr::from_ptr((*p_callback_data).p_message) }.to_string_lossy();
+    match message_severity {
+        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => trace!(kind = kind, "{}", msg),
+        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => info!(kind = kind, "{}", msg),
+        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => warn!(kind = kind, "{}", msg),
+        _ => error!(kind = kind, "{}", msg),
+    }
 
     vk::FALSE
 }
@@ -339,13 +338,24 @@ pub fn create_device(
         .map(|cstr| cstr.as_ptr())
         .collect();
 
+    // 1. lowest level feature
     let mut sync2_features = vk::PhysicalDeviceSynchronization2Features {
         synchronization2: vk::TRUE,
+        p_next: std::ptr::null_mut(),
         ..Default::default()
     };
+
+    // 2. dynamic rendering
     let mut dynamic_rendering_features = vk::PhysicalDeviceDynamicRenderingFeatures {
         dynamic_rendering: vk::TRUE,
         p_next: &mut sync2_features as *mut _ as *mut c_void,
+        ..Default::default()
+    };
+
+    // 3. demote to helper invocation
+    let mut demote_features = vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures {
+        shader_demote_to_helper_invocation: vk::TRUE,
+        p_next: &mut dynamic_rendering_features as *mut _ as *mut c_void,
         ..Default::default()
     };
 
@@ -355,7 +365,7 @@ pub fn create_device(
         enabled_extension_count: required_extensions.len() as u32,
         p_queue_create_infos: queue_create_infos.as_ptr(),
         queue_create_info_count: queue_create_infos.len() as u32,
-        p_next: &mut dynamic_rendering_features as *mut _ as *mut std::ffi::c_void,
+        p_next: &mut demote_features as *mut _ as *mut std::ffi::c_void,
 
         ..Default::default()
     };

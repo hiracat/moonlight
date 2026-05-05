@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tracing::debug;
 
 use crate::vulkan::VulkanContext;
 use ash::vk;
@@ -30,8 +31,7 @@ impl Drop for SwapchainResources {
 
 impl SwapchainResources {
     pub fn create(context: &VulkanContext, old_swapchain: Option<vk::SwapchainKHR>) -> Self {
-        dbg!("creating swapchain");
-        dbg!(old_swapchain);
+        debug!(?old_swapchain, "creating swapchain");
         let swapchain_loader = &context.swapchain_loader;
 
         let capabilities = unsafe {

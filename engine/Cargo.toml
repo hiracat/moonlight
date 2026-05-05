@@ -21,6 +21,7 @@ paste = "1.0.15"
 inventory = "0.3.22"
 proc-macros = { path = "../proc-macros", features = ["internal"] }
 educe = "0.6.0"
+tracing = "0.1.44"
 
 
 [dev-dependencies]

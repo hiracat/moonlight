@@ -13,7 +13,7 @@ use crate::{
         pipelines::PipelineHandle,
         rendergraph::{CompiledRenderGraph, ImageId},
     },
-    resources::{Material, ResourceManager, SsboHandle, UniformRingBuffer},
+    resources::{LinearAllocator, Material, ResourceManager, SsboHandle},
 };
 use crate::{resources::Texture, vulkan::SharedAllocator};
 
@@ -24,7 +24,7 @@ struct SetKey {
 
 #[derive(Debug, Copy, Clone)]
 pub struct BindingHandle {
-    pipeline_index: usize,
+    pipeline: PipelineHandle,
     set_index: u32,
     binding_index: u32,
     data_index: usize,
@@ -43,12 +43,12 @@ enum BindingCount {
 pub struct DescriptorManager {
     // indexed by pipeline_handle.arr_index, but since we dont know the order of addition, we just
     // need to try our best, initializing the blank space with none
-    pipeline_resources: Vec<Option<PipelineResources>>,
+    pipeline_resources: HashMap<PipelineHandle, PipelineResources>,
     // for deduplication
     set_layout_cache: HashMap<SetKey, vk::DescriptorSetLayout>,
     //PERF: this needs some help, like a smarter way of reusing descriptor sets, but i cant think of one, and its not an issue right now
     descriptor_pool: vk::DescriptorPool,
-    uniform_memory: UniformRingBuffer,
+    uniform_memory: LinearAllocator,
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
     descriptor_sets: Vec<vk::DescriptorSet>,
@@ -107,10 +107,11 @@ impl DescriptorManager {
         };
 
         Self {
-            pipeline_resources: Vec::new(),
+            pipeline_resources: HashMap::new(),
             set_layout_cache: HashMap::new(),
             descriptor_pool,
-            uniform_memory: UniformRingBuffer::create(allocator, &device, 1024 * 1024),
+            // give it 64 kb
+            uniform_memory: LinearAllocator::create(allocator, &device, 1024 * 64),
             descriptor_sets: Vec::new(),
             device,
         }
@@ -124,9 +125,7 @@ impl DescriptorManager {
         binding_index: u32,
         data: BindingData,
     ) -> BindingHandle {
-        let pipeline_resources = self.pipeline_resources[pipeline.arr_index]
-            .as_mut()
-            .unwrap();
+        let pipeline_resources = &mut self.pipeline_resources.get_mut(&pipeline).unwrap();
         let vec = pipeline_resources
             .requested_bind_cmds
             .entry(set_index)
@@ -137,7 +136,7 @@ impl DescriptorManager {
         vec.push(data);
 
         BindingHandle {
-            pipeline_index: pipeline.arr_index,
+            pipeline,
             set_index,
             binding_index,
             data_index,
@@ -152,12 +151,10 @@ impl DescriptorManager {
         pipeline: PipelineHandle,
         handles: &[BindingHandle],
     ) -> (vk::PipelineLayout, Vec<vk::DescriptorSet>) {
-        let pipeline_resources = self.pipeline_resources[pipeline.arr_index]
-            .as_ref()
-            .unwrap();
+        let pipeline_resources = &self.pipeline_resources[&pipeline];
 
         handles.iter().for_each(|x| {
-            if x.pipeline_index != pipeline.arr_index {
+            if x.pipeline != pipeline {
                 panic!("cannot bind handles in a pipeline they were not created for")
             }
         });
@@ -321,13 +318,13 @@ impl DescriptorManager {
         (pipeline_resources.pipeline_layout, descriptor_sets)
     }
     pub fn begin_frame(&mut self) {
+        self.uniform_memory.reset();
         unsafe {
             self.device
                 .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
                 .unwrap();
         }
-
-        for resources in self.pipeline_resources.iter_mut().flatten() {
+        for (_handle, resources) in self.pipeline_resources.iter_mut() {
             resources.requested_bind_cmds.clear();
         }
     }
@@ -433,15 +430,112 @@ impl DescriptorManager {
                 .unwrap()
         };
 
-        while self.pipeline_resources.len() <= pipeline_handle.arr_index {
-            self.pipeline_resources.push(None);
+        self.pipeline_resources.insert(
+            pipeline_handle,
+            PipelineResources {
+                requested_bind_cmds: BTreeMap::new(),
+                set_layouts,
+                pipeline_layout,
+                device: self.device.clone(),
+            },
+        );
+        pipeline_layout
+    }
+
+    pub fn add_compute(
+        &mut self,
+        pipeline_handle: PipelineHandle,
+        comp: BTreeMap<u32, BTreeMap<u32, rspirv_reflect::DescriptorInfo>>,
+    ) -> vk::PipelineLayout {
+        // set, binding, cannot remove the binding index even though it is unused because there are
+        // multiple bindings with the same set
+        let mut merged_bindings: BTreeMap<(u32, u32), MergedBinding> = BTreeMap::new();
+        for (set_index, set) in comp.iter() {
+            for (binding_index, binding) in set {
+                let entry = merged_bindings
+                    .entry((*set_index, *binding_index))
+                    .or_insert(MergedBinding {
+                        binding: *binding_index,
+                        ty: vk::DescriptorType::from_raw(binding.ty.0 as i32),
+                        count: (&binding.binding_count).into(),
+                        stages: vk::ShaderStageFlags::empty(),
+                    });
+
+                entry.stages |= vk::ShaderStageFlags::COMPUTE;
+            }
         }
-        self.pipeline_resources[pipeline_handle.arr_index] = Some(PipelineResources {
-            requested_bind_cmds: BTreeMap::new(),
-            set_layouts,
-            pipeline_layout,
-            device: self.device.clone(),
-        });
+        let mut merged_sets: BTreeMap<u32, Vec<MergedBinding>> = BTreeMap::new();
+        for ((set_index, _binding_index), binding) in merged_bindings {
+            let set = merged_sets.entry(set_index).or_default();
+            set.push(binding);
+        }
+        let mut set_layouts = HashMap::new();
+
+        for (set_index, bindings) in &merged_sets {
+            let vk_bindings: Vec<_> = bindings
+                .iter()
+                .map(|x| vk::DescriptorSetLayoutBinding {
+                    binding: x.binding,
+                    descriptor_type: x.ty,
+                    descriptor_count: match x.count {
+                        BindingCount::One => 1,
+                        BindingCount::StaticSized(n) => n as u32,
+                        BindingCount::Unbounded => {
+                            todo!("bindless descriptors not yet implimented")
+                        }
+                    },
+                    stage_flags: x.stages,
+                    ..Default::default()
+                })
+                .collect();
+            let set_key = SetKey {
+                bindings: bindings.clone(),
+            };
+            let &mut layout = self
+                .set_layout_cache
+                .entry(set_key)
+                .or_insert_with(|| unsafe {
+                    self.device
+                        .create_descriptor_set_layout(
+                            &vk::DescriptorSetLayoutCreateInfo {
+                                binding_count: vk_bindings.len() as u32,
+                                p_bindings: vk_bindings.as_ptr(),
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .unwrap()
+                });
+            set_layouts.insert(*set_index, layout);
+        }
+
+        let ordered_layouts: Vec<vk::DescriptorSetLayout> =
+            (0..=*merged_sets.keys().max().unwrap())
+                .map(|i| set_layouts[&i])
+                .collect();
+
+        let pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo {
+                        set_layout_count: ordered_layouts.len() as u32,
+                        p_set_layouts: ordered_layouts.as_ptr(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+
+        self.pipeline_resources.insert(
+            pipeline_handle,
+            PipelineResources {
+                requested_bind_cmds: BTreeMap::new(),
+                set_layouts,
+                pipeline_layout,
+                device: self.device.clone(),
+            },
+        );
         pipeline_layout
     }
 }
@@ -522,42 +616,6 @@ impl DescriptorWriteBuilder<'_> {
             image_infos: Vec::new(),
             writes: Vec::new(),
         }
-    }
-
-    pub fn add_uniform_buffer<T: bytemuck::Pod>(
-        &mut self,
-        resource_manager: &mut ResourceManager,
-        descriptor_pool: vk::DescriptorPool,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-        binding: u32,
-        data: &T,
-    ) -> vk::DescriptorSet {
-        let size = size_of::<T>();
-        let (buffer, offset) = resource_manager.ubo_ring_buffer.allocate(size);
-        resource_manager.ubo_ring_buffer.write(data, offset);
-
-        let descriptor_set =
-            resource_manager.allocate_temp_descriptor_set(descriptor_set_layout, descriptor_pool);
-
-        // Store buffer info (we need stable addresses)
-        self.buffer_infos.push(Box::new(vk::DescriptorBufferInfo {
-            buffer,
-            offset,
-            range: size as u64,
-        }));
-
-        // Record the write
-        self.writes.push(vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: binding,
-            p_buffer_info: self.buffer_infos.last().unwrap().as_ref(),
-            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 1,
-            dst_array_element: 0,
-            ..Default::default()
-        });
-
-        descriptor_set
     }
 
     pub fn add_texture(
