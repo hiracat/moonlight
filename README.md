@@ -1,9 +1,11 @@
-# Moonlight(Name is going to change eventually)
+# Moonlight(Name is going to change eventually, cause it already exists)
 
 A custom Vulkan renderer written in Rust, featuring a homemade Entity Component System and physics engine. Built from scratch to understand graphics programming
 
 ## Running
 first download the whole project folder
+
+Requires Rust 1.90.0 or later and a Vulkan-compatible GPU with updated drivers.
 
 to build from scratch: clone repo and from the projects root just run ``cargo run`` or ``cargo run --release``, depends on a working vulkan driver
 
@@ -24,23 +26,25 @@ Moonlight is my project to understand graphics programming. It is a deferred ren
 - **Multiple light types**:
   - Point lights (unlimited count, though performance degrades with many lights)
   - One global directional light
-  - One global property to set the minimum lighting for anything
+  - One global property to set the ambient light
 - **Skybox rendering**
-- **Third-person camera** That im incredibly proud of, the controls feel very nice
+- **Third-person camera** This im incredibly proud of, the controls feel very nice
 - **UI integration** via egui
 
 ### Core Systems
-- **Custom ECS** with efficient querying and component storage
+- **Custom ECS** its a weird ecs/hybrid thing, you dont register systems, but you can query entities with specificed components and just use those in normal functions
 - **Resource Management**:
-  - Resource system for gpu state, hopefully to allow for serialization in the future
   - GLTF model loading support
 - **Physics Engine**:
-  - Axis-aligned bounding box collision detection
+  - Axis-aligned bounding box and Oriented bounding box collision detection
   - Euler integration
+- **Animations**:
+  - animations loaded from gltf
 
 ### Technical Highlights
 - **Shader reflection** using `rspriv-reflect` should make writing shaders require less effort
-- **Modular architecture** with separate modules for rendering, physics, ECS, and game logic
+- **Render Graph** which allows for easy pipeline addition and automatic barriers/synchronization
+- **Descriptor Manage** which allows for easy data upload to the gpu with automatic descriptor layout deduplication and stuff like that
 
 ## Architecture
 
@@ -68,26 +72,17 @@ The ECS stores only CPU-side data with handles/IDs to GPU resources. Each frame:
 
 
 ## Using this engine(if for some insane reason you like it)
-- See game/lib.rs for an example, its relatively simple
+- See game/src/lib.rs for an example, its relatively simple
 
 ## Known Limitations
 
-- Physics only supports axis-aligned bounding boxes (no arbitrary collision shapes)
+- Physics only supports bounding boxes (no arbitrary collision shapes)
 - Each point light requires its own draw call (performance degrades with many lights)
-- Materials currently only support albedo textures (PBR pipeline incomplete)
+- Materials currently only support albedo textures 
 - No frustum culling or other rendering optimizations yet
 
 ## Future Plans
-1. Animation support
-2. shadow mapping
-3. Scene serialization/deserialization
-4. terrain
+1. Radiance cascades for global illumination
+2. Scene serialization/deserialization
+3. better terrain
 
-## Building
-
-Requires Rust 1.90.0 or later and a Vulkan-compatible GPU with updated drivers.
-
-```bash
-cargo build --release
-cargo run --release
-```

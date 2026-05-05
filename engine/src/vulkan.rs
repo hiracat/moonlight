@@ -55,7 +55,6 @@ impl VulkanContext {
         let instance = create_instance(&entry, event_loop);
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = unsafe {
-            
             ash_window::create_surface(
                 &entry,
                 &instance,
@@ -203,15 +202,12 @@ pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash:
         ..Default::default()
     };
 
-    
     unsafe { entry.create_instance(&create_info, None).unwrap() }
 }
 pub fn setup_debug_utils(
     debug_utils_loader: &ash::ext::debug_utils::Instance,
 ) -> vk::DebugUtilsMessengerEXT {
     let messenger_ci = populate_debug_messenger_create_info();
-
-    
 
     unsafe {
         debug_utils_loader

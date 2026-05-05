@@ -228,7 +228,6 @@ local function apply_day_night(world, widgets, dt)
 		y = sun_g * sun_brightness,
 		z = sun_b * sun_brightness,
 	}
-	dir_light = dl
 
 	-- Update AmbientLight: stays dim but never fully black
 	local amb_light = world:get_resource("AmbientLight")
@@ -326,29 +325,6 @@ local function init_ui(ui)
 
 	ui.schema = {
 		windows = {
-			{
-				name = "Terrain & Global Lighting",
-				fields = {
-					{ type = "Field", data = "terrain.light.r" },
-					{ type = "Field", data = "terrain.light.g" },
-					{ type = "Field", data = "terrain.light.b" },
-					{ type = "Field", data = "terrain.light.brightness" },
-					{ type = "Field", data = "terrain.light.linear" },
-					{ type = "Field", data = "terrain.light.quadratic" },
-					{ type = "Field", data = "terrain.heightmap.res" },
-				},
-			},
-
-			{
-				name = "Player & Camera",
-				fields = {
-					{ type = "Field", data = "player.sprint_speed" },
-					{ type = "Field", data = "camera.offset.x" },
-					{ type = "Field", data = "camera.offset.y" },
-					{ type = "Field", data = "camera.offset.z" },
-					{ type = "Field", data = "world.gravity" },
-				},
-			},
 
 			{
 				name = "Entity Control",
@@ -383,6 +359,29 @@ local function init_ui(ui)
 					{ type = "Field", data = "entity.btn.teleport" },
 
 					{ type = "Field", data = "entity.status" },
+				},
+			},
+			{
+				name = "Terrain & Global Lighting",
+				fields = {
+					{ type = "Field", data = "terrain.light.r" },
+					{ type = "Field", data = "terrain.light.g" },
+					{ type = "Field", data = "terrain.light.b" },
+					{ type = "Field", data = "terrain.light.brightness" },
+					{ type = "Field", data = "terrain.light.linear" },
+					{ type = "Field", data = "terrain.light.quadratic" },
+					{ type = "Field", data = "terrain.heightmap.res" },
+				},
+			},
+
+			{
+				name = "Player & Camera",
+				fields = {
+					{ type = "Field", data = "player.sprint_speed" },
+					{ type = "Field", data = "camera.offset.x" },
+					{ type = "Field", data = "camera.offset.y" },
+					{ type = "Field", data = "camera.offset.z" },
+					{ type = "Field", data = "world.gravity" },
 				},
 			},
 

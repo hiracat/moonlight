@@ -659,7 +659,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
-                for sys in &self.game.on_update {
+                for sys in &self.game.on_close {
                     match sys {
                         System::Lua(l) => {
                             let err = self.lua.run_script(

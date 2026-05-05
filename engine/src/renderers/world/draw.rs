@@ -16,8 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io::Write, ptr};
 
-pub const GEOMETRY_SUBPASS: u32 = 0;
-pub const LIGHTING_SUBPASS: u32 = 1;
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
 //HACK: this is bad, but i just wanna get it to work, ill fix it later

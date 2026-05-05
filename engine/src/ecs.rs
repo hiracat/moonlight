@@ -12,7 +12,7 @@ use std::{
     time::Instant,
 };
 
-use proc_macros::{LuaRef, LuaVal};
+use proc_macros::LuaVal;
 macro_rules! assert_unique_types {
     ($($ty:ident)+) => {
         {

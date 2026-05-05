@@ -1,11 +1,11 @@
-use std::{any::TypeId, collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use std::{any::TypeId, collections::HashMap, sync::Arc};
 
 use mlua::AnyUserData;
 use ultraviolet::{self as uv};
 
 use crate::{
     core::{Engine, TerrainMap},
-    ecs::{self, DynamicComponent, EntityId, EntityName, QueryInfo, World},
+    ecs::{DynamicComponent, EntityId, EntityName, QueryInfo, World},
 };
 
 pub struct LuaVM {
