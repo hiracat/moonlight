@@ -87,6 +87,10 @@ impl DescriptorManager {
                 descriptor_count: 1024,
             },
             vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: 1024,
+            },
+            vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 1024,
             },
@@ -249,6 +253,14 @@ impl DescriptorManager {
                         image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     });
                 }
+                BindingData::StorageImage { id } => {
+                    let view = graph.get_view_from_id(id);
+                    image_infos.push(vk::DescriptorImageInfo {
+                        sampler: vk::Sampler::null(), // needs a sampler somehow
+                        image_view: view,
+                        image_layout: vk::ImageLayout::GENERAL,
+                    });
+                }
             }
         }
 
@@ -303,6 +315,18 @@ impl DescriptorManager {
                         dst_array_element: 0,
                         descriptor_count: 1,
                         descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &image_infos[image_info_idx],
+                        ..Default::default()
+                    });
+                    image_info_idx += 1;
+                }
+                BindingData::StorageImage { .. } => {
+                    writes.push(vk::WriteDescriptorSet {
+                        dst_set: set_index_to_descriptor_set[&handle.set_index],
+                        dst_binding: handle.binding_index,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                         p_image_info: &image_infos[image_info_idx],
                         ..Default::default()
                     });
@@ -576,6 +600,7 @@ pub enum BindingData {
     Texture { texture: Texture },
     Ssbo { buffer: SsboHandle },
     RenderGraphImage { id: ImageId },
+    StorageImage { id: ImageId },
 }
 impl fmt::Debug for BindingData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -593,6 +618,7 @@ impl fmt::Debug for BindingData {
             Self::RenderGraphImage { id } => {
                 f.debug_struct("RenderGraphImage").field("id", id).finish()
             }
+            Self::StorageImage { id } => f.debug_struct("StorageImage").field("id", id).finish(),
         }
     }
 }

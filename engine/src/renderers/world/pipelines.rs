@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{self, c_void};
-use std::iter::{Enumerate, FilterMap};
-use std::ops::Index;
 use std::path::PathBuf;
-use std::slice::Iter;
 use std::sync::Arc;
 use std::{fs, marker};
 use std::{
@@ -35,8 +32,8 @@ use crate::{
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PipelineHandle {
-    is_compute: bool,
-    name: &'static str,
+    pub is_compute: bool,
+    pub name: &'static str,
     arr_index: usize,
 }
 
@@ -138,7 +135,13 @@ impl PipelineManager {
 }
 
 type PipelineFn = Box<
-    dyn Fn(&mut World, &mut ResourceManager, &mut DescriptorManager, PipelineHandle) -> PipelineJob,
+    dyn Fn(
+        &mut World,
+        &mut ResourceManager,
+        &mut DescriptorManager,
+        PipelineHandle,
+        vk::Extent2D,
+    ) -> PipelineJob,
 >;
 
 #[derive(Educe)]
@@ -284,6 +287,11 @@ pub fn create_builtin_graphics_pipelines(
                 1
             ],
         },
+        vertex_input_state: VertexInputState {
+            vertex_attribute_descriptions: vec![],
+            vertex_binding_descriptions: vec![],
+        },
+
         depth_stencil_state: DepthStencilState {
             depth_write_enable: false,
             depth_compare_op: vk::CompareOp::ALWAYS,
@@ -292,6 +300,13 @@ pub fn create_builtin_graphics_pipelines(
         ..geometry_desc.clone()
     };
 
+    let terrain_desc = GraphicsPipelineDesc {
+        vertex_input_state: VertexInputState {
+            vertex_binding_descriptions: vec![],
+            vertex_attribute_descriptions: vec![],
+        },
+        ..geometry_desc.clone()
+    };
     let skybox_desc = GraphicsPipelineDesc {
         color_blend_state: ColorBlendState {
             logic_op: None,
@@ -453,7 +468,8 @@ pub fn create_builtin_graphics_pipelines(
             |world: &mut World,
              _resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle| {
+             handle: PipelineHandle,
+             _extent| {
                 let mut jobs = Vec::new();
                 let camera = world.get_resource::<Camera>().unwrap();
 
@@ -516,7 +532,8 @@ pub fn create_builtin_graphics_pipelines(
             |world: &mut World,
              resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle| {
+             handle: PipelineHandle,
+             _extent| {
                 let mut jobs = Vec::new();
                 let camera = world.get_resource::<Camera>().unwrap();
 
@@ -603,7 +620,8 @@ pub fn create_builtin_graphics_pipelines(
             |world: &mut World,
              _resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle| {
+             handle: PipelineHandle,
+             _extent| {
                 let mut jobs = Vec::new();
                 let camera = world.get_resource::<Camera>().unwrap();
 
@@ -671,14 +689,15 @@ pub fn create_builtin_graphics_pipelines(
 
     pipeline_manager.add_pipeline(
         terrain,
-        &geometry_desc,
+        &terrain_desc,
         &terrain_data.0,
         terrain_layout,
         Box::new(
             |world: &mut World,
              _resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle| {
+             handle: PipelineHandle,
+             _extent| {
                 let camera = world.get_resource::<Camera>().unwrap();
                 let heightmap = world.get_resource::<TerrainMap>().unwrap();
 
@@ -725,37 +744,23 @@ pub fn create_builtin_graphics_pipelines(
             move |world: &mut World,
                   _resource_manager: &mut ResourceManager,
                   descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle| {
-                let ambient = world.get_resource::<AmbientLight>().unwrap();
+                  handle: PipelineHandle,
+                  extent| {
+                let bindings = vec![descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    0,
+                    BindingData::StorageImage { id: albedo_id },
+                )];
+                let x = extent.width.div_ceil(8);
+                let y = extent.height.div_ceil(8);
+                let dispatch = ComputeDispatch {
+                    x,
+                    y,
+                    z: 1,
+                    bindings,
+                };
 
-                let gbuffer_albedo = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::RenderGraphImage { id: albedo_id },
-                );
-                let gbuffer_normal = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    1,
-                    BindingData::RenderGraphImage { id: normal_id },
-                );
-                let gbuffer_position = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    2,
-                    BindingData::RenderGraphImage { id: position_id },
-                );
-                let ambient_handle = descriptor_manager.request_bind(
-                    handle,
-                    1,
-                    0,
-                    BindingData::Uniform {
-                        data: bytes_of(&AmbientLightUBO::from(ambient)).to_vec(),
-                    },
-                );
-
-                let dispatch = ComputeDispatch {};
                 PipelineJob::Compute(dispatch)
             },
         ),
@@ -770,7 +775,8 @@ pub fn create_builtin_graphics_pipelines(
             move |world: &mut World,
                   _resource_manager: &mut ResourceManager,
                   descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle| {
+                  handle: PipelineHandle,
+                  _extent| {
                 let ambient = world.get_resource::<AmbientLight>().unwrap();
 
                 let gbuffer_albedo = descriptor_manager.request_bind(
@@ -823,7 +829,8 @@ pub fn create_builtin_graphics_pipelines(
             move |world: &mut World,
                   _resource_manager: &mut ResourceManager,
                   descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle| {
+                  handle: PipelineHandle,
+                  _extent| {
                 let directional = world.get_resource::<DirectionalLight>().unwrap();
 
                 let gbuffer_albedo = descriptor_manager.request_bind(
@@ -876,7 +883,8 @@ pub fn create_builtin_graphics_pipelines(
             move |world: &mut World,
                   _resource_manager: &mut ResourceManager,
                   descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle| {
+                  handle: PipelineHandle,
+                  _extent| {
                 let mut jobs = Vec::new();
 
                 let gbuffer_albedo = descriptor_manager.request_bind(
@@ -935,7 +943,8 @@ pub fn create_builtin_graphics_pipelines(
             |world: &mut World,
              _resource_manager: &mut ResourceManager,
              descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle| {
+             handle: PipelineHandle,
+             _extent| {
                 let cubemap = *world.get_resource::<Skybox>().unwrap();
                 let camera = world.get_resource::<Camera>().unwrap();
 
@@ -998,6 +1007,11 @@ pub fn create_builtin_graphics_pipelines(
         .writes_depth(&mut depth)
         .build();
     let graph = graph
+        .add_pipeline("invert")
+        .pipeline(invert_comp)
+        .read_writes(&mut albedo)
+        .build();
+    let graph = graph
         .add_pipeline("ambient_light")
         .pipeline(ambient)
         .reads(&albedo)
@@ -1024,6 +1038,7 @@ pub fn create_builtin_graphics_pipelines(
         .reads_depth(&depth)
         .writes(&mut final_color)
         .build();
+
     let graph = graph
         .add_pipeline("skybox")
         .pipeline(skybox)

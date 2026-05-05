@@ -489,6 +489,10 @@ impl PerFrame {
                 descriptor_count: 2000,
             },
             vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: 500,
+            },
+            vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 descriptor_count: 500,
             },

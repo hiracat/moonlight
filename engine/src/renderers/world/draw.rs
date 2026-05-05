@@ -60,7 +60,12 @@ pub enum DrawStyle {
 }
 
 #[derive(Debug)]
-pub struct ComputeDispatch {}
+pub struct ComputeDispatch {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub bindings: Vec<BindingHandle>,
+}
 
 impl WorldRenderer {
     #[allow(clippy::too_many_lines)]
@@ -75,7 +80,8 @@ impl WorldRenderer {
         frame_in_flight: usize,
     ) {
         self.descriptor_manager[frame_in_flight].begin_frame();
-        let jobs = self.setup_gpu_build_draw_jobs(resource_manager, world, frame_in_flight);
+        let jobs =
+            self.setup_gpu_build_draw_jobs(resource_manager, world, frame_in_flight, window_size);
         let scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: window_size,
@@ -220,7 +226,33 @@ impl WorldRenderer {
                                 }
                             }
                         }
-                        PipelineJob::Compute(_compute_dispatch) => todo!(),
+                        PipelineJob::Compute(compute_dispatch) => {
+                            let (pipeline_layout, set_layout) =
+                                &self.descriptor_manager[frame_in_flight].bind(
+                                    resource_manager,
+                                    graph,
+                                    *pipeline_handle,
+                                    &compute_dispatch.bindings,
+                                );
+                            unsafe {
+                                device.cmd_bind_descriptor_sets(
+                                    command_buffer,
+                                    vk::PipelineBindPoint::COMPUTE,
+                                    *pipeline_layout,
+                                    0,
+                                    set_layout.as_ref(),
+                                    &[],
+                                );
+                            }
+                            unsafe {
+                                device.cmd_dispatch(
+                                    command_buffer,
+                                    compute_dispatch.x,
+                                    compute_dispatch.y,
+                                    compute_dispatch.z,
+                                )
+                            };
+                        }
                     }
                 }
             }
@@ -233,6 +265,7 @@ impl WorldRenderer {
         resource_manager: &mut ResourceManager,
         world: &mut World,
         frame_in_flight: usize,
+        extent: vk::Extent2D,
     ) -> HashMap<PipelineHandle, PipelineJob> {
         let mut jobs: HashMap<PipelineHandle, PipelineJob> = HashMap::new();
 
@@ -243,6 +276,7 @@ impl WorldRenderer {
                 resource_manager,
                 &mut self.descriptor_manager[frame_in_flight],
                 handle,
+                extent,
             );
             jobs.insert(handle, job_set);
         }

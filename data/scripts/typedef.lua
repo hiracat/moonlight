@@ -59,6 +59,19 @@
 
 ---@class Skeleton
 
+---@class TerrainMap
+---@field size number
+---@field height number
+---@field resolution number
+---@field map Texture
+
+---@class Controllable
+---@field speed number
+---@field sprint_speed number
+
+---@class EntityName
+---@field name string
+
 ---@class Transform
 ---@field position Vec3
 ---@field rotation Rotor3
@@ -90,19 +103,6 @@
 ---@class AmbientLight
 ---@field color Vec3
 ---@field intensity number
-
----@class TerrainMap
----@field size number
----@field height number
----@field resolution number
----@field map Texture
-
----@class Controllable
----@field speed number
----@field sprint_speed number
-
----@class EntityName
----@field name string
 
 ---@class WindowSchema
 ---@field name string

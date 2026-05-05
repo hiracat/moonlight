@@ -48,6 +48,7 @@ struct PipelineNode {
     pipeline: PipelineHandle,
     reads: Vec<ImageVersion>,
     writes: Vec<ImageVersion>,
+    read_writes: Vec<ImageVersion>,
 }
 
 pub struct PipelineBuilder {
@@ -56,6 +57,7 @@ pub struct PipelineBuilder {
     pipeline: Option<PipelineHandle>,
     reads: Vec<ImageVersion>,
     writes: Vec<ImageVersion>,
+    read_writes: Vec<ImageVersion>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -112,6 +114,7 @@ impl RenderGraph {
             name: name.to_string(),
             reads: Vec::new(),
             writes: Vec::new(),
+            read_writes: Vec::new(),
         }
     }
     pub fn add_image(&mut self, image_desc: ImageDesc) -> ImageVersion {
@@ -134,14 +137,32 @@ impl PipelineBuilder {
     }
     // reads dont change image version
     pub fn reads(mut self, image_handle: &ImageVersion) -> PipelineBuilder {
+        assert!(
+            !self.writes.iter().any(|r| r.id == image_handle.id),
+            "image '{}' cannot be both read and written in the same pass, use read_writes instead",
+            image_handle.name // or however you get a debug name
+        );
         self.reads.push(image_handle.clone());
         self
     }
     // writes change image version
     pub fn writes(mut self, image_handle: &mut ImageVersion) -> PipelineBuilder {
+        assert!(
+            !self.reads.iter().any(|r| r.id == image_handle.id),
+            "image '{}' cannot be both read and written in the same pass, use read_writes instead",
+            image_handle.name // or however you get a debug name
+        );
+
         // a read version of 0 means its not written by any pipeline in this graph
         image_handle.version += 1;
         self.writes.push(image_handle.clone());
+        self
+    }
+    // writes change image version
+    pub fn read_writes(mut self, image_handle: &mut ImageVersion) -> PipelineBuilder {
+        // a read version of 0 means its not written by any pipeline in this graph
+        image_handle.version += 1;
+        self.read_writes.push(image_handle.clone());
         self
     }
     pub fn reads_depth(mut self, image_handle: &ImageVersion) -> PipelineBuilder {
@@ -175,6 +196,7 @@ impl PipelineBuilder {
             name: self.name,
             reads: self.reads,
             writes: self.writes,
+            read_writes: self.read_writes,
             pipeline: self
                 .pipeline
                 .unwrap_or_else(|| panic!("no pipeline added to pipeline")),
@@ -283,14 +305,21 @@ impl CompiledRenderGraph {
 
         // reader dependancies
         for (writer_idx, writer_node) in graph.pipelines.iter().enumerate() {
-            for write in &writer_node.writes {
+            for write in writer_node
+                .writes
+                .iter()
+                .chain(writer_node.read_writes.iter())
+            {
                 for (reader_idx, reader_node) in graph.pipelines.iter().enumerate() {
                     // if they are not the same and any reader image depends on the write, increment the indegree of the reader
-                    if writer_idx != reader_idx
-                        && reader_node
-                            .reads
-                            .iter()
-                            .any(|image| image.depends_on(write))
+                    if writer_idx == reader_idx {
+                        continue;
+                    }
+                    if reader_node
+                        .reads
+                        .iter()
+                        .chain(reader_node.read_writes.iter())
+                        .any(|image| image.depends_on(write))
                     {
                         *indegrees.get_mut(&reader_idx).unwrap() += 1;
                     }
@@ -309,9 +338,23 @@ impl CompiledRenderGraph {
             indegrees.remove(&pipeline_index);
             execution_order.push(pipeline_index);
 
-            for write in &graph.pipelines[pipeline_index].writes {
+            for write in graph.pipelines[pipeline_index]
+                .writes
+                .iter()
+                .chain(graph.pipelines[pipeline_index].read_writes.iter())
+            {
                 for (idx, pipeline) in graph.pipelines.iter().enumerate() {
-                    if pipeline.reads.iter().any(|read| read.depends_on(write)) {
+                    // read_writes depends on itself, so u if u would remove zero nodes and all
+                    // that, just skip it
+                    if idx == pipeline_index {
+                        continue;
+                    }
+                    if pipeline
+                        .reads
+                        .iter()
+                        .chain(pipeline.read_writes.iter())
+                        .any(|read| read.depends_on(write))
+                    {
                         let degree = indegrees.get_mut(&idx).unwrap();
                         *degree -= 1;
                         if *degree == 0 {
@@ -329,25 +372,56 @@ impl CompiledRenderGraph {
 
         let mut image_usages = HashMap::new();
         for pipeline in &graph.pipelines {
-            for read in &pipeline.reads {
-                *image_usages
-                    .entry(read.id)
-                    .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::SAMPLED;
+            if pipeline.pipeline.is_compute {
+                for read in &pipeline.reads {
+                    *image_usages
+                        .entry(read.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE;
+                }
+            } else {
+                for read in &pipeline.reads {
+                    *image_usages
+                        .entry(read.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::SAMPLED;
+                }
             }
 
-            for write in &pipeline.writes {
-                let flags = match &graph.images[write.id.arr_idx] {
-                    ImageDesc::Managed { format, .. } | ImageDesc::Imported { format, .. } => {
-                        if is_depth_format(*format) {
-                            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                        } else {
-                            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                        }
-                    }
-                };
-                *image_usages
-                    .entry(write.id)
-                    .or_insert(vk::ImageUsageFlags::empty()) |= flags;
+            if pipeline.pipeline.is_compute {
+                for write in &pipeline.writes {
+                    *image_usages
+                        .entry(write.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE;
+                }
+            } else {
+                for write in &pipeline.writes {
+                    let flags = if is_depth_format(graph.images[write.id.arr_idx].get_format()) {
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    } else {
+                        vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    };
+                    *image_usages
+                        .entry(write.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |= flags;
+                }
+            }
+
+            if pipeline.pipeline.is_compute {
+                for write in &pipeline.read_writes {
+                    *image_usages
+                        .entry(write.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE;
+                }
+            } else {
+                for write in &pipeline.read_writes {
+                    assert!(
+                        is_depth_format(graph.images[write.id.arr_idx].get_format()),
+                        "graphics pipelines can only read_write depth images"
+                    );
+                    *image_usages
+                        .entry(write.id)
+                        .or_insert(vk::ImageUsageFlags::empty()) |=
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+                }
             }
         }
 
@@ -426,26 +500,41 @@ impl CompiledRenderGraph {
                 let state = &mut tracked_image_states[write.id.arr_idx];
                 //PERF: this should come from either reflection or from user declaration on the
                 //.write, but im too lazy
-                let (dst_stage, dst_access) = if is_depth_format(write.desc.get_format()) {
-                    (
+                let (dst_stage, dst_access) = match (
+                    is_depth_format(write.desc.get_format()),
+                    pipeline.pipeline.is_compute,
+                ) {
+                    (true, false) => (
                         vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                             | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                         vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
                             | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-                    )
-                } else {
-                    (
+                    ),
+                    (false, false) => (
                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                         vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
                             | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
-                    )
+                    ),
+                    (true, true) => panic!(
+                        "compute pipelines cannot write to depth images, use read_writes for depth"
+                    ),
+                    (false, true) => (
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                    ),
                 };
 
-                let dst_layout = if is_depth_format(state.format) {
+                let dst_layout = if pipeline.pipeline.is_compute {
+                    if is_depth_format(state.format) {
+                        panic!("pipelines cannout write to depth images, use read_writes for depth")
+                    }
+                    vk::ImageLayout::GENERAL
+                } else if is_depth_format(state.format) {
                     vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
                 } else {
                     vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
                 };
+
                 let aspect_mask = if is_depth_format(state.format) {
                     vk::ImageAspectFlags::DEPTH
                 } else {
@@ -493,9 +582,76 @@ impl CompiledRenderGraph {
                 }
             }
 
+            for read_write in &pipeline.read_writes {
+                let state = &mut tracked_image_states[read_write.id.arr_idx];
+                let (dst_layout, dst_stage, dst_access) = if pipeline.pipeline.is_compute {
+                    (
+                        vk::ImageLayout::GENERAL,
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_STORAGE_READ
+                            | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                    )
+                } else if is_depth_format(state.format) {
+                    (
+                        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    )
+                } else {
+                    panic!(
+                        "graphics pipelines cannout write write to non depth images, use two seperate images"
+                    )
+                };
+
+                let aspect_mask = if is_depth_format(state.format) {
+                    vk::ImageAspectFlags::DEPTH
+                } else {
+                    vk::ImageAspectFlags::COLOR
+                };
+
+                assert!(
+                    state.initialized,
+                    "read_write image must be initialized before it can be read_written"
+                );
+                if state.current_layout != dst_layout {
+                    commands.push(GraphCommand::ImageBarrier {
+                        image_id: read_write.id,
+                        src_layout: state.current_layout,
+                        dst_layout,
+                        dst_access,
+                        dst_stage,
+                        src_access: state.last_access,
+                        src_stage: state.last_stage,
+                        aspect_mask,
+                    });
+                }
+
+                state.current_layout = dst_layout;
+                state.last_access = dst_access;
+                state.last_stage = dst_stage;
+
+                // depth attachment binding is graphics only
+                if !pipeline.pipeline.is_compute && is_depth_format(state.format) {
+                    depth_attachments = Some(RenderingAttachmentInfo {
+                        view: state.image.get_view(),
+                        initial_layout: dst_layout,
+                        load_op: vk::AttachmentLoadOp::LOAD,
+                        store_op: vk::AttachmentStoreOp::STORE,
+                    });
+                }
+            }
+
             for read in &pipeline.reads {
                 let state = &mut tracked_image_states[read.id.arr_idx];
-                let (dst_layout, dst_stage, dst_access) = if is_depth_format(state.format) {
+                let (dst_layout, dst_stage, dst_access) = if pipeline.pipeline.is_compute {
+                    (
+                        vk::ImageLayout::GENERAL,
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_STORAGE_READ,
+                    )
+                } else if is_depth_format(state.format) {
                     (
                         vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
                         vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
@@ -515,6 +671,7 @@ impl CompiledRenderGraph {
                 } else {
                     vk::ImageAspectFlags::COLOR
                 };
+
                 if state.current_layout != dst_layout {
                     commands.push(GraphCommand::ImageBarrier {
                         image_id: read.id,
@@ -527,10 +684,13 @@ impl CompiledRenderGraph {
                         aspect_mask,
                     });
                 }
+
                 state.current_layout = dst_layout;
                 state.last_access = dst_access;
                 state.last_stage = dst_stage;
-                if is_depth_format(state.format) {
+
+                // depth attachment binding is graphics only
+                if !pipeline.pipeline.is_compute && is_depth_format(state.format) {
                     depth_attachments = Some(RenderingAttachmentInfo {
                         view: state.image.get_view(),
                         initial_layout: dst_layout,
@@ -542,15 +702,22 @@ impl CompiledRenderGraph {
 
             // PERF: because this is simple thing now, a really important optomization later is
             // detect compatable layouts and group them without emiting a begin rendering
-            commands.push(GraphCommand::BeginRendering {
-                color_attachments,
-                depth: depth_attachments,
-            });
-            commands.push(GraphCommand::BindPipeline(
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline.pipeline,
-            ));
-            commands.push(GraphCommand::EndRendering);
+            if pipeline.pipeline.is_compute {
+                commands.push(GraphCommand::BindPipeline(
+                    vk::PipelineBindPoint::COMPUTE,
+                    pipeline.pipeline,
+                ));
+            } else {
+                commands.push(GraphCommand::BeginRendering {
+                    color_attachments,
+                    depth: depth_attachments,
+                });
+                commands.push(GraphCommand::BindPipeline(
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.pipeline,
+                ));
+                commands.push(GraphCommand::EndRendering);
+            }
         }
         let sampler = unsafe {
             device.create_sampler(
