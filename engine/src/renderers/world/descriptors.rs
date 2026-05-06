@@ -245,6 +245,17 @@ impl DescriptorManager {
                         range: binding.size,
                     });
                 }
+                BindingData::RawSsbo {
+                    buffer,
+                    size,
+                    offset,
+                } => {
+                    buffer_infos.push(vk::DescriptorBufferInfo {
+                        buffer: *buffer,
+                        offset: *offset,
+                        range: *size,
+                    });
+                }
                 BindingData::RenderGraphImage { id } => {
                     let view = graph.get_view_from_id(id);
                     image_infos.push(vk::DescriptorImageInfo {
@@ -297,6 +308,18 @@ impl DescriptorManager {
                     image_info_idx += 1;
                 }
                 BindingData::Ssbo { .. } => {
+                    writes.push(vk::WriteDescriptorSet {
+                        dst_set: set_index_to_descriptor_set[&handle.set_index],
+                        dst_binding: handle.binding_index,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                        p_buffer_info: &buffer_infos[buffer_info_idx],
+                        ..Default::default()
+                    });
+                    buffer_info_idx += 1;
+                }
+                BindingData::RawSsbo { .. } => {
                     writes.push(vk::WriteDescriptorSet {
                         dst_set: set_index_to_descriptor_set[&handle.set_index],
                         dst_binding: handle.binding_index,
@@ -596,11 +619,26 @@ impl From<&rr::BindingCount> for BindingCount {
 }
 
 pub enum BindingData {
-    Uniform { data: Vec<u8> },
-    Texture { texture: Texture },
-    Ssbo { buffer: SsboHandle },
-    RenderGraphImage { id: ImageId },
-    StorageImage { id: ImageId },
+    Uniform {
+        data: Vec<u8>,
+    },
+    Texture {
+        texture: Texture,
+    },
+    Ssbo {
+        buffer: SsboHandle,
+    },
+    RenderGraphImage {
+        id: ImageId,
+    },
+    StorageImage {
+        id: ImageId,
+    },
+    RawSsbo {
+        buffer: vk::Buffer,
+        offset: u64,
+        size: u64,
+    },
 }
 impl fmt::Debug for BindingData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -619,6 +657,16 @@ impl fmt::Debug for BindingData {
                 f.debug_struct("RenderGraphImage").field("id", id).finish()
             }
             Self::StorageImage { id } => f.debug_struct("StorageImage").field("id", id).finish(),
+            Self::RawSsbo {
+                buffer,
+                size,
+                offset,
+            } => f
+                .debug_struct("RawBuffer")
+                .field("buffer", buffer)
+                .field("size", size)
+                .field("offset", offset)
+                .finish(),
         }
     }
 }

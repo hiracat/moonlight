@@ -98,6 +98,21 @@ impl WorldRenderer {
         let graph = &self.graph[swapchain_image_index];
         for cmd in &graph.commands {
             match cmd {
+                GraphCommand::ClearImage {
+                    image,
+                    image_layout,
+                    range,
+                } => {
+                    unsafe {
+                        self.device.cmd_clear_color_image(
+                            command_buffer,
+                            graph.get_image_from_id(image),
+                            *image_layout,
+                            &vk::ClearColorValue::default(),
+                            &[*range],
+                        )
+                    };
+                }
                 GraphCommand::BeginRendering {
                     color_attachments,
                     depth,

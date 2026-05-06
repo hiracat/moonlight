@@ -140,11 +140,18 @@ pub fn create_image(
     usage: vk::ImageUsageFlags,
     subresource_range: vk::ImageSubresourceRange,
 ) -> Image {
+    let image_type = if extent.depth == 1 {
+        vk::ImageType::TYPE_2D
+    } else if extent.height == 1 {
+        vk::ImageType::TYPE_1D
+    } else {
+        vk::ImageType::TYPE_3D
+    };
     let create_info = vk::ImageCreateInfo {
         extent,
         format,
         usage,
-        image_type: vk::ImageType::TYPE_2D,
+        image_type,
         samples: vk::SampleCountFlags::TYPE_1,
         mip_levels: 1,
         array_layers: 1,
@@ -176,7 +183,12 @@ pub fn create_image(
                 subresource_range,
                 format,
                 image,
-                view_type: vk::ImageViewType::TYPE_2D,
+                view_type: match image_type {
+                    vk::ImageType::TYPE_1D => vk::ImageViewType::TYPE_1D,
+                    vk::ImageType::TYPE_2D => vk::ImageViewType::TYPE_2D,
+                    vk::ImageType::TYPE_3D => vk::ImageViewType::TYPE_3D,
+                    _ => panic!("unknown image type: {:?}", image_type),
+                },
                 ..Default::default()
             },
             None,

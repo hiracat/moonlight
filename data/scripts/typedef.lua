@@ -12,6 +12,51 @@
 ---@field min Vec3
 ---@field max Vec3
 
+---@class TerrainMap
+---@field size number
+---@field height number
+---@field resolution number
+---@field map Texture
+
+---@class Controllable
+---@field speed number
+---@field sprint_speed number
+
+---@class EntityName
+---@field name string
+
+---@class Transform
+---@field position Vec3
+---@field rotation Rotor3
+---@field scale Vec3
+
+---@class PointLight
+---@field color Vec3
+---@field brightness number
+---@field linear number
+---@field quadratic number
+
+---@class Camera
+---@field position Vec3
+---@field rotation Rotor3
+---@field fov_rads number
+---@field near number
+---@field far number
+---@field pitch number
+---@field yaw number
+---@field aspect_ratio number
+
+---@class Time
+---@field delta_time number
+
+---@class DirectionalLight
+---@field from_position Vec3
+---@field color Vec3
+
+---@class AmbientLight
+---@field color Vec3
+---@field intensity number
+
 ---@class Rotor3
 ---@field pitch number
 ---@field yaw number
@@ -58,51 +103,6 @@
 ---@class Animation
 
 ---@class Skeleton
-
----@class TerrainMap
----@field size number
----@field height number
----@field resolution number
----@field map Texture
-
----@class Controllable
----@field speed number
----@field sprint_speed number
-
----@class EntityName
----@field name string
-
----@class Transform
----@field position Vec3
----@field rotation Rotor3
----@field scale Vec3
-
----@class PointLight
----@field color Vec3
----@field brightness number
----@field linear number
----@field quadratic number
-
----@class Camera
----@field position Vec3
----@field rotation Rotor3
----@field fov_rads number
----@field near number
----@field far number
----@field pitch number
----@field yaw number
----@field aspect_ratio number
-
----@class Time
----@field delta_time number
-
----@class DirectionalLight
----@field from_position Vec3
----@field color Vec3
-
----@class AmbientLight
----@field color Vec3
----@field intensity number
 
 ---@class WindowSchema
 ---@field name string

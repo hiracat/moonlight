@@ -44,6 +44,35 @@ impl From<&Transform> for ModelUBO {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct MeshInfo {
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub index_count: u32,
+    pub _pad: u32,
+}
+
+#[derive(Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct RadianceConfigUBO {
+    pub start_position: uv::Vec4, // 16 bytes
+    pub count_x: u32,
+    pub count_y: u32,
+    pub count_z: u32,
+    pub z_cols: u32,
+    pub xy_cols: u32,
+    pub xy_rows: u32,
+    pub probe_spacing: f32,
+    pub interval_start: f32,
+    pub interval_end: f32,
+    pub is_top_cascade: u32,
+    pub sqrt_ray_count: u32,
+    pub mesh_count: u32,
+    // offset 64 here, meshes is naturally aligned, no padding needed
+    pub meshes: [MeshInfo; 64],
+}
+
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct MaterialUBO {

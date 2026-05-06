@@ -606,13 +606,15 @@ impl Drop for GpuTexture {
     }
 }
 
-pub(crate) struct GpuMesh {
-    pub(crate) vertex_buffer: vk::Buffer,
-    pub(crate) index_buffer: vk::Buffer,
-    pub(crate) index_alloc: Allocation,
-    pub(crate) vertex_alloc: Allocation,
-    pub(crate) index_count: u32,
-    pub(crate) vertex_type: VertexType,
+pub struct GpuMesh {
+    pub vertex_buffer: vk::Buffer,
+    pub index_buffer: vk::Buffer,
+    pub index_alloc: Allocation,
+    pub vertex_alloc: Allocation,
+    pub index_count: u32,
+    pub vertex_type: VertexType,
+    pub positions: Vec<uv::Vec3>,
+    pub indices: Vec<u32>,
     device: Arc<ash::Device>,
     allocator: SharedAllocator,
 }
@@ -1162,9 +1164,11 @@ impl ResourceManager {
         );
 
         GpuMesh {
+            positions: vertices.iter().map(|x| x.position).collect(),
+            index_count: indices.len() as u32,
+            indices,
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
-            index_count: indices.len() as u32,
             index_buffer: index_buffer[0],
             vertex_buffer: vertex_buffer[0],
             vertex_type: VertexType::Static,
@@ -1243,9 +1247,11 @@ impl ResourceManager {
         );
 
         GpuMesh {
+            positions: vertices.iter().map(|x| x.position).collect(),
+            index_count: indices.len() as u32,
+            indices,
             index_alloc: index_alloc.remove(0),
             vertex_alloc: vertex_alloc.remove(0),
-            index_count: indices.len() as u32,
             index_buffer: index_buffer[0],
             vertex_buffer: vertex_buffer[0],
             vertex_type: VertexType::Animated,

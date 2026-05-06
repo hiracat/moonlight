@@ -30,7 +30,7 @@ type FilterHandle = tracing_subscriber::reload::Handle<
         tracing_subscriber::Registry,
     >,
 >;
-static FILTER_HANDLE: OnceLock<FilterHandle> = OnceLock::new();
+pub static FILTER_HANDLE: OnceLock<FilterHandle> = OnceLock::new();
 
 // ── Resources ────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ struct CameraOffset {
     offset: Vec3,
 }
 fn init_tracing() {
-    let filter = EnvFilter::new("info");
+    let filter = EnvFilter::new("trace");
 
     let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(filter);
 

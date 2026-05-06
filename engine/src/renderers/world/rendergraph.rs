@@ -28,16 +28,25 @@ pub enum ImageDesc {
         name: &'static str,
         format: vk::Format,
     },
+    Custom {
+        name: &'static str,
+        format: vk::Format,
+        extent: vk::Extent3D,
+    },
 }
 impl ImageDesc {
     fn get_name(&self) -> &'static str {
         match self {
-            ImageDesc::Managed { name, .. } | ImageDesc::Imported { name, .. } => name,
+            ImageDesc::Managed { name, .. }
+            | ImageDesc::Imported { name, .. }
+            | ImageDesc::Custom { name, .. } => name,
         }
     }
     fn get_format(&self) -> vk::Format {
         match self {
-            ImageDesc::Managed { format, .. } | ImageDesc::Imported { format, .. } => *format,
+            ImageDesc::Managed { format, .. }
+            | ImageDesc::Imported { format, .. }
+            | ImageDesc::Custom { format, .. } => *format,
         }
     }
 }
@@ -60,7 +69,7 @@ pub struct PipelineBuilder {
     read_writes: Vec<ImageVersion>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ImageVersion {
     pub id: ImageId,
     pub name: &'static str,
@@ -72,8 +81,8 @@ pub struct ImageVersion {
 
 impl ImageVersion {
     // checks if the ids are the same, and
-    pub fn depends_on(&self, read: &ImageVersion) -> bool {
-        self.id == read.id && self.version >= read.version
+    pub fn depends_on(&self, write: &ImageVersion) -> bool {
+        self.id == write.id && self.version >= write.version
     }
 }
 
@@ -142,7 +151,12 @@ impl PipelineBuilder {
             "image '{}' cannot be both read and written in the same pass, use read_writes instead",
             image_handle.name // or however you get a debug name
         );
-        self.reads.push(image_handle.clone());
+        self.reads.push(ImageVersion {
+            id: image_handle.id,
+            name: image_handle.name,
+            desc: image_handle.desc,
+            version: image_handle.version,
+        });
         self
     }
     // writes change image version
@@ -155,18 +169,33 @@ impl PipelineBuilder {
 
         // a read version of 0 means its not written by any pipeline in this graph
         image_handle.version += 1;
-        self.writes.push(image_handle.clone());
+        self.writes.push(ImageVersion {
+            id: image_handle.id,
+            name: image_handle.name,
+            desc: image_handle.desc,
+            version: image_handle.version,
+        });
         self
     }
     // writes change image version
     pub fn read_writes(mut self, image_handle: &mut ImageVersion) -> PipelineBuilder {
         // a read version of 0 means its not written by any pipeline in this graph
         image_handle.version += 1;
-        self.read_writes.push(image_handle.clone());
+        self.read_writes.push(ImageVersion {
+            id: image_handle.id,
+            name: image_handle.name,
+            desc: image_handle.desc,
+            version: image_handle.version,
+        });
         self
     }
     pub fn reads_depth(mut self, image_handle: &ImageVersion) -> PipelineBuilder {
-        self.reads.push(image_handle.clone());
+        self.reads.push(ImageVersion {
+            id: image_handle.id,
+            name: image_handle.name,
+            desc: image_handle.desc,
+            version: image_handle.version,
+        });
 
         match self.render_graph.depth {
             None => self.render_graph.depth = Some(image_handle.id),
@@ -179,7 +208,12 @@ impl PipelineBuilder {
     }
     pub fn writes_depth(mut self, image_handle: &mut ImageVersion) -> PipelineBuilder {
         image_handle.version += 1;
-        self.writes.push(image_handle.clone());
+        self.writes.push(ImageVersion {
+            id: image_handle.id,
+            name: image_handle.name,
+            desc: image_handle.desc,
+            version: image_handle.version,
+        });
 
         match self.render_graph.depth {
             None => self.render_graph.depth = Some(image_handle.id),
@@ -317,9 +351,23 @@ impl CompiledRenderGraph {
                     }
                     if reader_node
                         .reads
-                        .iter()
-                        .chain(reader_node.read_writes.iter())
-                        .any(|image| image.depends_on(write))
+                            .iter()
+                            .chain(reader_node.read_writes.iter())
+                            .any(|read| {if read.depends_on(write){
+                                tracing::trace!(
+                                    "reader node '{}' depends on writer node '{}' because image '{}' version {} depends on '{}' version {}",
+                                    reader_node.name,
+                                    writer_node.name,
+                                    read.name,
+                                    read.version,
+                                    write.name,
+                                    write.version,
+                                );
+
+                                true
+                            } else{ 
+                                false
+                            }})
                     {
                         *indegrees.get_mut(&reader_idx).unwrap() += 1;
                     }
@@ -376,7 +424,7 @@ impl CompiledRenderGraph {
                 for read in &pipeline.reads {
                     *image_usages
                         .entry(read.id)
-                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE;
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE ;
                 }
             } else {
                 for read in &pipeline.reads {
@@ -390,7 +438,7 @@ impl CompiledRenderGraph {
                 for write in &pipeline.writes {
                     *image_usages
                         .entry(write.id)
-                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE;
+                        .or_insert(vk::ImageUsageFlags::empty()) |= vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST;
                 }
             } else {
                 for write in &pipeline.writes {
@@ -428,6 +476,44 @@ impl CompiledRenderGraph {
         let mut tracked_image_states = Vec::new();
         for (idx, image_desc) in graph.images.iter().enumerate() {
             tracked_image_states.push(match image_desc {
+                ImageDesc::Custom {
+                    name,
+                    format,
+                    extent,
+                } => {
+                    let subresource_range = vk::ImageSubresourceRange {
+                        aspect_mask: if is_depth_format(*format) {
+                            vk::ImageAspectFlags::DEPTH
+                        } else {
+                            vk::ImageAspectFlags::COLOR
+                        },
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+
+                    let image = create_image(
+                        &device,
+                        &allocator,
+                        name,
+                        *extent,
+                        *format,
+                        *image_usages
+                            .get(&ImageId { arr_idx: idx })
+                            .expect("all images should have usage flags"),
+                        subresource_range,
+                    );
+                    TrackedImageState {
+                        initialized: false,
+                        format: *format,
+                        name,
+                        current_layout: vk::ImageLayout::UNDEFINED,
+                        last_access: vk::AccessFlags2::empty(),
+                        last_stage: vk::PipelineStageFlags2::empty(),
+                        image: TrackedImageStorage::Owned(image),
+                    }
+                }
                 ImageDesc::Managed { name, format } => {
                     let subresource_range = vk::ImageSubresourceRange {
                         aspect_mask: if is_depth_format(*format) {
@@ -541,16 +627,50 @@ impl CompiledRenderGraph {
                     vk::ImageAspectFlags::COLOR
                 };
                 if state.current_layout != dst_layout {
-                    commands.push(GraphCommand::ImageBarrier {
-                        image_id: write.id,
-                        src_layout: state.current_layout,
-                        dst_layout,
-                        dst_stage,
-                        dst_access,
-                        src_stage: state.last_stage,
+                    if pipeline.pipeline.is_compute && !state.initialized{
+                        commands.push(GraphCommand::ImageBarrier {
+                            image_id: write.id,
+                            src_layout: state.current_layout,
+                            dst_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            dst_stage: vk::PipelineStageFlags2::TRANSFER,
+                            dst_access: vk::AccessFlags2::TRANSFER_WRITE,
+                            src_stage: state.last_stage,
+                            src_access: state.last_access,
+                            aspect_mask,
+                        });
+                        commands.push(GraphCommand::ClearImage { 
+                            image: write.id,
+                            image_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            range: vk::ImageSubresourceRange{
+                                aspect_mask,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                        });
+                        commands.push(GraphCommand::ImageBarrier {
+                            image_id: write.id,
+                            src_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            dst_layout,
+                            dst_stage,
+                            dst_access,
+                            src_stage: vk::PipelineStageFlags2::TRANSFER,
+                            src_access: vk::AccessFlags2::TRANSFER_WRITE,
+                            aspect_mask,
+                        });
+                    } else{
+                        commands.push(GraphCommand::ImageBarrier {
+                            image_id: write.id,
+                            src_layout: state.current_layout,
+                            dst_layout,
+                            dst_stage,
+                            dst_access,
+                            src_stage: state.last_stage,
                         src_access: state.last_access,
                         aspect_mask,
                     });
+                    }
                 }
                 state.current_layout = dst_layout;
                 state.last_stage = dst_stage;
@@ -810,6 +930,11 @@ pub enum GraphCommand {
         aspect_mask: vk::ImageAspectFlags,
     },
     BindPipeline(vk::PipelineBindPoint, PipelineHandle),
+    ClearImage{
+        image: ImageId,
+        image_layout: vk::ImageLayout,
+        range: vk::ImageSubresourceRange,
+    },
 }
 
 #[test]
@@ -833,10 +958,11 @@ fn build_test() {
         .writes(&mut depth)
         .build();
 
-    let graph = graph
+    let _graph = graph
         .add_pipeline("lighting_pass")
         .reads(&albedo)
         .reads(&depth)
         .writes(&mut final_color)
         .build();
 }
+

@@ -51,11 +51,12 @@ fn main() {
             Ok(result) => result,
             Err(err) => {
                 eprintln!("{}", err);
-                panic!()
+                panic!();
             }
         };
         if result.get_num_warnings() > 0 {
             println!("cargo:warning={}", result.get_warning_messages().trim());
+            panic!();
         }
 
         let filename = path.file_stem().unwrap().to_string_lossy();
