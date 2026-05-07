@@ -251,31 +251,31 @@ fn start(world: &mut World, engine: &mut Engine) {
         )
         .unwrap();
 
-    let tree = world.spawn("tree");
-    world
-        .add(
-            tree,
-            Transform::from(Some(Vec3::new(0.0, 150.0, 0.0)), None, None),
-        )
-        .unwrap();
-    world
-        .add(
-            tree,
-            engine
-                .resource_manager
-                .load_gltf_asset("data/models/maple_tree.glb")
-                .0,
-        )
-        .unwrap();
-    world
-        .add(
-            tree,
-            Material {
-                albedo: Texture::default(),
-                alpha_clip: Some(0.5),
-            },
-        )
-        .unwrap();
+    // let tree = world.spawn("tree");
+    // world
+    //     .add(
+    //         tree,
+    //         Transform::from(Some(Vec3::new(0.0, 150.0, 0.0)), None, None),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         tree,
+    //         engine
+    //             .resource_manager
+    //             .load_gltf_asset("data/models/maple_tree.glb")
+    //             .0,
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         tree,
+    //         Material {
+    //             albedo: Texture::default(),
+    //             alpha_clip: Some(0.5),
+    //         },
+    //     )
+    //     .unwrap();
     world.add_resource(TracingConfig::default()).unwrap();
 }
 

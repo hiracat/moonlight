@@ -12,6 +12,7 @@ use ash::vk;
 use bytemuck::bytes_of;
 use educe::Educe;
 use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
+use tracing::trace;
 use ultraviolet::Vec3;
 
 use crate::core::TerrainMap;
@@ -201,15 +202,6 @@ pub fn create_builtin_graphics_pipelines(
     [DescriptorManager; FRAMES_IN_FLIGHT],
     ImageId,
 ) {
-    let radiance_config = RadianceConfig {
-        grid_origin: Vec3::new(0.0, 46.0, 0.0),
-        top_level_probes_x: 8,
-        top_level_probes_y: 8,
-        top_level_probes_z: 8,
-        smallest_object_size: 0.3,
-        cascade_count: 4,
-        sqrt_ray_count: 4,
-    };
     let geometry_desc = GraphicsPipelineDesc {
         tesselation_state: None,
         viewport_state: None,
@@ -1049,6 +1041,15 @@ pub fn create_builtin_graphics_pipelines(
         .read_writes(&mut albedo)
         .build();
 
+    let radiance_config = RadianceConfig {
+        grid_origin: Vec3::new(0.0, 46.0, 0.0),
+        top_level_probes_x: 4,
+        top_level_probes_y: 4,
+        top_level_probes_z: 4,
+        smallest_object_size: 0.3,
+        cascade_count: 4,
+        sqrt_ray_count: 2,
+    };
     // == PASS 1: Create all cascade images ==
     let mut cascade_images: Vec<ImageVersion> =
         Vec::with_capacity(radiance_config.cascade_count as usize);
@@ -1118,25 +1119,28 @@ pub fn create_builtin_graphics_pipelines(
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
         let sqrt_ray_count = radiance_config.sqrt_ray_count * 4u32.pow(cascade_level);
 
-        let ray_side = sqrt_ray_count;
-
         // fold z into a 2D grid of z-blocks
-        let z_cols = probe_count_z.isqrt() + 1; // z-slices per row
-        let z_rows = probe_count_z.div_ceil(z_cols);
+        let z_cols = {
+            let s = probe_count_z.isqrt();
+            if s * s >= probe_count_z { s } else { s + 1 }
+        };
 
         // total xy probes
         let xy = probe_count_x * probe_count_y;
 
-        let xy_cols = xy.isqrt() + 1;
+        let xy_cols = {
+            let s = xy.isqrt();
+            if s * s >= xy { s } else { s + 1 }
+        };
         let xy_rows = xy.div_ceil(xy_cols);
 
         let probe_spacing = radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32);
-        let interval_end = radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32);
         let interval_start = if cascade_level == 0 {
             0.0
         } else {
-            radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32)
+            radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32 - 1.0)
         };
+        let interval_end = radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32);
 
         let is_top_cascade = cascade_level == radiance_config.cascade_count - 1;
 
@@ -1165,40 +1169,26 @@ pub fn create_builtin_graphics_pipelines(
                       descriptor_manager: &mut DescriptorManager,
                       handle: PipelineHandle,
                       _extent| {
-                    let map = world.get_resource::<TerrainMap>().unwrap().map;
+                    if world.get_resource::<RadianceMeshBuffers>().is_none() {
+                        let mut all_positions: Vec<Vec3> = Vec::new();
+                        let mut all_indices: Vec<u32> = Vec::new();
+                        let mut mesh_infos: Vec<MeshInfo> = Vec::new();
 
-                    let mut all_positions: Vec<Vec3> = Vec::new();
-                    let mut all_indices: Vec<u32> = Vec::new();
-                    let mut mesh_infos: Vec<MeshInfo> = Vec::new();
-
-                    for (_, (mesh_handle,)) in world.query::<(Mesh,)>() {
-                        if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
-                            mesh_infos.push(MeshInfo {
-                                vertex_offset: all_positions.len() as u32,
-                                index_offset: all_indices.len() as u32,
-                                index_count: mesh.index_count,
-                                _pad: 0,
-                            });
-                            all_positions.extend_from_slice(&mesh.positions);
-                            all_indices.extend_from_slice(&mesh.indices);
+                        for (_, (mesh_handle, transform)) in
+                            world.query::<(Req<Mesh>, Req<Transform>)>()
+                        {
+                            if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
+                                mesh_infos.push(MeshInfo {
+                                    vertex_offset: all_positions.len() as u32,
+                                    index_offset: all_indices.len() as u32,
+                                    index_count: mesh.index_count,
+                                    _pad: 0,
+                                    local_to_world: ModelUBO::from(transform).model,
+                                });
+                                all_positions.extend_from_slice(&mesh.positions);
+                                all_indices.extend_from_slice(&mesh.indices);
+                            }
                         }
-                    }
-
-                    if let Some(buffers) = world.get_resource::<RadianceMeshBuffers>() {
-                        let pos_binding = resource_manager
-                            .ssbo_registry
-                            .get_ssbo_binding_mut(buffers.position_ssbo);
-                        let pos_bytes = bytemuck::cast_slice(&all_positions);
-                        pos_binding.allocation.mapped_slice_mut().unwrap()[..pos_bytes.len()]
-                            .copy_from_slice(pos_bytes);
-
-                        let idx_binding = resource_manager
-                            .ssbo_registry
-                            .get_ssbo_binding_mut(buffers.index_ssbo);
-                        let idx_bytes = bytemuck::cast_slice(&all_indices);
-                        idx_binding.allocation.mapped_slice_mut().unwrap()[..idx_bytes.len()]
-                            .copy_from_slice(idx_bytes);
-                    } else {
                         let pos_size = (all_positions.len() * size_of::<Vec3>()) as u64;
                         let idx_size = (all_indices.len() * size_of::<u32>()) as u64;
 
@@ -1251,12 +1241,29 @@ pub fn create_builtin_graphics_pipelines(
                             .unwrap();
                     }
 
+                    let map = world.get_resource::<TerrainMap>().unwrap().map;
                     let buffers = world.get_resource::<RadianceMeshBuffers>().unwrap();
                     let mut meshes_array = [MeshInfo::default(); 64];
                     meshes_array[..buffers.mesh_infos.len()].copy_from_slice(&buffers.mesh_infos);
 
                     // Use a sentinel id (or handle None) for the top cascade which has no above
                     let resolved_above_id = above_id.unwrap_or(cascade_id); // top reads itself, shader should ignore
+                    let config_ubo = RadianceConfigUBO {
+                        start_position: radiance_config.grid_origin.into_homogeneous_point(),
+                        count_x: probe_count_x,
+                        count_y: probe_count_y,
+                        count_z: probe_count_z,
+                        probe_spacing,
+                        interval_start,
+                        interval_end,
+                        is_top_cascade: if is_top_cascade { 1 } else { 0 },
+                        sqrt_ray_count,
+                        mesh_count: buffers.mesh_infos.len() as u32,
+                        meshes: meshes_array,
+                        z_cols,
+                        xy_cols,
+                        xy_rows,
+                    };
 
                     let mut bindings = vec![
                         descriptor_manager.request_bind(
@@ -1284,25 +1291,7 @@ pub fn create_builtin_graphics_pipelines(
                             2,
                             0,
                             BindingData::Uniform {
-                                data: bytes_of(&RadianceConfigUBO {
-                                    start_position: radiance_config
-                                        .grid_origin
-                                        .into_homogeneous_point(),
-                                    count_x: probe_count_x,
-                                    count_y: probe_count_y,
-                                    count_z: probe_count_z,
-                                    probe_spacing,
-                                    interval_start,
-                                    interval_end,
-                                    is_top_cascade: if is_top_cascade { 1 } else { 0 },
-                                    sqrt_ray_count,
-                                    mesh_count: buffers.mesh_infos.len() as u32,
-                                    meshes: meshes_array,
-                                    z_cols: z_cols,
-                                    xy_cols: xy_rows,
-                                    xy_rows: xy_rows,
-                                })
-                                .to_vec(),
+                                data: bytes_of(&config_ubo).to_vec(),
                             },
                         ),
                     ];

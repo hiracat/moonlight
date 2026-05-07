@@ -12,6 +12,7 @@ struct MeshInfo {
     uint index_offset;
     uint index_count;
     uint _pad;
+    mat4 local_to_world;
 };
 
 layout(set = 2, binding = 0) uniform RadianceConfigUBO {
@@ -40,6 +41,67 @@ layout(set = 3, binding = 1) readonly buffer IndexBuffer {
     uint indices[];
 }
 idx;
+#define EPS .00002
+
+struct Ray {
+    vec3 direction;
+    vec3 origin;
+};
+
+/**
+Tomas Möller & Ben Trumbore (1997) Fast, Minimum Storage Ray-Triangle Intersection,
+Journal of Graphics Tools
+*/
+float rayTriangleIntersect(Ray ray, vec3 point1, vec3 point2, vec3 point3) {
+    vec3 edge1 = point2 - point1;
+    vec3 edge2 = point3 - point1;
+
+    vec3 directionxedge2 = cross(ray.direction, edge2);
+
+    float determinant = dot(directionxedge2, edge1);
+
+    // ray parallel to triangle plane
+    if (abs(determinant) < EPS) {
+        return -1.0;
+    }
+    float invdeterminant = 1.0 / determinant;
+    vec3  origin_to_p1   = ray.origin - point1;
+    float bary_1         = dot(directionxedge2, origin_to_p1) * invdeterminant;
+    vec3  txedge1        = cross(origin_to_p1, edge1);
+    float bary_2         = dot(txedge1, ray.direction) * invdeterminant;
+    if (bary_1 < 0.0 || bary_2 < 0.0 || bary_1 + bary_2 > 1.0) {
+        return -1.0;
+    }
+
+    float distance_along_ray = dot(txedge1, edge2) * invdeterminant;
+    if (distance_along_ray < EPS) {
+        return -1.0;
+    }
+
+    return distance_along_ray;
+}
+
+bool segmentTriangleIntersect(Ray ray, vec3 A, vec3 B, vec3 C, float start, float end) {
+    float distance = rayTriangleIntersect(ray, A, B, C);
+    if (distance > start && distance < end) {
+        return true;
+    }
+    return false;
+}
+
+// https://pbr-book.org/4ed/Geometry_and_Transformations/Spherical_Geometry#fragment-Reparameterizedirectionsinthez0portionoftheoctahedron-0
+vec3 unitVectorFrom2d(float x, float y, float range) {
+    vec3 v;
+    v.x = -1 + 2 * (x / range);
+    v.y = -1 + 2 * (y / range);
+    v.z = 1 - (abs(v.x) + abs(v.y));
+    if (v.z < 0) {
+        float xo = v.x;
+        v.x      = (1 - abs(v.y)) * sign(xo);
+        v.y      = (1 - abs(xo)) * sign(v.y);
+    }
+    return normalize(v);
+}
 
 void main() {
     uint flat_idx   = gl_GlobalInvocationID.x;
@@ -70,10 +132,36 @@ void main() {
     uint texel_x = z_col * (config.xy_cols * config.sqrt_ray_count) + xy_col * config.sqrt_ray_count + ray_col;
     uint texel_y = z_row * (config.xy_rows * config.sqrt_ray_count) + xy_row * config.sqrt_ray_count + ray_row;
 
-    float r = float(probe_x) / float(config.count_x - 1u);
-    float g = float(probe_y) / float(config.count_y - 1u);
-    float b = float(probe_z) / float(config.count_z - 1u);
+    vec3 direction = unitVectorFrom2d(ray_row, ray_col, config.sqrt_ray_count);
 
-    vec4 result = vec4(r, g, b, 1.0);
-    imageStore(radiance_field, ivec2(texel_x, texel_y), result);
+    Ray  ray       = Ray(direction, probe_world_pos);
+    bool collision = false;
+    vec3 color;
+    for (int i = 0; i < config.mesh_count; i++) {
+        MeshInfo mesh_info = config.meshes[i];
+        for (int j = 0; j < mesh_info.index_count; j += 3) {
+            vec4 p1 = vec4(pos.positions[idx.indices[j + 0 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
+            vec4 p2 = vec4(pos.positions[idx.indices[j + 1 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
+            vec4 p3 = vec4(pos.positions[idx.indices[j + 2 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
+
+            vec3 worldp1 = (mesh_info.local_to_world * p1).xyz;
+            vec3 worldp2 = (mesh_info.local_to_world * p2).xyz;
+            vec3 worldp3 = (mesh_info.local_to_world * p3).xyz;
+
+            collision = segmentTriangleIntersect(ray, worldp1, worldp2, worldp3, config.interval_start, config.interval_end);
+
+            if (collision) {
+                break;
+            }
+        }
+        if (collision) {
+            break;
+        }
+    }
+    if (collision) {
+        color = vec3(0.0, 0.0, 0.0);
+    } else {
+        color = vec3(1.0, 1.0, 1.0);
+    }
+    imageStore(radiance_field, ivec2(texel_x, texel_y), vec4(color, 1.0));
 }

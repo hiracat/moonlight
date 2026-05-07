@@ -13,8 +13,8 @@ use crate::{
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct ModelUBO {
-    pub(crate) model: uv::Mat4,
-    normal: uv::Mat4,
+    pub model: uv::Mat4,
+    pub normal: uv::Mat4,
 }
 
 impl ModelUBO {
@@ -51,9 +51,10 @@ pub struct MeshInfo {
     pub index_offset: u32,
     pub index_count: u32,
     pub _pad: u32,
+    pub local_to_world: uv::Mat4,
 }
 
-#[derive(Copy, Clone, bm::Zeroable, bm::Pod)]
+#[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct RadianceConfigUBO {
     pub start_position: uv::Vec4, // 16 bytes
