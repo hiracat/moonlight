@@ -28,7 +28,7 @@ use crate::resources::{
 use crate::resources::{Material, Mesh, Skybox};
 use crate::ubo::{
     AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, LightDataUBO, MaterialUBO,
-    MeshInfo, ModelUBO, PointLightUBO, RadianceConfigUBO, TerrainUBO,
+    MeshInfo, ModelUBO, PointLightUBO, RadianceConfigUBO, RadianceInfoUBO, TerrainUBO,
 };
 use crate::vulkan::SharedAllocator;
 use crate::{
@@ -324,6 +324,10 @@ pub fn create_builtin_graphics_pipelines(
         ..geometry_desc.clone()
     };
 
+    let ambient_desc = GraphicsPipelineDesc {
+        depth_attachment_format: None,
+        ..lighting_desc.clone()
+    };
     let terrain_desc = GraphicsPipelineDesc {
         vertex_input_state: VertexInputState {
             vertex_binding_descriptions: vec![],
@@ -796,60 +800,6 @@ pub fn create_builtin_graphics_pipelines(
     );
 
     pipeline_manager.add_pipeline(
-        ambient,
-        &lighting_desc,
-        &ambient_data.0,
-        ambient_layout,
-        Box::new(
-            move |world: &mut World,
-                  _resource_manager: &mut ResourceManager,
-                  descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle,
-                  _extent| {
-                let ambient = world.get_resource::<AmbientLight>().unwrap();
-
-                let gbuffer_albedo = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::RenderGraphImage { id: albedo_id },
-                );
-                let gbuffer_normal = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    1,
-                    BindingData::RenderGraphImage { id: normal_id },
-                );
-                let gbuffer_position = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    2,
-                    BindingData::RenderGraphImage { id: position_id },
-                );
-                let ambient_handle = descriptor_manager.request_bind(
-                    handle,
-                    1,
-                    0,
-                    BindingData::Uniform {
-                        data: bytes_of(&AmbientLightUBO::from(ambient)).to_vec(),
-                    },
-                );
-
-                let jobs = vec![DrawJob {
-                    mesh: DrawStyle::VertexCount(3),
-                    descriptor_sets: vec![
-                        gbuffer_albedo,
-                        gbuffer_normal,
-                        gbuffer_position,
-                        ambient_handle,
-                    ],
-                }];
-                PipelineJob::Graphics(jobs)
-            },
-        ),
-    );
-
-    pipeline_manager.add_pipeline(
         directional,
         &lighting_desc,
         &directional_data.0,
@@ -1027,7 +977,7 @@ pub fn create_builtin_graphics_pipelines(
         .writes(&mut position)
         .writes_depth(&mut depth)
         .build();
-    let graph = graph
+    let mut graph = graph
         .add_pipeline("terrain")
         .pipeline(terrain)
         .writes(&mut albedo)
@@ -1035,21 +985,37 @@ pub fn create_builtin_graphics_pipelines(
         .writes(&mut position)
         .writes_depth(&mut depth)
         .build();
-    let mut graph = graph
-        .add_pipeline("invert")
-        .pipeline(invert_comp)
-        .read_writes(&mut albedo)
-        .build();
+    // let mut graph = graph
+    //     .add_pipeline("invert")
+    //     .pipeline(invert_comp)
+    //     .read_writes(&mut albedo)
+    //     .build();
 
-    let radiance_config = RadianceConfig {
+    let mut radiance_config = RadianceConfig {
         grid_origin: Vec3::new(0.0, 46.0, 0.0),
-        top_level_probes_x: 4,
+        top_level_probes_x: 8,
         top_level_probes_y: 4,
-        top_level_probes_z: 4,
-        smallest_object_size: 0.4,
+        top_level_probes_z: 8,
+        smallest_object_size: 0.3,
         cascade_count: 3,
         sqrt_ray_count: 4,
     };
+    let half_size_xz = (radiance_config.top_level_probes_x as f32
+        * radiance_config.smallest_object_size
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0))
+        / 2.0;
+    let half_size_y = (radiance_config.top_level_probes_y as f32
+        * radiance_config.smallest_object_size
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0))
+        / 2.0;
+
+    radiance_config.grid_origin = Vec3::new(-half_size_xz, 46.0 - half_size_y, -half_size_xz);
+
+    radiance_config.grid_origin =
+        Vec3::new(0.0 - half_size_xz, 46.0 - half_size_y, 0.0 - half_size_xz);
+
+    trace!(?radiance_config.grid_origin);
+    trace!(?half_size_xz, ?half_size_y);
     // == PASS 1: Create all cascade images ==
     let mut cascade_images: Vec<ImageVersion> =
         Vec::with_capacity(radiance_config.cascade_count as usize);
@@ -1106,6 +1072,10 @@ pub fn create_builtin_graphics_pipelines(
 
         cascade_images.push(cascade_image);
     }
+
+    let mut radiance_info = RadianceInfoUBO::default();
+
+    let mut final_image_id: ImageId = cascade_images[0].id;
 
     // === PASS 2: Wire up pipelines ===
     // from fine to coarse because that is the order that they run and the image dependancies must
@@ -1180,6 +1150,18 @@ pub fn create_builtin_graphics_pipelines(
         let device_clone = device.clone();
         let allocator_clone = allocator.clone();
 
+        radiance_info = RadianceInfoUBO {
+            start_position: radiance_config.grid_origin.into_homogeneous_point(),
+            probe_x_count: probe_count_x,
+            probe_y_count: probe_count_y,
+            probe_z_count: probe_count_z,
+            z_cols,
+            xy_cols,
+            xy_rows,
+            sqrt_ray_count,
+            probe_spacing,
+        };
+
         pipeline_manager.add_compute_pipeline(
             radiance_comp,
             &radiance_data.0,
@@ -1199,6 +1181,8 @@ pub fn create_builtin_graphics_pipelines(
                             world.query::<(Req<Mesh>, Req<Transform>)>()
                         {
                             if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
+                                all_positions.extend_from_slice(&mesh.positions);
+                                all_indices.extend_from_slice(&mesh.indices);
                                 mesh_infos.push(MeshInfo {
                                     vertex_offset: all_positions.len() as u32,
                                     index_offset: all_indices.len() as u32,
@@ -1206,8 +1190,6 @@ pub fn create_builtin_graphics_pipelines(
                                     _pad: 0,
                                     local_to_world: ModelUBO::from(transform).model,
                                 });
-                                all_positions.extend_from_slice(&mesh.positions);
-                                all_indices.extend_from_slice(&mesh.indices);
                             }
                         }
                         let pos_size = (all_positions.len() * size_of::<Vec3>()) as u64;
@@ -1262,7 +1244,7 @@ pub fn create_builtin_graphics_pipelines(
                             .unwrap();
                     }
 
-                    let map = world.get_resource::<TerrainMap>().unwrap().map;
+                    let map = world.get_resource::<TerrainMap>().unwrap();
                     let buffers = world.get_resource::<RadianceMeshBuffers>().unwrap();
                     let mut meshes_array = [MeshInfo::default(); 64];
                     meshes_array[..buffers.mesh_infos.len()].copy_from_slice(&buffers.mesh_infos);
@@ -1289,6 +1271,7 @@ pub fn create_builtin_graphics_pipelines(
                         above_xy_cols,
                         above_xy_rows,
                     };
+                    tracing::trace!(?config_ubo.start_position);
                     let directional = *world.get_resource::<DirectionalLight>().unwrap();
                     let mut light_positions = [Vec4::zero(); 32];
                     let mut light_colors = [Vec4::zero(); 32];
@@ -1327,7 +1310,15 @@ pub fn create_builtin_graphics_pipelines(
                             handle,
                             0,
                             0,
-                            BindingData::Texture { texture: map },
+                            BindingData::Texture { texture: map.map },
+                        ),
+                        descriptor_manager.request_bind(
+                            handle,
+                            0,
+                            1,
+                            BindingData::Uniform {
+                                data: bytes_of(&TerrainUBO::from(map)).to_vec(),
+                            },
                         ),
                         descriptor_manager.request_bind(
                             handle,
@@ -1408,26 +1399,96 @@ pub fn create_builtin_graphics_pipelines(
                 .reads(above_image.as_ref().unwrap())
                 .build()
         };
+        if cascade_level == 0 {
+            final_image_id = cascade_image.id;
+        }
     }
+    pipeline_manager.add_pipeline(
+        ambient,
+        &ambient_desc,
+        &ambient_data.0,
+        ambient_layout,
+        Box::new(
+            move |world: &mut World,
+                  _resource_manager: &mut ResourceManager,
+                  descriptor_manager: &mut DescriptorManager,
+                  handle: PipelineHandle,
+                  _extent| {
+                let gbuffer_albedo = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    0,
+                    BindingData::RenderGraphImage { id: albedo_id },
+                );
+                let gbuffer_normal = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    1,
+                    BindingData::RenderGraphImage { id: normal_id },
+                );
+                let gbuffer_position = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    2,
+                    BindingData::RenderGraphImage { id: position_id },
+                );
+                let final_color = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    3,
+                    BindingData::RenderGraphImage { id: final_image_id },
+                );
+                let ambient_handle = descriptor_manager.request_bind(
+                    handle,
+                    1,
+                    0,
+                    BindingData::Uniform {
+                        data: bytes_of(&radiance_info).to_vec(),
+                    },
+                );
 
+                let jobs = vec![DrawJob {
+                    mesh: DrawStyle::VertexCount(3),
+                    descriptor_sets: vec![
+                        gbuffer_albedo,
+                        gbuffer_normal,
+                        gbuffer_position,
+                        ambient_handle,
+                        final_color,
+                    ],
+                }];
+                PipelineJob::Graphics(jobs)
+            },
+        ),
+    );
     let graph = graph
-        .add_pipeline("directional_light")
-        .pipeline(directional)
+        .add_pipeline("ambient")
+        .pipeline(ambient)
         .reads(&albedo)
         .reads(&normal)
         .reads(&position)
-        .reads_depth(&depth)
+        .reads(&cascade_images[0]) // reads from finest cascade
         .writes(&mut final_color)
         .build();
-    let graph = graph
-        .add_pipeline("point_light")
-        .pipeline(point)
-        .reads(&albedo)
-        .reads(&normal)
-        .reads(&position)
-        .reads_depth(&depth)
-        .writes(&mut final_color)
-        .build();
+
+    // let graph = graph
+    //     .add_pipeline("directional_light")
+    //     .pipeline(directional)
+    //     .reads(&albedo)
+    //     .reads(&normal)
+    //     .reads(&position)
+    //     .reads_depth(&depth)
+    //     .writes(&mut final_color)
+    //     .build();
+    // let graph = graph
+    //     .add_pipeline("point_light")
+    //     .pipeline(point)
+    //     .reads(&albedo)
+    //     .reads(&normal)
+    //     .reads(&position)
+    //     .reads_depth(&depth)
+    //     .writes(&mut final_color)
+    //     .build();
 
     let graph = graph
         .add_pipeline("skybox")

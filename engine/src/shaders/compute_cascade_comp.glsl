@@ -3,6 +3,12 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D height_map;
+layout(set = 0, binding = 1) uniform HeightMapUBO {
+    float size;
+    float height;
+    float resolution;
+}
+ubo;
 
 layout(rgba16f, set = 1, binding = 0) uniform image2D radiance_field;
 layout(rgba16f, set = 1, binding = 1) uniform image2D above_radiance_field;
@@ -58,6 +64,7 @@ layout(set = 4, binding = 0) uniform LightData {
 }
 lights;
 
+#define NO_HIT 1e30
 #define EPS .00002
 
 struct Ray {
@@ -116,7 +123,50 @@ float rayTriangleIntersect(Ray ray, vec3 point1, vec3 point2, vec3 point3) {
     return distance_along_ray;
 }
 
-#define NO_HIT 1e30
+float sampleHeight(sampler2D hmap, vec2 xz, float hmap_size, float hmap_height) {
+    vec2 uv = (xz / hmap_size) + 0.5; // world xz to uv, centered on 0
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return -1e10;
+    }
+    return texture(hmap, uv).r * hmap_height;
+}
+
+float rayHeightmapIntersect(Ray ray, sampler2D hmap, float hmap_size, float hmap_height, float start, float end) {
+    int   steps     = 16; // coarse march steps
+    float step_size = (end - start) / float(steps);
+
+    float t_prev = start;
+    float h_prev =
+        ray.origin.y + ray.direction.y * start - sampleHeight(hmap, ray.origin.xz + ray.direction.xz * start, hmap_size, hmap_height);
+
+    for (int i = 1; i <= steps; i++) {
+        float t    = start + float(i) * step_size;
+        float y    = ray.origin.y + ray.direction.y * t;
+        float h    = sampleHeight(hmap, ray.origin.xz + ray.direction.xz * t, hmap_size, hmap_height);
+        float diff = y - h;
+
+        if (diff < 0.0) {
+            // crossed the surface — binary search between t_prev and t
+            float t_lo = t_prev;
+            float t_hi = t;
+            for (int b = 0; b < 8; b++) {
+                float t_mid = (t_lo + t_hi) * 0.5;
+                float y_mid = ray.origin.y + ray.direction.y * t_mid;
+                float h_mid = sampleHeight(hmap, ray.origin.xz + ray.direction.xz * t_mid, hmap_size, hmap_height);
+                if (y_mid < h_mid) {
+                    t_hi = t_mid;
+                } else {
+                    t_lo = t_mid;
+                }
+            }
+            return (t_lo + t_hi) * 0.5;
+        }
+
+        t_prev = t;
+        h_prev = diff;
+    }
+    return NO_HIT;
+}
 
 float segmentTriangleIntersect(Ray ray, vec3 A, vec3 B, vec3 C, float start, float end) {
     float d = rayTriangleIntersect(ray, A, B, C);
@@ -233,6 +283,12 @@ void main() {
             color   = vec4(lights.point_light_colors[i].xyz, 0.0);
         }
     }
+    float d = rayHeightmapIntersect(ray, height_map, ubo.size, ubo.height, config.interval_start, config.interval_end);
+    if (d < closest) {
+        closest = d;
+        color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission
+    }
+
     vec4 above_radiance;
 
     if (config.is_top_cascade == 0) {

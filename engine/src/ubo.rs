@@ -77,6 +77,20 @@ pub struct RadianceConfigUBO {
     // offset 64 here, meshes is naturally aligned, no padding needed
     pub meshes: [MeshInfo; 64],
 }
+#[derive(Default, Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct RadianceInfoUBO {
+    pub start_position: uv::Vec4, // world space origin of the probe grid
+    pub probe_x_count: u32,
+    pub probe_y_count: u32,
+    pub probe_z_count: u32,
+    pub z_cols: u32,
+    pub xy_cols: u32,
+    pub xy_rows: u32,
+    pub sqrt_ray_count: u32,
+    pub probe_spacing: f32,
+}
+
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct LightDataUBO {

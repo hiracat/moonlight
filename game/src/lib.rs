@@ -200,7 +200,11 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             ground,
-            Transform::from(None, None, Some(Vec3::new(1000.0, 1.0, 1000.0))),
+            Transform::from(
+                Some(Vec3::new(0.0, 45.0, 0.0)),
+                None,
+                Some(Vec3::new(32.0, 1.0, 32.0)),
+            ),
         )
         .unwrap();
     world
