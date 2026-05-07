@@ -64,6 +64,10 @@ pub struct RadianceConfigUBO {
     pub z_cols: u32,
     pub xy_cols: u32,
     pub xy_rows: u32,
+    pub above_z_cols: u32,
+    pub above_xy_cols: u32,
+    pub above_xy_rows: u32,
+    pub _pad: u32,
     pub probe_spacing: f32,
     pub interval_start: f32,
     pub interval_end: f32,
@@ -72,6 +76,18 @@ pub struct RadianceConfigUBO {
     pub mesh_count: u32,
     // offset 64 here, meshes is naturally aligned, no padding needed
     pub meshes: [MeshInfo; 64],
+}
+#[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[repr(C)]
+pub struct LightDataUBO {
+    pub sun_direction: uv::Vec4, // xyz = direction, w = unused
+    pub sun_color: uv::Vec4,     // xyz = color (intensity baked in), w = unused
+    pub point_light_count: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+    pub point_light_positions: [uv::Vec4; 32], // xyz = pos, w = radius
+    pub point_light_colors: [uv::Vec4; 32],    // xyz = color (intensity baked in), w = unused
 }
 
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]

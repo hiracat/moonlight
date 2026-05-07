@@ -13,7 +13,7 @@ use bytemuck::bytes_of;
 use educe::Educe;
 use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
 use tracing::trace;
-use ultraviolet::Vec3;
+use ultraviolet::{Vec3, Vec4};
 
 use crate::core::TerrainMap;
 use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
@@ -27,8 +27,8 @@ use crate::resources::{
 };
 use crate::resources::{Material, Mesh, Skybox};
 use crate::ubo::{
-    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, MaterialUBO, MeshInfo,
-    ModelUBO, PointLightUBO, RadianceConfigUBO, TerrainUBO,
+    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, LightDataUBO, MaterialUBO,
+    MeshInfo, ModelUBO, PointLightUBO, RadianceConfigUBO, TerrainUBO,
 };
 use crate::vulkan::SharedAllocator;
 use crate::{
@@ -1046,9 +1046,9 @@ pub fn create_builtin_graphics_pipelines(
         top_level_probes_x: 4,
         top_level_probes_y: 4,
         top_level_probes_z: 4,
-        smallest_object_size: 0.3,
-        cascade_count: 4,
-        sqrt_ray_count: 2,
+        smallest_object_size: 0.4,
+        cascade_count: 3,
+        sqrt_ray_count: 4,
     };
     // == PASS 1: Create all cascade images ==
     let mut cascade_images: Vec<ImageVersion> =
@@ -1119,6 +1119,20 @@ pub fn create_builtin_graphics_pipelines(
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
         let sqrt_ray_count = radiance_config.sqrt_ray_count * 4u32.pow(cascade_level);
 
+        let above_probe_count_x = probe_count_x / 2;
+        let above_probe_count_y = probe_count_y / 2;
+        let above_probe_count_z = probe_count_z / 2;
+
+        // fold z into a 2D grid of z-blocks
+        let above_z_cols = {
+            let s = above_probe_count_z.isqrt();
+            if s * s >= above_probe_count_z {
+                s
+            } else {
+                s + 1
+            }
+        };
+
         // fold z into a 2D grid of z-blocks
         let z_cols = {
             let s = probe_count_z.isqrt();
@@ -1127,6 +1141,13 @@ pub fn create_builtin_graphics_pipelines(
 
         // total xy probes
         let xy = probe_count_x * probe_count_y;
+
+        let above_xy = above_probe_count_x * above_probe_count_y;
+        let above_xy_cols = {
+            let s = above_xy.isqrt();
+            if s * s >= above_xy { s } else { s + 1 }
+        };
+        let above_xy_rows = above_xy.div_ceil(above_xy_cols);
 
         let xy_cols = {
             let s = xy.isqrt();
@@ -1249,6 +1270,7 @@ pub fn create_builtin_graphics_pipelines(
                     // Use a sentinel id (or handle None) for the top cascade which has no above
                     let resolved_above_id = above_id.unwrap_or(cascade_id); // top reads itself, shader should ignore
                     let config_ubo = RadianceConfigUBO {
+                        _pad: 0,
                         start_position: radiance_config.grid_origin.into_homogeneous_point(),
                         count_x: probe_count_x,
                         count_y: probe_count_y,
@@ -1263,6 +1285,41 @@ pub fn create_builtin_graphics_pipelines(
                         z_cols,
                         xy_cols,
                         xy_rows,
+                        above_z_cols,
+                        above_xy_cols,
+                        above_xy_rows,
+                    };
+                    let directional = *world.get_resource::<DirectionalLight>().unwrap();
+                    let mut light_positions = [Vec4::zero(); 32];
+                    let mut light_colors = [Vec4::zero(); 32];
+                    let mut count = 0;
+                    for (idx, (_entityid, (light, transform))) in world
+                        .query::<(Req<PointLight>, Req<Transform>)>()
+                        .enumerate()
+                    {
+                        light_positions[idx] = transform.position.into_homogeneous_point();
+                        // the w component is the radius
+                        light_colors[idx] = Vec4::new(
+                            light.color.x,
+                            light.color.y,
+                            light.color.z,
+                            light.brightness,
+                        );
+
+                        count += 1;
+                    }
+                    let lighting_ubo = LightDataUBO {
+                        sun_direction: directional
+                            .from_position
+                            .normalized()
+                            .into_homogeneous_vector(),
+                        sun_color: directional.color.into_homogeneous_vector(),
+                        point_light_count: count,
+                        _pad0: 0,
+                        _pad1: 0,
+                        _pad2: 0,
+                        point_light_positions: light_positions,
+                        point_light_colors: light_colors,
                     };
 
                     let mut bindings = vec![
@@ -1292,6 +1349,14 @@ pub fn create_builtin_graphics_pipelines(
                             0,
                             BindingData::Uniform {
                                 data: bytes_of(&config_ubo).to_vec(),
+                            },
+                        ),
+                        descriptor_manager.request_bind(
+                            handle,
+                            4,
+                            0,
+                            BindingData::Uniform {
+                                data: bytes_of(&lighting_ubo).to_vec(),
                             },
                         ),
                     ];

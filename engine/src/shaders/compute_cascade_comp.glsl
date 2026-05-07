@@ -23,6 +23,10 @@ layout(set = 2, binding = 0) uniform RadianceConfigUBO {
     uint     z_cols;
     uint     xy_cols;
     uint     xy_rows;
+    uint     above_z_cols;
+    uint     above_xy_cols;
+    uint     above_xy_rows;
+    uint     _pad;
     float    probe_spacing;
     float    interval_start;
     float    interval_end;
@@ -41,12 +45,43 @@ layout(set = 3, binding = 1) readonly buffer IndexBuffer {
     uint indices[];
 }
 idx;
+
+layout(set = 4, binding = 0) uniform LightData {
+    vec4 sun_direction; // xyz = direction, w = unused
+    vec4 sun_color;     // xyz = color (intensity baked in), w = unused
+    uint point_light_count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    vec4 point_light_positions[32]; // xyz = pos, w = radius
+    vec4 point_light_colors[32];    // xyz = color (intensity baked in), w = unused
+}
+lights;
+
 #define EPS .00002
 
 struct Ray {
     vec3 direction;
     vec3 origin;
 };
+float raySphereIntersect(Ray ray, vec3 s0, float sr) {
+    // - r0: ray origin
+    // - rd: normalized ray direction
+    // - s0: sphere center
+    // - sr: sphere radius
+    // - Returns distance from r0 to first intersecion with sphere,
+    //   or -1.0 if no intersection.
+    // float a     = dot(ray.direction, ray.direction);
+    // always 1 if ray.direction is normalized, which it is
+    float a     = 1.0;
+    vec3  s0_r0 = ray.origin - s0;
+    float b     = 2.0 * dot(ray.direction, s0_r0);
+    float c     = dot(s0_r0, s0_r0) - (sr * sr);
+    if (b * b - 4.0 * a * c < 0.0) {
+        return -1.0;
+    }
+    return (-b - sqrt((b * b) - 4.0 * a * c)) / (2.0 * a);
+}
 
 /**
 Tomas Möller & Ben Trumbore (1997) Fast, Minimum Storage Ray-Triangle Intersection,
@@ -81,12 +116,22 @@ float rayTriangleIntersect(Ray ray, vec3 point1, vec3 point2, vec3 point3) {
     return distance_along_ray;
 }
 
-bool segmentTriangleIntersect(Ray ray, vec3 A, vec3 B, vec3 C, float start, float end) {
-    float distance = rayTriangleIntersect(ray, A, B, C);
-    if (distance > start && distance < end) {
-        return true;
+#define NO_HIT 1e30
+
+float segmentTriangleIntersect(Ray ray, vec3 A, vec3 B, vec3 C, float start, float end) {
+    float d = rayTriangleIntersect(ray, A, B, C);
+    if (d > start && d < end) {
+        return d;
     }
-    return false;
+    return NO_HIT;
+}
+
+float segmentSphereIntersect(Ray ray, vec3 pos, float radius, float start, float end) {
+    float distance = raySphereIntersect(ray, pos, radius);
+    if (distance > start && distance < end) {
+        return distance;
+    }
+    return NO_HIT;
 }
 
 // https://pbr-book.org/4ed/Geometry_and_Transformations/Spherical_Geometry#fragment-Reparameterizedirectionsinthez0portionoftheoctahedron-0
@@ -101,6 +146,12 @@ vec3 unitVectorFrom2d(float x, float y, float range) {
         v.y      = (1 - abs(xo)) * sign(v.y);
     }
     return normalize(v);
+}
+vec4 merge_intervals(vec4 near, vec4 far) {
+    /* Far radiance can get occluded by near visibility term */
+    const vec3 radiance = near.rgb + (far.rgb * near.a);
+
+    return vec4(radiance, near.a * far.a);
 }
 
 void main() {
@@ -132,11 +183,30 @@ void main() {
     uint texel_x = z_col * (config.xy_cols * config.sqrt_ray_count) + xy_col * config.sqrt_ray_count + ray_col;
     uint texel_y = z_row * (config.xy_rows * config.sqrt_ray_count) + xy_row * config.sqrt_ray_count + ray_row;
 
+    // ------------------- above
+    // above cascade has half the probes per axis
+    uint above_probe_x = probe_x / 2;
+    uint above_probe_y = probe_y / 2;
+    uint above_probe_z = probe_z / 2;
+
+    uint above_xy_idx = above_probe_y * (config.count_x / 2) + above_probe_x;
+    uint above_xy_col = above_xy_idx % config.above_xy_cols;
+    uint above_xy_row = above_xy_idx / config.above_xy_cols;
+    uint above_z_col  = above_probe_z % config.above_z_cols;
+    uint above_z_row  = above_probe_z / config.above_z_cols;
+
+    uint above_sqrt_ray = config.sqrt_ray_count * 4;
+    uint above_ray_col  = uint(float(ray_col) / float(config.sqrt_ray_count) * float(above_sqrt_ray));
+    uint above_ray_row  = uint(float(ray_row) / float(config.sqrt_ray_count) * float(above_sqrt_ray));
+    uint above_texel_x  = above_z_col * (config.above_xy_cols * above_sqrt_ray) + above_xy_col * above_sqrt_ray + above_ray_col;
+    uint above_texel_y  = above_z_row * (config.above_xy_rows * above_sqrt_ray) + above_xy_row * above_sqrt_ray + above_ray_row;
+    // -------------------  above
+
     vec3 direction = unitVectorFrom2d(ray_row, ray_col, config.sqrt_ray_count);
 
-    Ray  ray       = Ray(direction, probe_world_pos);
-    bool collision = false;
-    vec3 color;
+    Ray   ray     = Ray(direction, probe_world_pos);
+    float closest = NO_HIT;
+    vec4  color   = vec4(0.0, 0.0, 0.0, 1.0);
     for (int i = 0; i < config.mesh_count; i++) {
         MeshInfo mesh_info = config.meshes[i];
         for (int j = 0; j < mesh_info.index_count; j += 3) {
@@ -148,20 +218,35 @@ void main() {
             vec3 worldp2 = (mesh_info.local_to_world * p2).xyz;
             vec3 worldp3 = (mesh_info.local_to_world * p3).xyz;
 
-            collision = segmentTriangleIntersect(ray, worldp1, worldp2, worldp3, config.interval_start, config.interval_end);
-
-            if (collision) {
-                break;
+            float d = segmentTriangleIntersect(ray, worldp1, worldp2, worldp3, config.interval_start, config.interval_end);
+            if (d < closest) {
+                closest = d;
+                color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission
             }
         }
-        if (collision) {
-            break;
+    }
+    for (int i = 0; i < lights.point_light_count; i++) {
+        float d = segmentSphereIntersect(
+            ray, lights.point_light_positions[i].xyz, lights.point_light_positions[i].w, config.interval_start, config.interval_end);
+        if (d < closest) {
+            closest = d;
+            color   = vec4(lights.point_light_colors[i].xyz, 0.0);
         }
     }
-    if (collision) {
-        color = vec3(0.0, 0.0, 0.0);
+    vec4 above_radiance;
+
+    if (config.is_top_cascade == 0) {
+        above_radiance = imageLoad(above_radiance_field, ivec2(above_texel_x, above_texel_y)).rgba;
     } else {
-        color = vec3(1.0, 1.0, 1.0);
+        float sun_dot        = dot(direction, lights.sun_direction.xyz);
+        vec3  sky_color      = vec3(0.2, 0.4, 0.8) * max(0.0, direction.y);
+        vec3  incoming_color = sky_color;
+        if (sun_dot > 0.99) {
+            incoming_color = lights.sun_color.xyz;
+        }
+        above_radiance = vec4(incoming_color, 1.0);
     }
-    imageStore(radiance_field, ivec2(texel_x, texel_y), vec4(color, 1.0));
+    vec4 merged = merge_intervals(color, above_radiance);
+
+    imageStore(radiance_field, ivec2(texel_x, texel_y), merged);
 }
