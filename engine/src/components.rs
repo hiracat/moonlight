@@ -90,24 +90,12 @@ impl AmbientLight {
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct PointLight {
     pub color: uv::Vec3,
-    pub brightness: f32,
-    pub linear: f32,
-    pub quadratic: f32,
+    pub size: f32,
 }
 
 impl PointLight {
-    pub fn new(
-        color: uv::Vec3,
-        brightness: f32,
-        linear: Option<f32>,
-        quadratic: Option<f32>,
-    ) -> Self {
-        Self {
-            color,
-            brightness,
-            linear: linear.unwrap_or(3.00),
-            quadratic: quadratic.unwrap_or(0.00),
-        }
+    pub fn new(color: uv::Vec3, size: f32) -> Self {
+        Self { color, size }
     }
 }
 
@@ -130,7 +118,7 @@ impl DirectionalLight {
         sky_gradient_sharpness: f32,
     ) -> Self {
         Self {
-            sun_position: sun_pos,
+            sun_position: sun_pos.normalized(),
             sun_color,
             sky_zenith_color,
             sky_horizon_color,

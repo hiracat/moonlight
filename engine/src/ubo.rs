@@ -211,23 +211,15 @@ impl From<&AmbientLight> for AmbientLightUBO {
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct PointLightUBO {
-    pub(crate) position: uv::Vec3,
-    _padding: f32,
-    pub(crate) color: uv::Vec3,
-    pub(crate) brightness: f32,
-    pub(crate) linear: f32,
-    pub(crate) quadratic: f32,
+    color: uv::Vec4, // w = size
+    position: uv::Vec4,
 }
 
 impl PointLightUBO {
     pub(crate) fn new() -> Self {
         PointLightUBO {
-            position: uv::Vec3::zero(),
-            _padding: 0.0,
-            color: uv::Vec3::zero(),
-            brightness: 0.0,
-            linear: 0.0,
-            quadratic: 0.0,
+            position: uv::Vec4::zero(),
+            color: uv::Vec4::zero(),
         }
     }
 }
@@ -235,12 +227,13 @@ impl PointLightUBO {
 impl From<(&PointLight, &Transform)> for PointLightUBO {
     fn from((light, transform): (&PointLight, &Transform)) -> Self {
         PointLightUBO {
-            position: transform.position,
-            _padding: 0.0,
-            color: light.color,
-            brightness: light.brightness,
-            linear: light.linear,
-            quadratic: light.quadratic,
+            position: transform.position.into_homogeneous_point(),
+            color: uv::Vec4 {
+                x: light.color.x,
+                y: light.color.y,
+                z: light.color.z,
+                w: light.size,
+            },
         }
     }
 }

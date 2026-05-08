@@ -1,40 +1,47 @@
 ---@type boolean
 local ui_initialized = false
 
----------------------------------------------------------------------
--- WIDGET ACCESSORS
----------------------------------------------------------------------
-
+---@param widgets table<string, Widget>
+---@param name string
+---@return Slider?
 local function slider(widgets, name)
 	local w = widgets[name]
 	return (w and w.type == "Slider") and w.data or nil
 end
 
+---@param widgets table<string, Widget>
+---@param name string
+---@return Button?
 local function button(widgets, name)
 	local w = widgets[name]
 	return (w and w.type == "Button") and w.data or nil
 end
 
+---@param widgets table<string, Widget>
+---@param name string
+---@return TextInput?
 local function text_input(widgets, name)
 	local w = widgets[name]
 	return (w and w.type == "TextInput") and w.data or nil
 end
 
+---@param widgets table<string, Widget>
+---@param name string
+---@return NumberInput?
 local function number_input(widgets, name)
 	local w = widgets[name]
 	return (w and w.type == "NumberInput") and w.data or nil
 end
 
+---@param widgets table<string, Widget>
+---@param name string
+---@param text string
 local function set_label(widgets, name, text)
 	local w = widgets[name]
 	if w and w.type == "Label" then
 		w.data.text = text
 	end
 end
-
----------------------------------------------------------------------
--- ENTITY HELPERS
----------------------------------------------------------------------
 
 ---@param world any
 ---@param name string?
@@ -46,12 +53,48 @@ local function find_entity(world, name)
 	return world:find(name)
 end
 
----------------------------------------------------------------------
--- TREE SPAWNING
----------------------------------------------------------------------
+---@param label string
+---@param value number
+---@param min number
+---@param max number
+---@return Widget_Slider
+local function Slider(label, value, min, max)
+	return { type = "Slider", data = { value = value, min = min, max = max, label = label } }
+end
 
----@type boolean
-local trees_spawned = false
+---@param label string
+---@return Widget_Button
+local function Button(label)
+	return { type = "Button", data = { clicked = false, label = label } }
+end
+
+---@param label string
+---@param placeholder string?
+---@return Widget_TextInput
+local function TextInput(label, placeholder)
+	return { type = "TextInput", data = { value = placeholder or "", label = label } }
+end
+
+---@param label string
+---@param value number
+---@param min number
+---@param max number
+---@return Widget_NumberInput
+local function NumberInput(label, value, min, max)
+	return { type = "NumberInput", data = { value = value, min = min, max = max, label = label } }
+end
+
+---@param label string
+---@param default_text string?
+---@return Widget_Label
+local function Label(label, default_text)
+	return { type = "Label", label = label, data = { text = default_text or "idle" } }
+end
+
+---@return Widget_Separator
+local function Separator()
+	return { type = "Separator" }
+end
 
 local function spawn_trees(world, widgets)
 	local count = math.floor(slider(widgets, "trees.count").value)
@@ -59,7 +102,6 @@ local function spawn_trees(world, widgets)
 	local scale_min = slider(widgets, "trees.scale_min").value
 	local scale_max = slider(widgets, "trees.scale_max").value
 
-	-- Grab the mesh from the existing "tree" entity
 	local tree_template = world:find("tree")
 	if not tree_template then
 		set_label(widgets, "trees.status", "no 'tree' entity found")
@@ -72,7 +114,6 @@ local function spawn_trees(world, widgets)
 		return
 	end
 
-	-- Despawn existing spawned trees
 	local to_despawn = {}
 	for _, e in ipairs(world:query({ req = { "EntityName" } })) do
 		if e.EntityName.name:sub(1, 5) == "tree_" then
@@ -111,9 +152,7 @@ local function spawn_trees(world, widgets)
 		local t = world:get_component(entity, "Transform")
 		t.position = { x = x, y = y, z = z }
 		t.scale = { x = t_scale, y = t_scale, z = t_scale }
-
-		-- read it back immediately
-		local t2 = world:get_component(entity, "Transform")
+		t.rotation = { pitch = 0, yaw = yaw, roll = 0 }
 
 		world:add_component(entity, template_mesh, "Mesh")
 		world:add_component(entity, template_material, "Material")
@@ -123,7 +162,6 @@ local function spawn_trees(world, widgets)
 end
 
 local function despawn_trees(world, widgets)
-	-- Despawn existing spawned trees
 	local to_despawn = {}
 	for _, e in ipairs(world:query({ req = { "EntityName" } })) do
 		if e.EntityName.name:sub(1, 5) == "tree_" then
@@ -135,56 +173,23 @@ local function despawn_trees(world, widgets)
 		world:despawn(entity)
 		count = count + 1
 	end
-	set_label(widgets, "trees.status", string.format("despawn %d trees", count))
+	set_label(widgets, "trees.status", string.format("despawned %d trees", count))
 end
 
 ---------------------------------------------------------------------
--- WIDGET FACTORY HELPERS
+-- DAY / NIGHT CYCLE
 ---------------------------------------------------------------------
-
-local function Slider(label, value, min, max)
-	return { type = "Slider", label = label, data = { value = value, min = min, max = max } }
-end
-
-local function Button(label)
-	return { type = "Button", label = label, data = { clicked = false } }
-end
-
-local function TextInput(label, placeholder)
-	return { type = "TextInput", label = label, data = { value = placeholder or "" } }
-end
-
-local function NumberInput(label, value, min, max)
-	return { type = "NumberInput", label = label, data = { value = value, min = min, max = max } }
-end
-
-local function Label(label, default_text)
-	return { type = "Label", label = label, data = { text = default_text or "idle" } }
-end
-
-local function Separator()
-	return { type = "Separator" }
-end
-
----------------------------------------------------------------------
--- DAY / NIGHT CYCLE HELPERS
----------------------------------------------------------------------
-
-local TAU = math.pi * 2
 
 local function lerp(a, b, t)
 	return a + (b - a) * t
 end
 
---- Returns 0..1 brightness given normalised time-of-day (0=midnight, 0.5=noon, 1=midnight)
 local function day_brightness(t)
-	-- sine peaks at noon (t=0.5), is 0 at t=0 and t=1
-	local raw = math.sin(t * math.pi) -- 0..1..0
-	return math.max(0, raw) -- clamp negatives (below horizon)
+	local raw = math.sin(t * math.pi)
+	return math.max(0, raw)
 end
 
 local function apply_day_night(world, widgets, dt)
-	-- Sliders
 	local enabled = slider(widgets, "dnc.enabled")
 	local speed_s = slider(widgets, "dnc.speed")
 	local tod_s = slider(widgets, "dnc.time_of_day")
@@ -195,237 +200,101 @@ local function apply_day_night(world, widgets, dt)
 		return
 	end
 
-	-- Advance time when cycle is running (enabled > 0.5 = on)
 	if enabled.value > 0.5 then
 		tod_s.value = (tod_s.value + speed_s.value * dt) % 1.0
 	end
 
-	local t = tod_s.value -- 0..1
-	local bright = day_brightness(t) -- 0..1
+	local t = tod_s.value
+	local bright = day_brightness(t)
 	local peak = peak_s.value
-	local amb_min = ambient_s.value
 
-	-- Sun position: arc across the sky (XZ plane, Y is up)
-	local angle = t * math.pi -- 0=east horizon, pi=west horizon
+	local angle = t * math.pi
 	local sun_x = math.cos(angle - math.pi * 0.5) * 500
 	local sun_y = math.sin(angle) * 500
 	local sun_z = 0.0
 
-	-- Sun / directional light colour: warm at dawn/dusk, white at noon
-	local dawn_t = math.max(0, 1 - bright * 4) -- 1 near horizon, 0 when high
-	local sun_r = lerp(1.0, 1.0, dawn_t)
-	local sun_g = lerp(1.0, lerp(0.9, 0.5, dawn_t), bright)
-	local sun_b = lerp(1.0, lerp(0.6, 0.1, dawn_t), bright)
+	local dawn_t = math.max(0, 1 - bright * 4)
+	local sun_r = 1.0
+	local sun_g = lerp(lerp(0.9, 0.5, dawn_t), 1.0, 1 - bright)
+	local sun_b = lerp(lerp(0.6, 0.1, dawn_t), 1.0, 1 - bright)
+	local sun_br = bright * peak
 
-	local sun_brightness = bright * peak
-
-	-- Update DirectionalLight
 	local dir_light = world:get_resource("DirectionalLight") ---@type DirectionalLight
-	local dl = dir_light
-	-- dl.sun_position = { x = sun_x, y = sun_y, z = sun_z }
-	-- dl.sun_color = {
-	-- 	x = sun_r * sun_brightness,
-	-- 	y = sun_g * sun_brightness,
-	-- 	z = sun_b * sun_brightness,
-	-- }
+	dir_light.sun_position = { x = sun_x, y = sun_y, z = sun_z }
+	dir_light.sun_color = { x = sun_r * sun_br, y = sun_g * sun_br, z = sun_b * sun_br }
 
-	-- Update AmbientLight: stays dim but never fully black
-	local amb_light = world:get_resource("AmbientLight")
-
-	local al = amb_light ---@type AmbientLight
-	local intensity = lerp(amb_min, 1.0, bright)
-	-- Night tint: cool blue; day: neutral
-	al.color = {
-		x = lerp(0.3, 1.0, bright),
-		y = lerp(0.4, 1.0, bright),
-		z = lerp(0.8, 1.0, bright),
-	}
-	al.intensity = intensity
-	amb_light = al
-
-	-- Human-readable time label  (00:00 – 24:00)
 	local hour = math.floor(t * 24)
 	local minute = math.floor((t * 24 - hour) * 60)
 	set_label(widgets, "dnc.clock", string.format("%02d:%02d", hour, minute))
 end
 
 ---------------------------------------------------------------------
--- INIT UI
+-- SUN / SKY LIGHT HELPERS
 ---------------------------------------------------------------------
 
-local function init_ui(ui)
-	ui.widgets = {
-		-- Tree Spawning --
-		["trees.count"] = Slider("Tree Count", 200, 1, 2000),
-		["trees.spread"] = Slider("Spread Radius", 500, 10, 5000),
-		["trees.scale_min"] = Slider("Scale Min", 5.8, 0.01, 100.0),
-		["trees.scale_max"] = Slider("Scale Max", 9.0, 0.01, 100.0),
-		["trees.seed"] = Slider("Random Seed", 42, 0, 9999),
-		["trees.btn.spawn"] = Button("Spawn Trees"),
-		["trees.btn.despawn"] = Button("Clear Trees"),
-		["trees.status"] = Label("Status", "idle"),
-		-- Day / Night Cycle --
-		["dnc.enabled"] = Slider("Cycle Running (0=off 1=on)", 1.0, 0.0, 1.0),
-		["dnc.speed"] = Slider("Cycle Speed", 0.002, 0.0, 5.0),
-		["dnc.time_of_day"] = Slider("Time of Day (0=midnight 0.5=noon)", 0.3, 0.0, 1.0),
-		["dnc.peak_brightness"] = Slider("Peak Sun Brightness", 1.5, 0.0, 5.0),
-		["dnc.ambient_min"] = Slider("Night Ambient Level", 0.05, 0.0, 0.5),
-		["dnc.clock"] = Label("Clock", "00:00"),
-		-- Terrain / Global Light --
-		["terrain.light.r"] = Slider("Red", 1.0, 0.0, 1.0),
-		["terrain.light.g"] = Slider("Green", 0.8, 0.0, 1.0),
-		["terrain.light.b"] = Slider("Blue", 0.4, 0.0, 1.0),
-		["terrain.light.brightness"] = Slider("Brightness", 3.0, 0.0, 20.0),
-		["terrain.light.linear"] = Slider("Linear Falloff", 0.22, 0.0, 2.0),
-		["terrain.light.quadratic"] = Slider("Quadratic Falloff", 0.20, 0.0, 5.0),
-		["terrain.heightmap.res"] = Slider("Resolution", 1000, 5, 5000),
+local function read_sun_sky(world, widgets)
+	local dl = world:get_resource("DirectionalLight") ---@type DirectionalLight
+	if not dl then
+		set_label(widgets, "sun.status", "no DirectionalLight resource")
+		return
+	end
 
-		-- Player / Camera --
-		["player.sprint_speed"] = Slider("Sprint Speed", 20, 5, 200),
-		["camera.offset.x"] = Slider("Offset X", 0, -300, 300),
-		["camera.offset.y"] = Slider("Offset Y", 0, -100, 300),
-		["camera.offset.z"] = Slider("Offset Z", 0, -100, 300),
-		["world.gravity"] = Slider("Gravity", 9.8, -10, 30),
+	-- Sun position
+	slider(widgets, "sun.pos.x").value = dl.sun_position.x
+	slider(widgets, "sun.pos.y").value = dl.sun_position.y
+	slider(widgets, "sun.pos.z").value = dl.sun_position.z
 
-		-- Entity Transform --
-		["entity.name"] = TextInput("Entity Name"),
-		["entity.pos.x"] = Slider("Position X", 0, -10000, 10000),
-		["entity.pos.y"] = Slider("Position Y", 0, -10000, 10000),
-		["entity.pos.z"] = Slider("Position Z", 0, -10000, 10000),
-		["entity.rot.pitch"] = Slider("Pitch", 0, -360, 360),
-		["entity.rot.yaw"] = Slider("Yaw", 0, -360, 360),
-		["entity.rot.roll"] = Slider("Roll", 0, -360, 360),
-		["entity.scale.x"] = Slider("Scale X", 1, 0.001, 1000),
-		["entity.scale.y"] = Slider("Scale Y", 1, 0.001, 1000),
-		["entity.scale.z"] = Slider("Scale Z", 1, 0.001, 1000),
-		["entity.teleport.x"] = NumberInput("Teleport X", 0, -10000, 10000),
-		["entity.teleport.y"] = NumberInput("Teleport Y", 0, -10000, 10000),
-		["entity.teleport.z"] = NumberInput("Teleport Z", 0, -10000, 10000),
-		["entity.btn.read"] = Button("Read Transform"),
-		["entity.btn.apply"] = Button("Apply Transform"),
-		["entity.btn.teleport"] = Button("Teleport Here"),
-		["entity.status"] = Label("Status", "idle"),
+	-- Sun color
+	slider(widgets, "sun.color.r").value = dl.sun_color.x
+	slider(widgets, "sun.color.g").value = dl.sun_color.y
+	slider(widgets, "sun.color.b").value = dl.sun_color.z
 
-		["entity.list"] = Label("Active Entities", "none"),
+	-- Sky zenith color
+	slider(widgets, "sky.zenith.r").value = dl.sky_zenith_color.x
+	slider(widgets, "sky.zenith.g").value = dl.sky_zenith_color.y
+	slider(widgets, "sky.zenith.b").value = dl.sky_zenith_color.z
 
-		-- Point Light --
-		["light.name"] = TextInput("Light Entity Name"),
-		["light.color.r"] = Slider("Red", 1.0, 0.0, 1.0),
-		["light.color.g"] = Slider("Green", 1.0, 0.0, 1.0),
-		["light.color.b"] = Slider("Blue", 1.0, 0.0, 1.0),
-		["light.brightness"] = Slider("Brightness", 3.0, 0.0, 20.0),
-		["light.linear"] = Slider("Linear Falloff", 0.22, 0.0, 2.0),
-		["light.quadratic"] = Slider("Quadratic Falloff", 0.20, 0.0, 5.0),
-		["light.btn.apply"] = Button("Apply Light"),
-		["light.btn.read"] = Button("Read Light"),
-		["light.status"] = Label("Status", "idle"),
+	-- Sky horizon color
+	slider(widgets, "sky.horizon.r").value = dl.sky_horizon_color.x
+	slider(widgets, "sky.horizon.g").value = dl.sky_horizon_color.y
+	slider(widgets, "sky.horizon.b").value = dl.sky_horizon_color.z
 
-		["separator"] = Separator(),
+	-- Sky gradient sharpness
+	slider(widgets, "sky.gradient_sharpness").value = dl.sky_gradient_sharpness
+
+	set_label(widgets, "sun.status", "read ok")
+end
+
+local function apply_sun_sky(world, widgets)
+	local dl = world:get_resource("DirectionalLight") ---@type DirectionalLight
+	if not dl then
+		set_label(widgets, "sun.status", "no DirectionalLight resource")
+		return
+	end
+
+	dl.sun_position = {
+		x = slider(widgets, "sun.pos.x").value,
+		y = slider(widgets, "sun.pos.y").value,
+		z = slider(widgets, "sun.pos.z").value,
 	}
-
-	ui.schema = {
-		windows = {
-
-			{
-				name = "Entity Control",
-				fields = {
-					{
-						type = "Scroll",
-						data = { visible_lines = 10, items = { { type = "Field", data = "entity.list" } } },
-					},
-
-					{ type = "Field", data = "entity.name" },
-
-					{ type = "Field", data = "entity.pos.x" },
-					{ type = "Field", data = "entity.pos.y" },
-					{ type = "Field", data = "entity.pos.z" },
-
-					{ type = "Field", data = "entity.rot.pitch" },
-					{ type = "Field", data = "entity.rot.yaw" },
-					{ type = "Field", data = "entity.rot.roll" },
-
-					{ type = "Field", data = "entity.scale.x" },
-					{ type = "Field", data = "entity.scale.y" },
-					{ type = "Field", data = "entity.scale.z" },
-
-					{ type = "Field", data = "entity.btn.read" },
-					{ type = "Field", data = "entity.btn.apply" },
-
-					{ type = "Field", data = "separator" },
-
-					{ type = "Field", data = "entity.teleport.x" },
-					{ type = "Field", data = "entity.teleport.y" },
-					{ type = "Field", data = "entity.teleport.z" },
-					{ type = "Field", data = "entity.btn.teleport" },
-
-					{ type = "Field", data = "entity.status" },
-				},
-			},
-			{
-				name = "Terrain & Global Lighting",
-				fields = {
-					{ type = "Field", data = "terrain.light.r" },
-					{ type = "Field", data = "terrain.light.g" },
-					{ type = "Field", data = "terrain.light.b" },
-					{ type = "Field", data = "terrain.light.brightness" },
-					{ type = "Field", data = "terrain.light.linear" },
-					{ type = "Field", data = "terrain.light.quadratic" },
-					{ type = "Field", data = "terrain.heightmap.res" },
-				},
-			},
-
-			{
-				name = "Player & Camera",
-				fields = {
-					{ type = "Field", data = "player.sprint_speed" },
-					{ type = "Field", data = "camera.offset.x" },
-					{ type = "Field", data = "camera.offset.y" },
-					{ type = "Field", data = "camera.offset.z" },
-					{ type = "Field", data = "world.gravity" },
-				},
-			},
-
-			{
-				name = "Point Light Control",
-				fields = {
-					{ type = "Field", data = "light.name" },
-					{ type = "Field", data = "light.color.r" },
-					{ type = "Field", data = "light.color.g" },
-					{ type = "Field", data = "light.color.b" },
-					{ type = "Field", data = "light.brightness" },
-					{ type = "Field", data = "light.linear" },
-					{ type = "Field", data = "light.quadratic" },
-					{ type = "Field", data = "light.btn.read" },
-					{ type = "Field", data = "light.btn.apply" },
-					{ type = "Field", data = "light.status" },
-				},
-			},
-			{
-				name = "Day / Night Cycle",
-				fields = {
-					{ type = "Field", data = "dnc.clock" },
-					{ type = "Field", data = "dnc.enabled" },
-					{ type = "Field", data = "dnc.speed" },
-					{ type = "Field", data = "dnc.time_of_day" },
-					{ type = "Field", data = "dnc.peak_brightness" },
-					{ type = "Field", data = "dnc.ambient_min" },
-				},
-			},
-			{
-				name = "Tree Spawning",
-				fields = {
-					{ type = "Field", data = "trees.count" },
-					{ type = "Field", data = "trees.spread" },
-					{ type = "Field", data = "trees.scale_min" },
-					{ type = "Field", data = "trees.scale_max" },
-					{ type = "Field", data = "trees.seed" },
-					{ type = "Field", data = "trees.btn.spawn" },
-					{ type = "Field", data = "trees.btn.despawn" },
-					{ type = "Field", data = "trees.status" },
-				},
-			},
-		},
+	dl.sun_color = {
+		x = slider(widgets, "sun.color.r").value,
+		y = slider(widgets, "sun.color.g").value,
+		z = slider(widgets, "sun.color.b").value,
 	}
+	dl.sky_zenith_color = {
+		x = slider(widgets, "sky.zenith.r").value,
+		y = slider(widgets, "sky.zenith.g").value,
+		z = slider(widgets, "sky.zenith.b").value,
+	}
+	dl.sky_horizon_color = {
+		x = slider(widgets, "sky.horizon.r").value,
+		y = slider(widgets, "sky.horizon.g").value,
+		z = slider(widgets, "sky.horizon.b").value,
+	}
+	dl.sky_gradient_sharpness = slider(widgets, "sky.gradient_sharpness").value
+
+	set_label(widgets, "sun.status", "applied ok")
 end
 
 ---------------------------------------------------------------------
@@ -510,8 +379,27 @@ local function teleport_entity(world, widgets)
 end
 
 ---------------------------------------------------------------------
--- APPLY / READ LIGHT HELPERS
+-- APPLY / READ POINT LIGHT HELPERS
 ---------------------------------------------------------------------
+local function read_light(world, widgets)
+	local entity = find_entity(world, text_input(widgets, "light.name").value)
+	if not entity then
+		set_label(widgets, "light.status", "not found")
+		return
+	end
+
+	local light = world:get_component(entity, "PointLight") ---@type PointLight
+	if not light then
+		set_label(widgets, "light.status", "no PointLight")
+		return
+	end
+
+	slider(widgets, "light.color.r").value = light.color.x
+	slider(widgets, "light.color.g").value = light.color.y
+	slider(widgets, "light.color.b").value = light.color.z
+	slider(widgets, "light.size").value = light.size
+	set_label(widgets, "light.status", "light read")
+end
 
 local function apply_light(world, widgets)
 	local entity = find_entity(world, text_input(widgets, "light.name").value)
@@ -520,7 +408,7 @@ local function apply_light(world, widgets)
 		return
 	end
 
-	local light = world:get_component(entity, "PointLight")
+	local light = world:get_component(entity, "PointLight") ---@type PointLight
 	if not light then
 		set_label(widgets, "light.status", "no PointLight")
 		return
@@ -531,32 +419,224 @@ local function apply_light(world, widgets)
 		y = slider(widgets, "light.color.g").value,
 		z = slider(widgets, "light.color.b").value,
 	}
-	light.brightness = slider(widgets, "light.brightness").value
-	light.linear = slider(widgets, "light.linear").value
-	light.quadratic = slider(widgets, "light.quadratic").value
+	light.size = slider(widgets, "light.size").value
 	set_label(widgets, "light.status", "light applied")
 end
 
-local function read_light(world, widgets)
-	local entity = find_entity(world, text_input(widgets, "light.name").value)
-	if not entity then
-		set_label(widgets, "light.status", "not found")
-		return
-	end
+---------------------------------------------------------------------
+-- INIT UI
+---------------------------------------------------------------------
 
-	local light = world:get_component(entity, "PointLight")
-	if not light then
-		set_label(widgets, "light.status", "no PointLight")
-		return
-	end
+local function init_ui(ui)
+	ui.widgets = {
+		-- ── Tree Spawning ────────────────────────────────────────────
+		["trees.count"] = Slider("Tree Count", 200, 1, 2000),
+		["trees.spread"] = Slider("Spread Radius", 500, 10, 5000),
+		["trees.scale_min"] = Slider("Scale Min", 5.8, 0.01, 100.0),
+		["trees.scale_max"] = Slider("Scale Max", 9.0, 0.01, 100.0),
+		["trees.seed"] = Slider("Random Seed", 42, 0, 9999),
+		["trees.btn.spawn"] = Button("Spawn Trees"),
+		["trees.btn.despawn"] = Button("Clear Trees"),
+		["trees.status"] = Label("Status", "idle"),
 
-	slider(widgets, "light.color.r").value = light.color.x
-	slider(widgets, "light.color.g").value = light.color.y
-	slider(widgets, "light.color.b").value = light.color.z
-	slider(widgets, "light.brightness").value = light.brightness
-	slider(widgets, "light.linear").value = light.linear
-	slider(widgets, "light.quadratic").value = light.quadratic
-	set_label(widgets, "light.status", "light read")
+		-- ── Day / Night Cycle ────────────────────────────────────────
+		["dnc.enabled"] = Slider("Cycle Running (0=off 1=on)", 1.0, 0.0, 1.0),
+		["dnc.speed"] = Slider("Cycle Speed", 0.002, 0.0, 5.0),
+		["dnc.time_of_day"] = Slider("Time of Day (0=midnight  0.5=noon)", 0.3, 0.0, 1.0),
+		["dnc.peak_brightness"] = Slider("Peak Sun Brightness", 1.5, 0.0, 5.0),
+		["dnc.ambient_min"] = Slider("Night Ambient Level", 0.05, 0.0, 0.5),
+		["dnc.clock"] = Label("Clock", "00:00"),
+
+		-- ── Sun & Sky Lighting ───────────────────────────────────────
+		-- Sun position (world-space)
+		["sun.pos.x"] = Slider("Sun Pos X", 0.0, -1000.0, 1000.0),
+		["sun.pos.y"] = Slider("Sun Pos Y", 500.0, -1000.0, 1000.0),
+		["sun.pos.z"] = Slider("Sun Pos Z", 0.0, -1000.0, 1000.0),
+		-- Sun color (HDR, so > 1 is fine for brightness)
+		["sun.color.r"] = Slider("Sun Color R", 1.5, 0.0, 10.0),
+		["sun.color.g"] = Slider("Sun Color G", 1.4, 0.0, 10.0),
+		["sun.color.b"] = Slider("Sun Color B", 1.0, 0.0, 10.0),
+		-- Sky zenith color
+		["sky.zenith.r"] = Slider("Zenith R", 0.05, 0.0, 2.0),
+		["sky.zenith.g"] = Slider("Zenith G", 0.1, 0.0, 2.0),
+		["sky.zenith.b"] = Slider("Zenith B", 0.4, 0.0, 2.0),
+		-- Sky horizon color
+		["sky.horizon.r"] = Slider("Horizon R", 0.5, 0.0, 2.0),
+		["sky.horizon.g"] = Slider("Horizon G", 0.6, 0.0, 2.0),
+		["sky.horizon.b"] = Slider("Horizon B", 0.8, 0.0, 2.0),
+		-- Sky gradient sharpness
+		["sky.gradient_sharpness"] = Slider("Sky Gradient Sharpness", 4.0, 0.1, 20.0),
+		-- Read / Apply buttons + status
+		["sun.btn.read"] = Button("Read Sun & Sky"),
+		["sun.btn.apply"] = Button("Apply Sun & Sky"),
+		["sun.status"] = Label("Status", "idle"),
+
+		-- ── Terrain / Heightmap ──────────────────────────────────────
+		["terrain.heightmap.res"] = Slider("Resolution", 1000, 5, 5000),
+
+		-- ── Player & Camera ──────────────────────────────────────────
+		["player.sprint_speed"] = Slider("Sprint Speed", 20, 5, 200),
+		["camera.offset.x"] = Slider("Offset X", 0, -300, 300),
+		["camera.offset.y"] = Slider("Offset Y", 0, -100, 300),
+		["camera.offset.z"] = Slider("Offset Z", 0, -100, 300),
+		["world.gravity"] = Slider("Gravity", 9.8, -10, 30),
+
+		-- ── Entity Transform ─────────────────────────────────────────
+		["entity.name"] = TextInput("Entity Name"),
+		["entity.pos.x"] = Slider("Position X", 0, -10000, 10000),
+		["entity.pos.y"] = Slider("Position Y", 0, -10000, 10000),
+		["entity.pos.z"] = Slider("Position Z", 0, -10000, 10000),
+		["entity.rot.pitch"] = Slider("Pitch", 0, -360, 360),
+		["entity.rot.yaw"] = Slider("Yaw", 0, -360, 360),
+		["entity.rot.roll"] = Slider("Roll", 0, -360, 360),
+		["entity.scale.x"] = Slider("Scale X", 1, 0.001, 1000),
+		["entity.scale.y"] = Slider("Scale Y", 1, 0.001, 1000),
+		["entity.scale.z"] = Slider("Scale Z", 1, 0.001, 1000),
+		["entity.teleport.x"] = NumberInput("Teleport X", 0, -10000, 10000),
+		["entity.teleport.y"] = NumberInput("Teleport Y", 0, -10000, 10000),
+		["entity.teleport.z"] = NumberInput("Teleport Z", 0, -10000, 10000),
+		["entity.btn.read"] = Button("Read Transform"),
+		["entity.btn.apply"] = Button("Apply Transform"),
+		["entity.btn.teleport"] = Button("Teleport Here"),
+		["entity.status"] = Label("Status", "idle"),
+		["entity.list"] = Label("Active Entities", "none"),
+
+		-- ── Point Light ──────────────────────────────────────────────
+		-- Color channels go up to 20 to support HDR / overbright lights.
+		-- brightness, linear, quadratic match PointLight fields exactly.
+		["light.name"] = TextInput("Light Entity Name"),
+		["light.color.r"] = Slider("Color R", 1.0, 0.0, 20.0),
+		["light.color.g"] = Slider("Color G", 1.0, 0.0, 20.0),
+		["light.color.b"] = Slider("Color B", 1.0, 0.0, 20.0),
+		["light.size"] = Slider("Size", 3.0, 0.0, 20.0),
+		["light.btn.read"] = Button("Read Light"),
+		["light.btn.apply"] = Button("Apply Light"),
+		["light.status"] = Label("Status", "idle"),
+		["separator"] = Separator(),
+	}
+
+	ui.schema = {
+		windows = {
+			-- ── Entity Control ───────────────────────────────────────
+			{
+				name = "Entity Control",
+				fields = {
+					{
+						type = "Scroll",
+						data = { visible_lines = 10, items = { { type = "Field", data = "entity.list" } } },
+					},
+					{ type = "Field", data = "entity.name" },
+					{ type = "Field", data = "entity.pos.x" },
+					{ type = "Field", data = "entity.pos.y" },
+					{ type = "Field", data = "entity.pos.z" },
+					{ type = "Field", data = "entity.rot.pitch" },
+					{ type = "Field", data = "entity.rot.yaw" },
+					{ type = "Field", data = "entity.rot.roll" },
+					{ type = "Field", data = "entity.scale.x" },
+					{ type = "Field", data = "entity.scale.y" },
+					{ type = "Field", data = "entity.scale.z" },
+					{ type = "Field", data = "entity.btn.read" },
+					{ type = "Field", data = "entity.btn.apply" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "entity.teleport.x" },
+					{ type = "Field", data = "entity.teleport.y" },
+					{ type = "Field", data = "entity.teleport.z" },
+					{ type = "Field", data = "entity.btn.teleport" },
+					{ type = "Field", data = "entity.status" },
+				},
+			},
+
+			-- ── Terrain ──────────────────────────────────────────────
+			{
+				name = "Terrain",
+				fields = {
+					{ type = "Field", data = "terrain.heightmap.res" },
+				},
+			},
+
+			-- ── Player & Camera ──────────────────────────────────────
+			{
+				name = "Player & Camera",
+				fields = {
+					{ type = "Field", data = "player.sprint_speed" },
+					{ type = "Field", data = "camera.offset.x" },
+					{ type = "Field", data = "camera.offset.y" },
+					{ type = "Field", data = "camera.offset.z" },
+					{ type = "Field", data = "world.gravity" },
+				},
+			},
+
+			-- ── Point Light Control ──────────────────────────────────
+			{
+				name = "Point Light Control",
+				fields = {
+					{ type = "Field", data = "light.name" },
+					{ type = "Field", data = "light.color.r" },
+					{ type = "Field", data = "light.color.g" },
+					{ type = "Field", data = "light.color.b" },
+					{ type = "Field", data = "light.size" },
+					{ type = "Field", data = "light.btn.read" },
+					{ type = "Field", data = "light.btn.apply" },
+					{ type = "Field", data = "light.status" },
+				},
+			},
+
+			-- ── Sun & Sky Lighting ───────────────────────────────────
+			{
+				name = "Sun & Sky Lighting",
+				fields = {
+					{ type = "Field", data = "sun.pos.x" },
+					{ type = "Field", data = "sun.pos.y" },
+					{ type = "Field", data = "sun.pos.z" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "sun.color.r" },
+					{ type = "Field", data = "sun.color.g" },
+					{ type = "Field", data = "sun.color.b" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "sky.zenith.r" },
+					{ type = "Field", data = "sky.zenith.g" },
+					{ type = "Field", data = "sky.zenith.b" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "sky.horizon.r" },
+					{ type = "Field", data = "sky.horizon.g" },
+					{ type = "Field", data = "sky.horizon.b" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "sky.gradient_sharpness" },
+					{ type = "Field", data = "sun.btn.read" },
+					{ type = "Field", data = "sun.btn.apply" },
+					{ type = "Field", data = "sun.status" },
+				},
+			},
+
+			-- ── Day / Night Cycle ────────────────────────────────────
+			{
+				name = "Day / Night Cycle",
+				fields = {
+					{ type = "Field", data = "dnc.clock" },
+					{ type = "Field", data = "dnc.enabled" },
+					{ type = "Field", data = "dnc.speed" },
+					{ type = "Field", data = "dnc.time_of_day" },
+					{ type = "Field", data = "dnc.peak_brightness" },
+					{ type = "Field", data = "dnc.ambient_min" },
+				},
+			},
+
+			-- ── Tree Spawning ────────────────────────────────────────
+			{
+				name = "Tree Spawning",
+				fields = {
+					{ type = "Field", data = "trees.count" },
+					{ type = "Field", data = "trees.spread" },
+					{ type = "Field", data = "trees.scale_min" },
+					{ type = "Field", data = "trees.scale_max" },
+					{ type = "Field", data = "trees.seed" },
+					{ type = "Field", data = "trees.btn.spawn" },
+					{ type = "Field", data = "trees.btn.despawn" },
+					{ type = "Field", data = "trees.status" },
+				},
+			},
+		},
+	}
 end
 
 ---------------------------------------------------------------------
@@ -595,11 +675,8 @@ function Update(world, engine)
 		p.Controllable.sprint_speed = slider(widgets, "player.sprint_speed").value
 		local animated = p.Animated ---@type Animated
 		local rigidbody = p.RigidBody ---@type RigidBody
-		local speed = math.sqrt(
-			rigidbody.velocity.y * rigidbody.velocity.y
-				+ rigidbody.velocity.x * rigidbody.velocity.x
-				+ rigidbody.velocity.z * rigidbody.velocity.z
-		) * 0.35
+		local vel = rigidbody.velocity
+		local speed = math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z) * 0.35
 		if speed > 0 then
 			animated.speed = speed
 			animated.mode = { type = "Loop", data = animated.available_animations[1] }
@@ -629,6 +706,18 @@ function Update(world, engine)
 	if button(widgets, "trees.btn.despawn").clicked then
 		despawn_trees(world, widgets)
 	end
+
+	-----------------------------------------------------------------
+	-- SUN & SKY BUTTONS
+	-----------------------------------------------------------------
+
+	if button(widgets, "sun.btn.read").clicked then
+		read_sun_sky(world, widgets)
+	end
+	if button(widgets, "sun.btn.apply").clicked then
+		apply_sun_sky(world, widgets)
+	end
+
 	-----------------------------------------------------------------
 	-- ACTIVE ENTITY LIST
 	-----------------------------------------------------------------

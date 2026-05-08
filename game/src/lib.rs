@@ -327,10 +327,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     // lights
     let blue_light = world.spawn("blue_light");
     world
-        .add(
-            blue_light,
-            PointLight::new(Vec3::new(1.0, 1.4, 5.0), 2.0, Some(1.2), Some(0.4)),
-        )
+        .add(blue_light, PointLight::new(Vec3::new(1.0, 1.4, 5.0), 2.0))
         .unwrap();
     world
         .add(
@@ -343,12 +340,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             warm_light,
-            PointLight::new(
-                Vec3::new(1.0 * 5.0, 0.7 * 5.0, 0.3 * 5.0),
-                1.0,
-                None,
-                Some(1.3),
-            ),
+            PointLight::new(Vec3::new(1.0 * 5.0, 0.7 * 5.0, 0.3 * 5.0), 1.0),
         )
         .unwrap();
     world
@@ -455,6 +447,7 @@ pub enum Widget {
 }
 impl Widget {
     fn label(&self) -> Option<&str> {
+        dbg!(self);
         match self {
             Widget::Slider(slider) => slider.label.as_deref(),
             Widget::Button(button) => button.label.as_deref(),
@@ -475,7 +468,10 @@ fn draw_widget(ui: &mut egui::Ui, path: &str, widget: &mut Widget) {
         .label()
         // im not sure if i should filter out empty lables or leave that as an option
         //.filter(|&x| x.is_empty())
-        .unwrap_or_else(|| default_label(path))
+        .unwrap_or_else(|| {
+            warn!(path, "missing label");
+            default_label(path)
+        })
         .to_owned();
 
     match widget {

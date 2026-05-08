@@ -88,9 +88,7 @@
 
 ---@class PointLight
 ---@field color Vec3
----@field brightness number
----@field linear number
----@field quadratic number
+---@field size number
 
 ---@class RigidBody
 ---@field velocity Vec3

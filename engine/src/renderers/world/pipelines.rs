@@ -907,105 +907,105 @@ pub fn create_builtin_graphics_pipelines(
         ),
     );
 
-    pipeline_manager.add_pipeline(
-        point,
-        &lighting_desc,
-        &point_data.0,
-        point_layout,
-        Box::new(
-            move |world: &mut World,
-                  _resource_manager: &mut ResourceManager,
-                  descriptor_manager: &mut DescriptorManager,
-                  handle: PipelineHandle,
-                  _extent| {
-                let mut jobs = Vec::new();
+    // pipeline_manager.add_pipeline(
+    //     point,
+    //     &lighting_desc,
+    //     &point_data.0,
+    //     point_layout,
+    //     Box::new(
+    //         move |world: &mut World,
+    //               _resource_manager: &mut ResourceManager,
+    //               descriptor_manager: &mut DescriptorManager,
+    //               handle: PipelineHandle,
+    //               _extent| {
+    //             let mut jobs = Vec::new();
+    //
+    //             let gbuffer_albedo = descriptor_manager.request_bind(
+    //                 handle,
+    //                 0,
+    //                 0,
+    //                 BindingData::RenderGraphImage { id: albedo_id },
+    //             );
+    //             let gbuffer_normal = descriptor_manager.request_bind(
+    //                 handle,
+    //                 0,
+    //                 1,
+    //                 BindingData::RenderGraphImage { id: normal_id },
+    //             );
+    //             let gbuffer_position = descriptor_manager.request_bind(
+    //                 handle,
+    //                 0,
+    //                 2,
+    //                 BindingData::RenderGraphImage { id: position_id },
+    //             );
+    //
+    //             for entity in world.query::<(Req<PointLight>, Req<Transform>)>() {
+    //                 let (_entityid, (point_light, transform)) = entity;
+    //
+    //                 let point_handle = descriptor_manager.request_bind(
+    //                     handle,
+    //                     1,
+    //                     0,
+    //                     BindingData::Uniform {
+    //                         data: bytes_of(&PointLightUBO::from((point_light, transform))).to_vec(),
+    //                     },
+    //                 );
+    //
+    //                 jobs.push(DrawJob {
+    //                     mesh: DrawStyle::VertexCount(3),
+    //                     descriptor_sets: vec![
+    //                         gbuffer_albedo,
+    //                         gbuffer_normal,
+    //                         gbuffer_position,
+    //                         point_handle,
+    //                     ],
+    //                 });
+    //             }
+    //
+    //             PipelineJob::Graphics(jobs)
+    //         },
+    //     ),
+    // );
 
-                let gbuffer_albedo = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::RenderGraphImage { id: albedo_id },
-                );
-                let gbuffer_normal = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    1,
-                    BindingData::RenderGraphImage { id: normal_id },
-                );
-                let gbuffer_position = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    2,
-                    BindingData::RenderGraphImage { id: position_id },
-                );
-
-                for entity in world.query::<(Req<PointLight>, Req<Transform>)>() {
-                    let (_entityid, (point_light, transform)) = entity;
-
-                    let point_handle = descriptor_manager.request_bind(
-                        handle,
-                        1,
-                        0,
-                        BindingData::Uniform {
-                            data: bytes_of(&PointLightUBO::from((point_light, transform))).to_vec(),
-                        },
-                    );
-
-                    jobs.push(DrawJob {
-                        mesh: DrawStyle::VertexCount(3),
-                        descriptor_sets: vec![
-                            gbuffer_albedo,
-                            gbuffer_normal,
-                            gbuffer_position,
-                            point_handle,
-                        ],
-                    });
-                }
-
-                PipelineJob::Graphics(jobs)
-            },
-        ),
-    );
-
-    pipeline_manager.add_pipeline(
-        skybox,
-        &skybox_desc,
-        &skybox_data.0,
-        skybox_layout,
-        Box::new(
-            |world: &mut World,
-             _resource_manager: &mut ResourceManager,
-             descriptor_manager: &mut DescriptorManager,
-             handle: PipelineHandle,
-             _extent| {
-                let cubemap = *world.get_resource::<Skybox>().unwrap();
-                let camera = world.get_resource::<Camera>().unwrap();
-
-                let camera_handle = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::Uniform {
-                        data: bytes_of(&CameraInverseUBO::from(camera)).to_vec(),
-                    },
-                );
-                let cubemap_handle = descriptor_manager.request_bind(
-                    handle,
-                    1,
-                    0,
-                    BindingData::Texture {
-                        texture: cubemap.material.albedo,
-                    },
-                );
-
-                let jobs = vec![DrawJob {
-                    mesh: DrawStyle::VertexCount(3),
-                    descriptor_sets: vec![camera_handle, cubemap_handle],
-                }];
-                PipelineJob::Graphics(jobs)
-            },
-        ),
-    );
+    // pipeline_manager.add_pipeline(
+    //     skybox,
+    //     &skybox_desc,
+    //     &skybox_data.0,
+    //     skybox_layout,
+    //     Box::new(
+    //         |world: &mut World,
+    //          _resource_manager: &mut ResourceManager,
+    //          descriptor_manager: &mut DescriptorManager,
+    //          handle: PipelineHandle,
+    //          _extent| {
+    //             let cubemap = *world.get_resource::<Skybox>().unwrap();
+    //             let camera = world.get_resource::<Camera>().unwrap();
+    //
+    //             let camera_handle = descriptor_manager.request_bind(
+    //                 handle,
+    //                 0,
+    //                 0,
+    //                 BindingData::Uniform {
+    //                     data: bytes_of(&CameraInverseUBO::from(camera)).to_vec(),
+    //                 },
+    //             );
+    //             let cubemap_handle = descriptor_manager.request_bind(
+    //                 handle,
+    //                 1,
+    //                 0,
+    //                 BindingData::Texture {
+    //                     texture: cubemap.material.albedo,
+    //                 },
+    //             );
+    //
+    //             let jobs = vec![DrawJob {
+    //                 mesh: DrawStyle::VertexCount(3),
+    //                 descriptor_sets: vec![camera_handle, cubemap_handle],
+    //             }];
+    //             PipelineJob::Graphics(jobs)
+    //         },
+    //     ),
+    // );
 
     let graph = graph
         .add_pipeline("static_geometry")
@@ -1047,9 +1047,9 @@ pub fn create_builtin_graphics_pipelines(
 
     let mut radiance_config = RadianceConfig {
         grid_origin: Vec3::new(0.0, 46.0, 0.0),
-        top_level_probes_x: 10,
+        top_level_probes_x: 8,
         top_level_probes_y: 6,
-        top_level_probes_z: 10,
+        top_level_probes_z: 8,
         smallest_object_size: 0.5,
         cascade_count: 4,
         sqrt_ray_count: 4,
@@ -1349,12 +1349,8 @@ pub fn create_builtin_graphics_pipelines(
                     {
                         light_positions[idx] = transform.position.into_homogeneous_point();
                         // the w component is the radius
-                        light_colors[idx] = Vec4::new(
-                            light.color.x,
-                            light.color.y,
-                            light.color.z,
-                            light.brightness,
-                        );
+                        light_colors[idx] =
+                            Vec4::new(light.color.x, light.color.y, light.color.z, light.size);
 
                         count += 1;
                     }
@@ -1492,7 +1488,7 @@ pub fn create_builtin_graphics_pipelines(
                         light.color.x,
                         light.color.y,
                         light.color.z,
-                        light.brightness,
+                        light.size,
                     );
 
                     count += 1;
