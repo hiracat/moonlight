@@ -345,11 +345,10 @@ void main() {
     if (config.is_top_cascade == 0) {
         above_radiance = imageLoad(above_radiance_field, ivec2(above_texel_x, above_texel_y)).rgba;
     } else {
-        float sun_dot = dot(direction, lights.sky.sun_position.xyz);
+        float sun_dot   = dot(direction, lights.sky.sun_position.xyz);
+        float t         = max(ray.direction.y, 0.0);
+        vec3  sky_color = easedMix(lights.sky.sky_zenith_color.xyz, lights.sky.sky_horizon_color.xyz, t, lights.sky.sky_gradient_sharpness);
 
-        float t = max(ray.direction.y, 0.0);
-
-        vec3 sky_color = easedMix(lights.sky.sky_zenith_color.xyz, lights.sky.sky_horizon_color.xyz, t, lights.sky.sky_gradient_sharpness);
         vec3 incoming_color = sky_color;
         if (sun_dot > 0.99) {
             incoming_color = lights.sky.sun_color.xyz;

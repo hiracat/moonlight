@@ -220,7 +220,7 @@ local function apply_day_night(world, widgets, dt)
 	local sun_brightness = bright * peak
 
 	-- Update DirectionalLight
-	local dir_light = world:get_resource("DirectionalLight")
+	local dir_light = world:get_resource("DirectionalLight") ---@type DirectionalLight
 	local dl = dir_light
 	-- dl.sun_position = { x = sun_x, y = sun_y, z = sun_z }
 	-- dl.sun_color = {

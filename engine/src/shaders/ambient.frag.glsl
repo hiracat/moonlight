@@ -51,6 +51,10 @@ layout(set = 1, binding = 2) uniform Camera {
     mat4 inverse_proj;
 }
 camera;
+vec3 easedMix(vec3 a, vec3 b, float t, float power) {
+    float eased = t < 0.5 ? 0.5 * pow(2.0 * t, power) : 1.0 - 0.5 * pow(2.0 - 2.0 * t, power);
+    return mix(a, b, eased);
+}
 
 #define NO_HIT 1e30
 #define EPS .00002
@@ -88,9 +92,12 @@ vec3 unitVectorFrom2d(float x, float y, float range) {
 }
 
 void main() {
-    vec3 position = texture(u_position, in_uv).rgb;
-    vec3 normal   = texture(u_normals, in_uv).rgb;
-    vec3 albedo   = texture(u_color, in_uv).rgb;
+    vec4 position_with_hit = texture(u_position, in_uv).rgba;
+    vec3 normal            = texture(u_normals, in_uv).rgb;
+    vec3 albedo            = texture(u_color, in_uv).rgb;
+
+    vec3 position     = position_with_hit.rgb;
+    bool hit_geometry = position_with_hit.a == 0.0 ? false : true;
 
     // find which probe this pixel is in
     vec3 local_pos = position - info.start_position.xyz;
@@ -109,6 +116,7 @@ void main() {
         view /= view.w;
         // inverse view goes from camera space to world space
         vec3 world_dir = normalize((camera.inverse_view * vec4(view.xyz, 0.0)).xyz);
+
         // the last collum on the right is always the transform coordinates
         vec3 ray_origin = camera.inverse_view[3].xyz;
         bool hit_light  = false;
@@ -129,16 +137,17 @@ void main() {
             f_color = vec4(color, 1.0);
             return;
         }
-    }
-
-    // anything outside the volume is skipped, i should instead fallback to other rendering tecniques but this is fine for now
-    if (any(lessThan(local_pos, vec3(0.0))) || any(greaterThan(local_pos, volume_size))) {
-        // red = local_pos negative (position below grid start), green = local_pos > volume_size (above grid end)
-        vec3 neg  = vec3(lessThan(local_pos, vec3(0.0)));
-        vec3 over = vec3(greaterThan(local_pos, volume_size));
-        f_color   = vec4(max(neg.x, max(neg.y, neg.z)), max(over.x, max(over.y, over.z)), 0.0, 0.0);
-        f_color   = vec4(0.0);
-        return;
+        float t       = max(world_dir.y, 0.0);
+        vec3  sky     = easedMix(lights.sky.sky_zenith_color.xyz, lights.sky.sky_horizon_color.xyz, t, lights.sky.sky_gradient_sharpness);
+        float sun_dot = dot(world_dir, normalize(lights.sky.sun_position.xyz));
+        if (sun_dot > 0.99) {
+            sky = lights.sky.sun_color.xyz;
+            // sky = vec3(0.0, 1.0, 0.0);
+        }
+        if (!hit_geometry) {
+            f_color = vec4(sky, 1.0);
+            return;
+        }
     }
 
     uint probe_x = uint(local_pos.x / info.probe_spacing);
