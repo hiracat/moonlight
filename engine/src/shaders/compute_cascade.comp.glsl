@@ -18,8 +18,15 @@ struct MeshInfo {
     uint index_offset;
     uint index_count;
     uint _pad;
+    vec4 aabb_local_min;
+    vec4 aabb_local_max;
     mat4 local_to_world;
 };
+
+vec3 easedMix(vec3 a, vec3 b, float t, float power) {
+    float eased = t < 0.5 ? 0.5 * pow(2.0 * t, power) : 1.0 - 0.5 * pow(2.0 - 2.0 * t, power);
+    return mix(a, b, eased);
+}
 
 layout(set = 2, binding = 0) uniform RadianceConfigUBO {
     vec4     start_position;
@@ -52,15 +59,25 @@ layout(set = 3, binding = 1) readonly buffer IndexBuffer {
 }
 idx;
 
+struct DirectionalLight {
+    vec4  sun_position;
+    vec4  sun_color;
+    vec4  sky_zenith_color;
+    vec4  sky_horizon_color;
+    float sky_gradient_sharpness;
+    float pad1;
+    float pad2;
+    float pad3;
+};
+
 layout(set = 4, binding = 0) uniform LightData {
-    vec4 sun_direction; // xyz = direction, w = unused
-    vec4 sun_color;     // xyz = color (intensity baked in), w = unused
-    uint point_light_count;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-    vec4 point_light_positions[32]; // xyz = pos, w = radius
-    vec4 point_light_colors[32];    // xyz = color (intensity baked in), w = unused
+    DirectionalLight sky;
+    uint             point_light_count;
+    uint             _pad0;
+    uint             _pad1;
+    uint             _pad2;
+    vec4             point_light_positions[32]; // xyz = pos, w = radius
+    vec4             point_light_colors[32];    // xyz = color (intensity baked in), w = unused
 }
 lights;
 
@@ -184,6 +201,24 @@ float segmentSphereIntersect(Ray ray, vec3 pos, float radius, float start, float
     return NO_HIT;
 }
 
+// adapted from intersectCube in https://github.com/evanw/webgl-path-tracing/blob/master/webgl-path-tracing.js
+// compute the near and far intersections of the cube (stored in the x and y components) using the slab method
+// no intersection means (really tNear > tFar)
+float intersectAABB(Ray ray, vec3 boxMin, vec3 boxMax) {
+    vec3  tMin  = (boxMin - ray.origin) / ray.direction;
+    vec3  tMax  = (boxMax - ray.origin) / ray.direction;
+    vec3  t1    = min(tMin, tMax);
+    vec3  t2    = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar  = min(min(t2.x, t2.y), t2.z);
+
+    if (tNear > tFar) {
+        return NO_HIT;
+    } else {
+        return tNear;
+    }
+}
+
 // https://pbr-book.org/4ed/Geometry_and_Transformations/Spherical_Geometry#fragment-Reparameterizedirectionsinthez0portionoftheoctahedron-0
 vec3 unitVectorFrom2d(float x, float y, float range) {
     vec3 v;
@@ -254,11 +289,23 @@ void main() {
 
     vec3 direction = unitVectorFrom2d(ray_row, ray_col, config.sqrt_ray_count);
 
+    // CHECK RAY FOR EACH TRIANGLE
     Ray   ray     = Ray(direction, probe_world_pos);
     float closest = NO_HIT;
     vec4  color   = vec4(0.0, 0.0, 0.0, 1.0);
     for (int i = 0; i < config.mesh_count; i++) {
         MeshInfo mesh_info = config.meshes[i];
+
+        vec4 world_aabb_max = mesh_info.local_to_world * mesh_info.aabb_local_max;
+        vec4 world_aabb_min = mesh_info.local_to_world * mesh_info.aabb_local_min;
+
+        // IF THE RAY MISSES THE AABB FOR THE MESH  SKIP THE MESH
+        float aabb_hit = intersectAABB(ray, world_aabb_min.xyz, world_aabb_max.xyz);
+        if (aabb_hit > closest) {
+            continue;
+        }
+
+        // CHECK THE RAY AGAINST EVERY TRIANGLE, (should replace with a bvh probably, am lazy)
         for (int j = 0; j < mesh_info.index_count; j += 3) {
             vec4 p1 = vec4(pos.positions[idx.indices[j + 0 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
             vec4 p2 = vec4(pos.positions[idx.indices[j + 1 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
@@ -269,9 +316,12 @@ void main() {
             vec3 worldp3 = (mesh_info.local_to_world * p3).xyz;
 
             float d = segmentTriangleIntersect(ray, worldp1, worldp2, worldp3, config.interval_start, config.interval_end);
+            // if the distance is closer than the other then use this ray
             if (d < closest) {
                 closest = d;
                 color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission
+                // early out becaues we are using the same color (black) for all objects, no emission
+                break;
             }
         }
     }
@@ -280,7 +330,8 @@ void main() {
             ray, lights.point_light_positions[i].xyz, lights.point_light_positions[i].w, config.interval_start, config.interval_end);
         if (d < closest) {
             closest = d;
-            color   = vec4(lights.point_light_colors[i].xyz, 0.0);
+            // no early out here because different colors per light, and if two lights line up then we need to apply the closer light
+            color = vec4(lights.point_light_colors[i].xyz, 0.0);
         }
     }
     float d = rayHeightmapIntersect(ray, height_map, ubo.size, ubo.height, config.interval_start, config.interval_end);
@@ -294,11 +345,14 @@ void main() {
     if (config.is_top_cascade == 0) {
         above_radiance = imageLoad(above_radiance_field, ivec2(above_texel_x, above_texel_y)).rgba;
     } else {
-        float sun_dot        = dot(direction, lights.sun_direction.xyz);
-        vec3  sky_color      = vec3(0.2, 0.4, 0.8) * max(0.0, direction.y);
-        vec3  incoming_color = sky_color;
+        float sun_dot = dot(direction, lights.sky.sun_position.xyz);
+
+        float t = max(ray.direction.y, 0.0);
+
+        vec3 sky_color = easedMix(lights.sky.sky_zenith_color.xyz, lights.sky.sky_horizon_color.xyz, t, lights.sky.sky_gradient_sharpness);
+        vec3 incoming_color = sky_color;
         if (sun_dot > 0.99) {
-            incoming_color = lights.sun_color.xyz;
+            incoming_color = lights.sky.sun_color.xyz;
         }
         above_radiance = vec4(incoming_color, 1.0);
     }

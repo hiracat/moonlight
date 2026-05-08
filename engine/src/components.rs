@@ -113,15 +113,28 @@ impl PointLight {
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct DirectionalLight {
-    pub from_position: uv::Vec3,
-    pub color: uv::Vec3,
+    pub sun_position: uv::Vec3,
+    pub sun_color: uv::Vec3,
+
+    pub sky_zenith_color: uv::Vec3,
+    pub sky_horizon_color: uv::Vec3,
+    pub sky_gradient_sharpness: f32,
 }
 
 impl DirectionalLight {
-    pub fn create(position: uv::Vec3, color: uv::Vec3) -> Self {
+    pub fn create(
+        sun_pos: uv::Vec3,
+        sun_color: uv::Vec3,
+        sky_zenith_color: uv::Vec3,
+        sky_horizon_color: uv::Vec3,
+        sky_gradient_sharpness: f32,
+    ) -> Self {
         Self {
-            from_position: position,
-            color,
+            sun_position: sun_pos,
+            sun_color,
+            sky_zenith_color,
+            sky_horizon_color,
+            sky_gradient_sharpness,
         }
     }
 }

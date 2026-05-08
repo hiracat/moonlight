@@ -222,12 +222,12 @@ local function apply_day_night(world, widgets, dt)
 	-- Update DirectionalLight
 	local dir_light = world:get_resource("DirectionalLight")
 	local dl = dir_light
-	dl.from_position = { x = sun_x, y = sun_y, z = sun_z }
-	dl.color = {
-		x = sun_r * sun_brightness,
-		y = sun_g * sun_brightness,
-		z = sun_b * sun_brightness,
-	}
+	-- dl.sun_position = { x = sun_x, y = sun_y, z = sun_z }
+	-- dl.sun_color = {
+	-- 	x = sun_r * sun_brightness,
+	-- 	y = sun_g * sun_brightness,
+	-- 	z = sun_b * sun_brightness,
+	-- }
 
 	-- Update AmbientLight: stays dim but never fully black
 	local amb_light = world:get_resource("AmbientLight")

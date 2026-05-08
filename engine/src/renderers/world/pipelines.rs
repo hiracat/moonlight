@@ -11,7 +11,8 @@ use std::{
 use ash::vk;
 use bytemuck::bytes_of;
 use educe::Educe;
-use rspirv_reflect::{self as rr, Reflection, rspirv::binary::Assemble};
+use egui::TextBuffer;
+use rspirv_reflect::{self as rr, Reflection};
 use tracing::trace;
 use ultraviolet::{Vec3, Vec4};
 
@@ -27,12 +28,12 @@ use crate::resources::{
 };
 use crate::resources::{Material, Mesh, Skybox};
 use crate::ubo::{
-    AmbientLightUBO, CameraInverseUBO, CameraUBO, DirectionalLightUBO, LightDataUBO, MaterialUBO,
-    MeshInfo, ModelUBO, PointLightUBO, RadianceConfigUBO, RadianceInfoUBO, TerrainUBO,
+    CameraInverseUBO, CameraUBO, DirectionalLightUBO, LightDataUBO, MaterialUBO, MeshInfo,
+    ModelUBO, PointLightUBO, RadianceConfigUBO, RadianceInfoUBO, TerrainUBO,
 };
 use crate::vulkan::SharedAllocator;
 use crate::{
-    components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
+    components::{Camera, DirectionalLight, PointLight, Transform},
     ecs::Req,
     renderers::world::draw::DrawJob,
 };
@@ -325,8 +326,49 @@ pub fn create_builtin_graphics_pipelines(
     };
 
     let ambient_desc = GraphicsPipelineDesc {
+        color_attachment_formats: vec![vk::Format::R32G32B32A32_SFLOAT],
         depth_attachment_format: None,
+        depth_stencil_state: DepthStencilState {
+            depth_test_enable: false,
+            depth_write_enable: false,
+            depth_compare_op: vk::CompareOp::ALWAYS,
+            depth_bounds_test_enable: false,
+            stencil_test_enable: false,
+            front: vk::StencilOpState::default(),
+            back: vk::StencilOpState::default(),
+            min_depth_bounds: 0.0,
+            max_depth_bounds: 0.0,
+        },
         ..lighting_desc.clone()
+    };
+    let tonemap_desc = GraphicsPipelineDesc {
+        color_attachment_formats: vec![swapchain_image_format],
+        color_blend_state: ColorBlendState {
+            logic_op: None,
+            blend_constants: [0.0; 4],
+            attachments: vec![vk::PipelineColorBlendAttachmentState {
+                blend_enable: vk::FALSE,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+                ..Default::default()
+            }],
+        },
+        depth_attachment_format: None,
+        depth_stencil_state: DepthStencilState {
+            depth_test_enable: false,
+            depth_write_enable: false,
+            depth_compare_op: vk::CompareOp::ALWAYS,
+            depth_bounds_test_enable: false,
+            stencil_test_enable: false,
+            front: vk::StencilOpState::default(),
+            back: vk::StencilOpState::default(),
+            min_depth_bounds: 0.0,
+            max_depth_bounds: 0.0,
+        },
+        vertex_input_state: VertexInputState {
+            vertex_attribute_descriptions: vec![],
+            vertex_binding_descriptions: vec![],
+        },
+        ..ambient_desc.clone()
     };
     let terrain_desc = GraphicsPipelineDesc {
         vertex_input_state: VertexInputState {
@@ -359,48 +401,53 @@ pub fn create_builtin_graphics_pipelines(
     // --- reflect shaders ---
     let static_geometry_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/static_geometry_vert.spv"),
-        Path::new("shaders/geometry_frag.spv"),
+        Path::new("shaders/static_geometry.vert.spv"),
+        Path::new("shaders/geometry.frag.spv"),
     );
     let animated_geometry_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/animated_geometry_vert.spv"),
-        Path::new("shaders/geometry_frag.spv"),
+        Path::new("shaders/animated_geometry.vert.spv"),
+        Path::new("shaders/geometry.frag.spv"),
     );
     let clipped_geometry_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/static_geometry_vert.spv"),
-        Path::new("shaders/clipped_geometry_frag.spv"),
+        Path::new("shaders/static_geometry.vert.spv"),
+        Path::new("shaders/clipped_geometry.frag.spv"),
     );
     let terrain_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/terrain_vert.spv"),
-        Path::new("shaders/terrain_frag.spv"),
+        Path::new("shaders/terrain.vert.spv"),
+        Path::new("shaders/terrain.frag.spv"),
     );
     let ambient_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/ambient_vert.spv"),
-        Path::new("shaders/ambient_frag.spv"),
+        Path::new("shaders/ambient.vert.spv"),
+        Path::new("shaders/ambient.frag.spv"),
+    );
+    let tonemap_data = get_pipeline_data(
+        device.clone(),
+        Path::new("shaders/tonemap.vert.spv"),
+        Path::new("shaders/tonemap.frag.spv"),
     );
     let directional_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/directional_vert.spv"),
-        Path::new("shaders/directional_frag.spv"),
+        Path::new("shaders/directional.vert.spv"),
+        Path::new("shaders/directional.frag.spv"),
     );
     let point_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/point_vert.spv"),
-        Path::new("shaders/point_frag.spv"),
+        Path::new("shaders/point.vert.spv"),
+        Path::new("shaders/point.frag.spv"),
     );
     let skybox_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/skybox_vert.spv"),
-        Path::new("shaders/skybox_frag.spv"),
+        Path::new("shaders/skybox.vert.spv"),
+        Path::new("shaders/skybox.frag.spv"),
     );
-    let invert_data = get_compute_data(device.clone(), Path::new("shaders/invert_color_comp.spv"));
+    let invert_data = get_compute_data(device.clone(), Path::new("shaders/invert_color.comp.spv"));
     let radiance_data = get_compute_data(
         device.clone(),
-        Path::new("shaders/compute_cascade_comp.spv"),
+        Path::new("shaders/compute_cascade.comp.spv"),
     );
     dbg!(&radiance_data.1);
     let mut pipeline_manager = PipelineManager::new(device.clone());
@@ -411,6 +458,7 @@ pub fn create_builtin_graphics_pipelines(
     let clipped_geometry = pipeline_manager.allocate_handle("clipped_geometry");
     let terrain = pipeline_manager.allocate_handle("terrain");
     let ambient = pipeline_manager.allocate_handle("ambient");
+    let tonemap = pipeline_manager.allocate_handle("tonemap");
     let directional = pipeline_manager.allocate_handle("directional");
     let point = pipeline_manager.allocate_handle("point");
     let skybox = pipeline_manager.allocate_handle("skybox");
@@ -450,6 +498,7 @@ pub fn create_builtin_graphics_pipelines(
     );
     let terrain_layout = register(terrain, terrain_data.1, terrain_data.2);
     let ambient_layout = register(ambient, ambient_data.1, ambient_data.2);
+    let tonemap_layout = register(tonemap, tonemap_data.1, tonemap_data.2);
     let directional_layout = register(directional, directional_data.1, directional_data.2);
     let point_layout = register(point, point_data.1, point_data.2);
     let skybox_layout = register(skybox, skybox_data.1, skybox_data.2);
@@ -487,10 +536,15 @@ pub fn create_builtin_graphics_pipelines(
         name: "depth",
         format: vk::Format::D32_SFLOAT,
     });
+    let mut hdr_color = graph.add_image(ImageDesc::Managed {
+        name: "hdr_color",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
 
     let albedo_id = albedo.id;
     let normal_id = normal.id;
     let position_id = position.id;
+    let hdr_color_id = hdr_color.id;
 
     pipeline_manager.add_pipeline(
         static_geometry,
@@ -993,26 +1047,21 @@ pub fn create_builtin_graphics_pipelines(
 
     let mut radiance_config = RadianceConfig {
         grid_origin: Vec3::new(0.0, 46.0, 0.0),
-        top_level_probes_x: 8,
-        top_level_probes_y: 4,
-        top_level_probes_z: 8,
-        smallest_object_size: 0.3,
-        cascade_count: 3,
+        top_level_probes_x: 10,
+        top_level_probes_y: 6,
+        top_level_probes_z: 10,
+        smallest_object_size: 0.5,
+        cascade_count: 4,
         sqrt_ray_count: 4,
     };
-    let half_size_xz = (radiance_config.top_level_probes_x as f32
-        * radiance_config.smallest_object_size
-        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0))
-        / 2.0;
-    let half_size_y = (radiance_config.top_level_probes_y as f32
-        * radiance_config.smallest_object_size
-        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0))
-        / 2.0;
-
-    radiance_config.grid_origin = Vec3::new(-half_size_xz, 46.0 - half_size_y, -half_size_xz);
+    let probe_spacing_top = radiance_config.smallest_object_size
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0);
+    // half-offset using (N-1)/2 so probes are centered on the target, not edge-aligned
+    let half_size_xz = (radiance_config.top_level_probes_x as f32 - 1.0) / 2.0 * probe_spacing_top;
+    let half_size_y = (radiance_config.top_level_probes_y as f32 - 1.0) / 2.0 * probe_spacing_top;
 
     radiance_config.grid_origin =
-        Vec3::new(0.0 - half_size_xz, 46.0 - half_size_y, 0.0 - half_size_xz);
+        Vec3::new(0.0 - half_size_xz, 45.0 - half_size_y, 0.0 - half_size_xz);
 
     trace!(?radiance_config.grid_origin);
     trace!(?half_size_xz, ?half_size_y);
@@ -1172,24 +1221,38 @@ pub fn create_builtin_graphics_pipelines(
                       descriptor_manager: &mut DescriptorManager,
                       handle: PipelineHandle,
                       _extent| {
-                    if world.get_resource::<RadianceMeshBuffers>().is_none() {
+                    // if world.get_resource::<RadianceMeshBuffers>().is_none() {
+                    if true {
                         let mut all_positions: Vec<Vec3> = Vec::new();
                         let mut all_indices: Vec<u32> = Vec::new();
                         let mut mesh_infos: Vec<MeshInfo> = Vec::new();
 
-                        for (_, (mesh_handle, transform)) in
-                            world.query::<(Req<Mesh>, Req<Transform>)>()
                         {
-                            if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
-                                all_positions.extend_from_slice(&mesh.positions);
-                                all_indices.extend_from_slice(&mesh.indices);
-                                mesh_infos.push(MeshInfo {
-                                    vertex_offset: all_positions.len() as u32,
-                                    index_offset: all_indices.len() as u32,
-                                    index_count: mesh.index_count,
-                                    _pad: 0,
-                                    local_to_world: ModelUBO::from(transform).model,
-                                });
+                            for (_, (mesh_handle, transform)) in
+                                world.query::<(Req<Mesh>, Req<Transform>)>()
+                            {
+                                if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
+                                    all_positions.extend_from_slice(&mesh.positions);
+                                    all_indices.extend_from_slice(&mesh.indices);
+                                    let mut aabb_min = Vec3::broadcast(f32::MAX);
+                                    let mut aabb_max = Vec3::broadcast(f32::MIN);
+                                    for pos in &mesh.positions {
+                                        // returns the min/max of each component, not one of the actual
+                                        // vectors
+                                        aabb_min = aabb_min.min_by_component(*pos);
+                                        aabb_max = aabb_max.max_by_component(*pos);
+                                    }
+
+                                    mesh_infos.push(MeshInfo {
+                                        vertex_offset: all_positions.len() as u32,
+                                        index_offset: all_indices.len() as u32,
+                                        index_count: mesh.index_count,
+                                        _pad: 0,
+                                        local_to_world: ModelUBO::from(transform).model,
+                                        aabb_local_min: aabb_min.into_homogeneous_point(),
+                                        aabb_local_max: aabb_max.into_homogeneous_point(),
+                                    });
+                                }
                             }
                         }
                         let pos_size = (all_positions.len() * size_of::<Vec3>()) as u64;
@@ -1235,13 +1298,17 @@ pub fn create_builtin_graphics_pipelines(
                                 size: idx_size,
                             });
 
-                        world
-                            .add_resource(RadianceMeshBuffers {
-                                position_ssbo,
-                                index_ssbo,
-                                mesh_infos,
-                            })
-                            .unwrap();
+                        let resource = RadianceMeshBuffers {
+                            position_ssbo,
+                            index_ssbo,
+                            mesh_infos,
+                        };
+
+                        if let Some(value) = world.get_mut_resource::<RadianceMeshBuffers>() {
+                            *value = resource
+                        } else {
+                            world.add_resource(resource);
+                        }
                     }
 
                     let map = world.get_resource::<TerrainMap>().unwrap();
@@ -1292,17 +1359,13 @@ pub fn create_builtin_graphics_pipelines(
                         count += 1;
                     }
                     let lighting_ubo = LightDataUBO {
-                        sun_direction: directional
-                            .from_position
-                            .normalized()
-                            .into_homogeneous_vector(),
-                        sun_color: directional.color.into_homogeneous_vector(),
                         point_light_count: count,
                         _pad0: 0,
                         _pad1: 0,
                         _pad2: 0,
                         point_light_positions: light_positions,
                         point_light_colors: light_colors,
+                        sky_light: DirectionalLightUBO::from(&directional),
                     };
 
                     let mut bindings = vec![
@@ -1414,6 +1477,36 @@ pub fn create_builtin_graphics_pipelines(
                   descriptor_manager: &mut DescriptorManager,
                   handle: PipelineHandle,
                   _extent| {
+                let directional = *world.get_resource::<DirectionalLight>().unwrap();
+                let camera = *world.get_resource::<Camera>().unwrap();
+                let mut light_positions = [Vec4::zero(); 32];
+                let mut light_colors = [Vec4::zero(); 32];
+                let mut count = 0;
+                for (idx, (_entityid, (light, transform))) in world
+                    .query::<(Req<PointLight>, Req<Transform>)>()
+                    .enumerate()
+                {
+                    light_positions[idx] = transform.position.into_homogeneous_point();
+                    // the w component is the radius
+                    light_colors[idx] = Vec4::new(
+                        light.color.x,
+                        light.color.y,
+                        light.color.z,
+                        light.brightness,
+                    );
+
+                    count += 1;
+                }
+                let lighting_ubo = LightDataUBO {
+                    sky_light: DirectionalLightUBO::from(&directional),
+                    point_light_count: count,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                    point_light_positions: light_positions,
+                    point_light_colors: light_colors,
+                };
+                let camera_ubo = CameraInverseUBO::from(&camera);
                 let gbuffer_albedo = descriptor_manager.request_bind(
                     handle,
                     0,
@@ -1438,12 +1531,29 @@ pub fn create_builtin_graphics_pipelines(
                     3,
                     BindingData::RenderGraphImage { id: final_image_id },
                 );
-                let ambient_handle = descriptor_manager.request_bind(
+                tracing::error!(start_position = ?radiance_info.start_position, probe_spacing = radiance_info.probe_spacing, probe_x = radiance_info.probe_x_count, probe_y = radiance_info.probe_y_count, probe_z = radiance_info.probe_z_count, "ambient radiance_info");
+                let radiance_info = descriptor_manager.request_bind(
                     handle,
                     1,
                     0,
                     BindingData::Uniform {
                         data: bytes_of(&radiance_info).to_vec(),
+                    },
+                );
+                let lighting_info = descriptor_manager.request_bind(
+                    handle,
+                    1,
+                    1,
+                    BindingData::Uniform {
+                        data: bytes_of(&lighting_ubo).to_vec(),
+                    },
+                );
+                let camera_info = descriptor_manager.request_bind(
+                    handle,
+                    1,
+                    2,
+                    BindingData::Uniform {
+                        data: bytes_of(&camera_ubo).to_vec(),
                     },
                 );
 
@@ -1453,7 +1563,9 @@ pub fn create_builtin_graphics_pipelines(
                         gbuffer_albedo,
                         gbuffer_normal,
                         gbuffer_position,
-                        ambient_handle,
+                        camera_info,
+                        lighting_info,
+                        radiance_info,
                         final_color,
                     ],
                 }];
@@ -1461,13 +1573,46 @@ pub fn create_builtin_graphics_pipelines(
             },
         ),
     );
+
+    pipeline_manager.add_pipeline(
+        tonemap,
+        &tonemap_desc,
+        &tonemap_data.0,
+        tonemap_layout,
+        Box::new(
+            move |_world: &mut World,
+                  _resource_manager: &mut ResourceManager,
+                  descriptor_manager: &mut DescriptorManager,
+                  handle: PipelineHandle,
+                  _extent| {
+                let hdr_input = descriptor_manager.request_bind(
+                    handle,
+                    0,
+                    0,
+                    BindingData::RenderGraphImage { id: hdr_color_id },
+                );
+                PipelineJob::Graphics(vec![DrawJob {
+                    mesh: DrawStyle::VertexCount(3),
+                    descriptor_sets: vec![hdr_input],
+                }])
+            },
+        ),
+    );
+
     let graph = graph
         .add_pipeline("ambient")
         .pipeline(ambient)
         .reads(&albedo)
         .reads(&normal)
         .reads(&position)
-        .reads(&cascade_images[0]) // reads from finest cascade
+        .reads(&cascade_images[0])
+        .writes(&mut hdr_color)
+        .build();
+
+    let graph = graph
+        .add_pipeline("tonemap")
+        .pipeline(tonemap)
+        .reads(&hdr_color)
         .writes(&mut final_color)
         .build();
 
@@ -1490,12 +1635,12 @@ pub fn create_builtin_graphics_pipelines(
     //     .writes(&mut final_color)
     //     .build();
 
-    let graph = graph
-        .add_pipeline("skybox")
-        .pipeline(skybox)
-        .writes(&mut final_color)
-        .reads_depth(&depth)
-        .build();
+    // let graph = graph
+    //     .add_pipeline("skybox")
+    //     .pipeline(skybox)
+    //     .writes(&mut final_color)
+    //     .reads_depth(&depth)
+    //     .build();
 
     (
         graph,
@@ -1877,8 +2022,8 @@ pub fn get_pipeline_data(
     BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
     BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
 ) {
-    let vertex_reflection = load_path_data(vertex_path);
-    let fragment_reflection = load_path_data(fragment_path);
+    let (vertex_code, vertex_reflection) = load_path_data(vertex_path);
+    let (fragment_code, fragment_reflection) = load_path_data(fragment_path);
 
     assert_eq!(
         vertex_reflection.0.entry_points.len(),
@@ -1891,10 +2036,9 @@ pub fn get_pipeline_data(
         "only single entry point supported"
     );
 
-    let code = vertex_reflection.0.assemble();
     let vertex_module_create_info = vk::ShaderModuleCreateInfo {
-        p_code: code.as_ptr(),
-        code_size: code.len() * 4, // convert from u32 to bytes
+        p_code: vertex_code.as_ptr(),
+        code_size: vertex_code.len() * 4,
         ..Default::default()
     };
     let vertex_module = unsafe {
@@ -1910,10 +2054,9 @@ pub fn get_pipeline_data(
         device: device.clone(),
     };
 
-    let code = fragment_reflection.0.assemble();
     let fragment_module_create_info = vk::ShaderModuleCreateInfo {
-        p_code: code.as_ptr(),
-        code_size: code.len() * 4, // convert from u32 to bytes
+        p_code: fragment_code.as_ptr(),
+        code_size: fragment_code.len() * 4,
         ..Default::default()
     };
     let fragment_module = unsafe {
@@ -1946,16 +2089,15 @@ pub fn get_compute_data(
     ShaderStage,
     BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
 ) {
-    let compute_reflection = load_path_data(compute_path);
+    let (compute_code, compute_reflection) = load_path_data(compute_path);
     assert_eq!(
         compute_reflection.0.entry_points.len(),
         1,
         "only single entry point supported"
     );
-    let code = compute_reflection.0.assemble();
     let compute_module_create_info = vk::ShaderModuleCreateInfo {
-        p_code: code.as_ptr(),
-        code_size: code.len() * 4,
+        p_code: compute_code.as_ptr(),
+        code_size: compute_code.len() * 4,
         ..Default::default()
     };
     let compute_module = unsafe {
@@ -1987,8 +2129,8 @@ pub fn create_pipeline_layout_from_vert_frag(
     vk::PipelineLayout,
     Vec<vk::DescriptorSetLayout>,
 ) {
-    let vertex_reflection = load_path_data(vertex_path);
-    let fragment_reflection = load_path_data(fragment_path);
+    let (vertex_code, vertex_reflection) = load_path_data(vertex_path);
+    let (fragment_code, fragment_reflection) = load_path_data(fragment_path);
 
     assert_eq!(
         vertex_reflection.0.entry_points.len(),
@@ -2001,10 +2143,9 @@ pub fn create_pipeline_layout_from_vert_frag(
         "only single entry point supported"
     );
 
-    let code = vertex_reflection.0.assemble();
     let vertex_module_create_info = vk::ShaderModuleCreateInfo {
-        p_code: code.as_ptr(),
-        code_size: code.len() * 4, // convert from u32 to bytes
+        p_code: vertex_code.as_ptr(),
+        code_size: vertex_code.len() * 4,
         ..Default::default()
     };
     let vertex_module = unsafe {
@@ -2020,10 +2161,9 @@ pub fn create_pipeline_layout_from_vert_frag(
         device: device.clone(),
     };
 
-    let code = fragment_reflection.0.assemble();
     let fragment_module_create_info = vk::ShaderModuleCreateInfo {
-        p_code: code.as_ptr(),
-        code_size: code.len() * 4, // convert from u32 to bytes
+        p_code: fragment_code.as_ptr(),
+        code_size: fragment_code.len() * 4,
         ..Default::default()
     };
     let fragment_module = unsafe {
@@ -2159,11 +2299,18 @@ pub fn create_pipeline_layout_from_vert_frag(
     )
 }
 
-fn load_path_data(path: &path::Path) -> Reflection {
+fn load_path_data(path: &path::Path) -> (Vec<u32>, Reflection) {
     let out_dir = PathBuf::from(env!("OUT_DIR"));
-    let full_path: PathBuf = out_dir.join(path);
-    let code = fs::read(full_path).expect("failed to read file");
-    rr::Reflection::new_from_spirv(&code).unwrap()
+    let bytes = fs::read(out_dir.join(path))
+        .unwrap_or_else(|_| panic!("failed to read file: {}", &path.to_string_lossy().as_str()));
+    let code: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    let reflect_path = path.with_extension("reflect.spv");
+    let reflect_bytes = fs::read(out_dir.join(&reflect_path)).expect("failed to read reflect file");
+    let reflection = rr::Reflection::new_from_spirv(&reflect_bytes).unwrap();
+    (code, reflection)
 }
 fn get_entry_name(reflection: &Reflection) -> ffi::CString {
     let entry_point_name =

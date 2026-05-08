@@ -854,6 +854,8 @@ impl CompiledRenderGraph {
             )
         }
         .unwrap();
+
+        dbg!(&commands);
         CompiledRenderGraph {
             sampler,
             image_size: vk::Extent2D {

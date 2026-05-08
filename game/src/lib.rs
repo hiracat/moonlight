@@ -1,12 +1,12 @@
-use moonlight::animations::PlaybackMode;
 use moonlight::ecs;
 use moonlight::lua;
-use moonlight::resources::Texture;
 use proc_macros::LuaUnion;
 use proc_macros::LuaVal;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::OnceLock;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::reload;
 use ultraviolet::Bivec3;
 
 use image::ImageReader;
@@ -41,10 +41,12 @@ struct CameraOffset {
 fn init_tracing() {
     let filter = EnvFilter::new("trace");
 
-    let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let (filter_layer, handle) = reload::Layer::new(filter);
+
+    let fmt_layer = fmt::layer().with_span_events(FmtSpan::CLOSE);
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt_layer)
         .with(filter_layer)
         .init();
 
@@ -104,15 +106,21 @@ fn start(world: &mut World, engine: &mut Engine) {
         200.0,
         height as f32 / width as f32,
     );
-    let directional =
-        DirectionalLight::create(Vec3::new(200.0, 10.0, 0.0), Vec3::new(2.0, 1.6, 1.5));
+    let directional = DirectionalLight::create(
+        Vec3::new(200.0, 10.0, 0.0),
+        Vec3::new(2.0, 1.6, 1.5),
+        Vec3::new(0.2, 0.3, 0.8),
+        Vec3::new(0.3, 0.4, 0.8),
+        1.0,
+    );
     let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.35);
 
     let heightmap = TerrainMap {
-        map: engine
-            .resource_manager
-            .create_texture("data/heightmap.exr", resources::TextureFormat::HeightF32),
-        cpu_map: ImageReader::open("data/heightmap.exr")
+        map: engine.resource_manager.create_texture(
+            "data/simple_heightmap.exr",
+            resources::TextureFormat::HeightF32,
+        ),
+        cpu_map: ImageReader::open("data/simple_heightmap.exr")
             .unwrap()
             .decode()
             .unwrap()
@@ -146,19 +154,18 @@ fn start(world: &mut World, engine: &mut Engine) {
     ]);
     world.add_resource(Skybox::new(skybox)).unwrap();
 
-    // fox — stays Rust because Controllable, Collider, RigidBody, Animated
-    // are all engine-side components that Lua can't fully construct yet
     let fox = world.spawn("fox");
     world
         .add(
             fox,
             Transform::from(
-                Some(Vec3::new(0.0, 1.0, 0.0)),
+                Some(Vec3::new(0.0, 42.0, 0.0)),
                 Some(Rotor3::identity()),
                 Some(Vec3::new(1.0, 1.0, 1.0)),
             ),
         )
         .unwrap();
+
     world
         .add(
             fox,
@@ -168,45 +175,48 @@ fn start(world: &mut World, engine: &mut Engine) {
             },
         )
         .unwrap();
+
     world
         .add(
             fox,
-            Collider::Obb(Obb::new(Vec3::new(0.8, 3.0, 4.5), Vec3::new(0.0, 1.5, 0.0))),
+            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::new(0.0, 0.0, 0.0))),
         )
         .unwrap();
-    world.add(fox, RigidBody::new()).unwrap();
-    let (fox_model, fox_animations) = engine
-        .resource_manager
-        .load_gltf_asset("data/models/animated_fox.glb");
-    let mut fox_animations = fox_animations.unwrap();
-    fox_animations.mode = PlaybackMode::Loop(fox_animations.available_animations[0]);
-    // fox_animations.current_playing = None;
-    world.add(fox, fox_model).unwrap();
-    world.add(fox, fox_animations).unwrap();
-    let fox_albedo = engine.resource_manager.create_texture(
-        "data/models/textures/animated_fox_texture.png",
-        resources::TextureFormat::Srgba,
-    );
-    world.add(fox, Material::create(fox_albedo, None)).unwrap();
 
+    world.add(fox, RigidBody::new()).unwrap();
+
+    world
+        .add(
+            fox,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/large_cube.glb")
+                .0,
+        )
+        .unwrap();
+
+    // ground
     let ground = world.spawn("ground");
     let ground_tex = engine.resource_manager.create_texture(
         "data/models/textures/ground_roots.png",
         resources::TextureFormat::Srgba,
     );
+
     world
         .add(ground, Material::create(ground_tex, None))
         .unwrap();
+
     world
         .add(
             ground,
             Transform::from(
-                Some(Vec3::new(0.0, 45.0, 0.0)),
+                Some(Vec3::new(0.0, 40.0, 0.0)),
                 None,
-                Some(Vec3::new(32.0, 1.0, 32.0)),
+                Some(Vec3::new(40.0, 1.0, 40.0)),
             ),
         )
         .unwrap();
+
     world
         .add(
             ground,
@@ -216,28 +226,116 @@ fn start(world: &mut World, engine: &mut Engine) {
                 .0,
         )
         .unwrap();
+
     world
         .add(
             ground,
             Collider::Obb(Obb::new(
-                Vec3::new(2.0, 8.0, 2.0),
-                Vec3::new(0.0, -4.0, 0.0),
+                Vec3::new(20.0, 2.0, 20.0),
+                Vec3::new(0.0, -1.0, 0.0),
             )),
         )
         .unwrap();
 
-    // lights — could move to Lua but no reason to
+    // cube 1
+    let cube1 = world.spawn("cube1");
+    world
+        .add(
+            cube1,
+            Transform::from(
+                Some(Vec3::new(-5.0, 42.0, 0.0)),
+                None,
+                Some(Vec3::new(1.0, 1.0, 1.0)),
+            ),
+        )
+        .unwrap();
+    world.add(cube1, RigidBody::new()).unwrap();
+    world
+        .add(
+            cube1,
+            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+        )
+        .unwrap();
+    world
+        .add(
+            cube1,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/large_cube.glb")
+                .0,
+        )
+        .unwrap();
+
+    // cube 2
+    let cube2 = world.spawn("cube2");
+    world
+        .add(
+            cube2,
+            Transform::from(
+                Some(Vec3::new(4.0, 45.0, -3.0)),
+                None,
+                Some(Vec3::new(1.5, 1.5, 1.5)),
+            ),
+        )
+        .unwrap();
+    world.add(cube2, RigidBody::new()).unwrap();
+    world
+        .add(
+            cube2,
+            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+        )
+        .unwrap();
+    world
+        .add(
+            cube2,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/large_cube.glb")
+                .0,
+        )
+        .unwrap();
+
+    // cube 3
+    let cube3 = world.spawn("cube3");
+    world
+        .add(
+            cube3,
+            Transform::from(
+                Some(Vec3::new(0.0, 41.0, 6.0)),
+                None,
+                Some(Vec3::new(0.8, 0.8, 0.8)),
+            ),
+        )
+        .unwrap();
+    world.add(cube3, RigidBody::new()).unwrap();
+    world
+        .add(
+            cube3,
+            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+        )
+        .unwrap();
+    world
+        .add(
+            cube3,
+            engine
+                .resource_manager
+                .load_gltf_asset("data/models/large_cube.glb")
+                .0,
+        )
+        .unwrap();
+
+    // lights
     let blue_light = world.spawn("blue_light");
     world
         .add(
             blue_light,
-            PointLight::new(Vec3::new(0.1, 0.4, 1.0), 60.0, Some(1.2), Some(0.4)),
+            PointLight::new(Vec3::new(1.0, 1.4, 5.0), 2.0, Some(1.2), Some(0.4)),
         )
         .unwrap();
     world
         .add(
             blue_light,
-            Transform::from(Some(Vec3::new(1.0, 18.0, -2.0)), None, None),
+            Transform::from(Some(Vec3::new(8.0, 50.0, -5.0)), None, None),
         )
         .unwrap();
 
@@ -245,41 +343,20 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             warm_light,
-            PointLight::new(Vec3::new(1.0, 0.6, 0.2), 40.0, None, Some(1.5)),
+            PointLight::new(
+                Vec3::new(1.0 * 5.0, 0.7 * 5.0, 0.3 * 5.0),
+                1.0,
+                None,
+                Some(1.3),
+            ),
         )
         .unwrap();
     world
         .add(
             warm_light,
-            Transform::from(Some(Vec3::new(0.0, 3.0, 0.0)), None, None),
+            Transform::from(Some(Vec3::new(-6.0, 46.0, 4.0)), None, None),
         )
         .unwrap();
-
-    // let tree = world.spawn("tree");
-    // world
-    //     .add(
-    //         tree,
-    //         Transform::from(Some(Vec3::new(0.0, 150.0, 0.0)), None, None),
-    //     )
-    //     .unwrap();
-    // world
-    //     .add(
-    //         tree,
-    //         engine
-    //             .resource_manager
-    //             .load_gltf_asset("data/models/maple_tree.glb")
-    //             .0,
-    //     )
-    //     .unwrap();
-    // world
-    //     .add(
-    //         tree,
-    //         Material {
-    //             albedo: Texture::default(),
-    //             alpha_clip: Some(0.5),
-    //         },
-    //     )
-    //     .unwrap();
     world.add_resource(TracingConfig::default()).unwrap();
 }
 
@@ -695,6 +772,11 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
 }
 
 fn player_update(world: &mut World, delta_time: f32) {
+    #[cfg(debug_assertions)]
+    unsafe {
+        fp_trap::enable();
+    }
+
     // first pass: get player position
     let player_pos = {
         let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>)>();
@@ -744,16 +826,21 @@ fn player_update(world: &mut World, delta_time: f32) {
     if keyboard.is_down(KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
         jump = 8.0
     }
-    if !(delta_v == Vec3::zero()) {
-        delta_v = camera_rotation * delta_v;
-        delta_v.normalize();
-        delta_v = Vec3 {
-            x: delta_v.x,
-            y: 0.0,
-            z: delta_v.z,
-        };
-        delta_v.normalize();
+    delta_v = camera_rotation * delta_v;
 
+    delta_v = Vec3 {
+        x: delta_v.x,
+        y: 0.0,
+        z: delta_v.z,
+    };
+
+    if delta_v.mag_sq() > 1e-6 {
+        delta_v.normalize();
+    } else {
+        delta_v = Vec3::zero();
+    }
+
+    if delta_v != Vec3::zero() {
         let on_ground = (terrain_height - player_pos.y).abs() < 0.6;
         let n = terrain_normal.normalized();
         trace!(?n);
@@ -775,8 +862,7 @@ fn player_update(world: &mut World, delta_time: f32) {
                 Rotor3::from_rotation_between(forward, delta_v)
             };
 
-            // compose: apply yaw first, then tilt on top
-            (tilt.scaled_by(if on_ground { 1.0 } else { 0.0 }) * yaw).normalized()
+            if on_ground { tilt } else { Rotor3::identity() }
         };
 
         let horizontal_velocity = rigidbody.velocity - n * n.dot(rigidbody.velocity);
@@ -799,4 +885,33 @@ fn player_update(world: &mut World, delta_time: f32) {
         transform.position.y = 20.0;
     }
     rigidbody.velocity.y += jump;
+    #[cfg(debug_assertions)]
+    unsafe {
+        fp_trap::disable();
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod fp_trap {
+    unsafe extern "C" {
+        fn feenableexcept(excepts: i32) -> i32;
+        fn fedisableexcept(excepts: i32) -> i32;
+    }
+
+    // glibc constants
+    pub const FE_INVALID: i32 = 0x01;
+    pub const FE_DIVBYZERO: i32 = 0x04;
+    pub const FE_OVERFLOW: i32 = 0x08;
+
+    pub unsafe fn enable() {
+        unsafe {
+            feenableexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW);
+        }
+    }
+
+    pub unsafe fn disable() {
+        unsafe {
+            fedisableexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW);
+        }
+    }
 }

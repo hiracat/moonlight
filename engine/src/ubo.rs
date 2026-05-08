@@ -51,6 +51,8 @@ pub struct MeshInfo {
     pub index_offset: u32,
     pub index_count: u32,
     pub _pad: u32,
+    pub aabb_local_min: uv::Vec4,
+    pub aabb_local_max: uv::Vec4,
     pub local_to_world: uv::Mat4,
 }
 
@@ -77,6 +79,7 @@ pub struct RadianceConfigUBO {
     // offset 64 here, meshes is naturally aligned, no padding needed
     pub meshes: [MeshInfo; 64],
 }
+
 #[derive(Default, Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct RadianceInfoUBO {
@@ -94,8 +97,7 @@ pub struct RadianceInfoUBO {
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct LightDataUBO {
-    pub sun_direction: uv::Vec4, // xyz = direction, w = unused
-    pub sun_color: uv::Vec4,     // xyz = color (intensity baked in), w = unused
+    pub sky_light: DirectionalLightUBO,
     pub point_light_count: u32,
     pub _pad0: u32,
     pub _pad1: u32,
@@ -243,20 +245,26 @@ impl From<(&PointLight, &Transform)> for PointLightUBO {
     }
 }
 
-#[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
+#[derive(Debug, Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct DirectionalLightUBO {
-    pub(crate) position: uv::Vec4,
-    pub(crate) color: uv::Vec3,
-    _padding: f32,
+    pub sun_position: uv::Vec4,
+    pub sun_color: uv::Vec4,
+    pub sky_zenith_color: uv::Vec4,
+    pub sky_horizon_color: uv::Vec4,
+    pub sky_gradient_sharpness: f32,
+    pub _pad: [u32; 3],
 }
 
 impl From<&DirectionalLight> for DirectionalLightUBO {
     fn from(light: &DirectionalLight) -> Self {
         DirectionalLightUBO {
-            position: light.from_position.into_homogeneous_point(),
-            color: light.color,
-            _padding: 0.0,
+            sun_position: light.sun_position.into_homogeneous_point(),
+            sun_color: light.sun_color.into_homogeneous_point(),
+            sky_zenith_color: light.sky_zenith_color.into_homogeneous_point(),
+            sky_horizon_color: light.sky_horizon_color.into_homogeneous_point(),
+            sky_gradient_sharpness: light.sky_gradient_sharpness,
+            _pad: [0; 3],
         }
     }
 }

@@ -6,11 +6,11 @@ use std::{
 };
 
 use ash::vk;
-use tracing::{debug, error, info, trace, warn};
 use gpu_allocator::{
     AllocatorDebugSettings,
     vulkan::{Allocator, AllocatorCreateDesc},
 };
+use tracing::{debug, error, info, trace, warn};
 #[allow(deprecated)]
 use winit::{
     event_loop::ActiveEventLoop,
@@ -79,7 +79,7 @@ impl VulkanContext {
 
         let required_extensions = [
             ash::vk::KHR_SWAPCHAIN_NAME,
-            // ash::vk::KHR_SHADER_NON_SEMANTIC_INFO_NAME,
+            ash::vk::KHR_SHADER_NON_SEMANTIC_INFO_NAME,
         ];
         let (physical_device, queue_family_index) =
             create_physical_device(&instance, surface, &required_extensions);
@@ -172,10 +172,10 @@ pub fn create_instance(entry: &ash::Entry, event_loop: &ActiveEventLoop) -> ash:
     let validation_layer = c"VK_LAYER_KHRONOS_validation";
     let validation_features = [
         vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
-        // vk::ValidationFeatureEnableEXT::GPU_ASSISTED,
-        // vk::ValidationFeatureEnableEXT::GPU_ASSISTED_RESERVE_BINDING_SLOT,
+        vk::ValidationFeatureEnableEXT::GPU_ASSISTED,
+        vk::ValidationFeatureEnableEXT::GPU_ASSISTED_RESERVE_BINDING_SLOT,
         vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
-        // vk::ValidationFeatureEnableEXT::DEBUG_PRINTF,
+        vk::ValidationFeatureEnableEXT::DEBUG_PRINTF,
     ];
     let validation_features_info = vk::ValidationFeaturesEXT {
         enabled_validation_feature_count: validation_features.len() as u32,

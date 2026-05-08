@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_debug_printf : enable
 layout(set = 0, binding = 0) uniform sampler2D u_color;
 layout(set = 0, binding = 1) uniform sampler2D u_normals;
 layout(set = 0, binding = 2) uniform sampler2D u_position;
@@ -20,6 +21,59 @@ layout(set = 1, binding = 0) uniform RadianceInfo {
     float probe_spacing;
 }
 info;
+
+struct DirectionalLight {
+    vec4  sun_position;
+    vec4  sun_color;
+    vec4  sky_zenith_color;
+    vec4  sky_horizon_color;
+    float sky_gradient_sharpness;
+    float pad1;
+    float pad2;
+    float pad3;
+};
+
+layout(set = 1, binding = 1) uniform LightData {
+    DirectionalLight sky;
+    uint             point_light_count;
+    uint             _pad0;
+    uint             _pad1;
+    uint             _pad2;
+    vec4             point_light_positions[32]; // xyz = pos, w = radius
+    vec4             point_light_colors[32];    // xyz = color (intensity baked in), w = unused
+}
+lights;
+
+layout(set = 1, binding = 2) uniform Camera {
+    mat4 view;
+    mat4 proj;
+    mat4 inverse_view;
+    mat4 inverse_proj;
+}
+camera;
+
+#define NO_HIT 1e30
+#define EPS .00002
+
+struct Ray {
+    vec3 direction;
+    vec3 origin;
+};
+float raySphereIntersect(Ray ray, vec3 s0, float sr) {
+    // float a = dot(ray.direction, ray.direction);
+    // always 1 if ray.direction is normalized, which it is
+    float a     = 1.0;
+    vec3  s0_r0 = ray.origin - s0;
+    float b     = 2.0 * dot(ray.direction, s0_r0);
+    float c     = dot(s0_r0, s0_r0) - (sr * sr);
+    float disc  = b * b - 4.0 * a * c;
+    if (disc < 0.0) {
+        return NO_HIT;
+    }
+    float t = (-b - sqrt(disc)) / (2.0 * a);
+    return t > 0.0 ? t : NO_HIT;
+}
+
 vec3 unitVectorFrom2d(float x, float y, float range) {
     vec3 v;
     v.x = -1 + 2 * (x / range);
@@ -45,8 +99,45 @@ void main() {
                             float(info.probe_y_count) * info.probe_spacing,
                             float(info.probe_z_count) * info.probe_spacing);
 
+    float closest = NO_HIT;
+    {
+        // in uv is 0..1, ndc is -1..1
+        vec2 ndc = in_uv * 2.0 - 1.0;
+        // projection goes from ndc/clip space to view/camera space
+        vec4 view = camera.inverse_proj * vec4(ndc, 1.0, 1.0);
+        // undo perspective distortion
+        view /= view.w;
+        // inverse view goes from camera space to world space
+        vec3 world_dir = normalize((camera.inverse_view * vec4(view.xyz, 0.0)).xyz);
+        // the last collum on the right is always the transform coordinates
+        vec3 ray_origin = camera.inverse_view[3].xyz;
+        bool hit_light  = false;
+        vec3 color      = vec3(0.0);
+        for (int i = 0; i < lights.point_light_count; i++) {
+            vec4 light_pos = lights.point_light_positions[i];
+            vec4 light_col = lights.point_light_colors[i];
+            Ray  ray       = Ray(world_dir, ray_origin);
+
+            float d = raySphereIntersect(ray, light_pos.xyz, light_pos.w);
+            if (d < closest) {
+                closest   = d;
+                color     = normalize(light_col.xyz);
+                hit_light = true;
+            }
+        }
+        if (hit_light) {
+            f_color = vec4(color, 1.0);
+            return;
+        }
+    }
+
+    // anything outside the volume is skipped, i should instead fallback to other rendering tecniques but this is fine for now
     if (any(lessThan(local_pos, vec3(0.0))) || any(greaterThan(local_pos, volume_size))) {
-        f_color = vec4(0.0, 0.0, 0.0, 1.0);
+        // red = local_pos negative (position below grid start), green = local_pos > volume_size (above grid end)
+        vec3 neg  = vec3(lessThan(local_pos, vec3(0.0)));
+        vec3 over = vec3(greaterThan(local_pos, volume_size));
+        f_color   = vec4(max(neg.x, max(neg.y, neg.z)), max(over.x, max(over.y, over.z)), 0.0, 0.0);
+        f_color   = vec4(0.0);
         return;
     }
 
@@ -84,8 +175,11 @@ void main() {
             total_weight += weight;
         }
     }
-    f_color = vec4(albedo * total_radiance * 1.0, 0.7);
-    // f_color = vec4(total_radiance, 1.0);
+    float N = float(info.sqrt_ray_count * info.sqrt_ray_count);
+    f_color = vec4(albedo * total_radiance * (4.0 / N), 0.7);
+    // f_color = vec4(1.0, 0.0, 1.0, 1.0);
+
+    // f_color = vec4(N);
     // f_color = vec4(local_pos, 1.0);
     vec3 normalized_local = local_pos / vec3(float(info.probe_x_count) * info.probe_spacing,
                                              float(info.probe_y_count) * info.probe_spacing,

@@ -1,26 +1,11 @@
 use core::panic;
-use std::{
-    env,
-    ffi::OsStr,
-    fs::{self, File, create_dir},
-    io::Read,
-    path::Path,
-};
+use std::{env, ffi::OsStr, fs::create_dir, path::Path, process::Command};
 use walkdir::WalkDir;
 
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let shader_dir = Path::new("src/shaders");
     println!("cargo:rerun-if-changed=src/shaders/");
-
-    let compiler = shaderc::Compiler::new().expect("Failed to create shader compiler");
-    let mut options = shaderc::CompileOptions::new().unwrap();
-    options.set_generate_debug_info();
-    options.set_target_env(
-        shaderc::TargetEnv::Vulkan,
-        shaderc::EnvVersion::Vulkan1_3 as u32,
-    );
-    // options.add_macro_definition("VK_KHR_shader_non_semantic_info", Some("1"));
 
     for entry in WalkDir::new(shader_dir) {
         let entry = entry.unwrap();
@@ -33,65 +18,72 @@ fn main() {
         }
         println!("cargo:rerun-if-changed={}", path.display());
 
-        let mut file = File::open(path).expect("failed to open file");
-        let mut source = String::new();
-        file.read_to_string(&mut source)
-            .unwrap_or_else(|_| panic!("invalid file {}", path.to_string_lossy()));
+        let stage = shader_stage_from_filename(path);
+        println!("Compiling {:?} as {:?}", path, stage);
 
-        let shader_kind = shader_kind_from_filename(path);
-        println!("Compiling {:?} as {:?}", path, shader_kind);
-
-        let result = match compiler.compile_into_spirv(
-            &source,
-            shader_kind,
-            &path.to_string_lossy(),
-            "main",
-            Some(&options),
-        ) {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!("{}", err);
-                panic!();
-            }
-        };
-        if result.get_num_warnings() > 0 {
-            println!("cargo:warning={}", result.get_warning_messages().trim());
-            panic!();
-        }
-
-        let filename = path.file_stem().unwrap().to_string_lossy();
         let output_dir = Path::new(&out_dir).join("shaders");
         create_dir(&output_dir).unwrap_or(());
-        let file_path = output_dir.join(format!("{filename}.spv"));
+        let filename = path.file_stem().unwrap().to_string_lossy();
+        let output_path = output_dir.join(format!("{filename}.spv"));
 
-        fs::write(&file_path, result.as_binary_u8()).expect("Failed to write SPIR-V");
+        let reflect_path = output_dir.join(format!("{filename}.reflect.spv"));
+
+        for (extra_flags, out) in [(&["-gVS"][..], &output_path), (&[][..], &reflect_path)] {
+            let result = Command::new("glslangValidator")
+                .args(extra_flags)
+                .args([
+                    "-V",
+                    "--target-env",
+                    "vulkan1.3",
+                    "-S",
+                    stage,
+                    "-o",
+                    out.to_str().unwrap(),
+                    path.to_str().unwrap(),
+                ])
+                .output()
+                .expect("failed to run glslangValidator — is it installed?");
+
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+
+            if !result.status.success() {
+                eprintln!("{stdout}");
+                eprintln!("{stderr}");
+                panic!("glslangValidator failed for {}", path.display());
+            }
+
+            for line in stdout.lines() {
+                if line.contains("WARNING") {
+                    println!("cargo:warning={line}");
+                }
+            }
+        }
     }
 }
-fn shader_kind_from_filename(path: &Path) -> shaderc::ShaderKind {
+
+fn shader_stage_from_filename(path: &Path) -> &'static str {
     let name = path.file_name().unwrap().to_string_lossy();
+    let mut stage = None;
 
-    let mut kind = None;
-
-    if name.contains("_vert") {
-        kind = match kind {
-            None => Some(shaderc::ShaderKind::Vertex),
+    if name.contains(".vert") {
+        stage = match stage {
+            None => Some("vert"),
+            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
+        };
+    }
+    if name.contains(".frag") {
+        stage = match stage {
+            None => Some("frag"),
+            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
+        };
+    }
+    if name.contains(".comp") {
+        stage = match stage {
+            None => Some("comp"),
             Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
         };
     }
 
-    if name.contains("_frag") {
-        kind = match kind {
-            None => Some(shaderc::ShaderKind::Fragment),
-            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
-        };
-    }
-
-    if name.contains("_comp") {
-        kind = match kind {
-            None => Some(shaderc::ShaderKind::Compute),
-            Some(_) => panic!("Multiple shader kinds detected in file: {}", name),
-        };
-    }
-
-    kind.unwrap_or_else(|| panic!("Unknown shader type for file: {}", name))
+    stage.unwrap_or_else(|| panic!("Unknown shader type for file: {}", name))
 }

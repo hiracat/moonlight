@@ -73,8 +73,10 @@ impl Drop for UIRenderer {
 
         let mut allocator = self.allocator.lock().unwrap();
         for i in 0..FRAMES_IN_FLIGHT {
-            let vmem = std::mem::replace(&mut self.vertex_memories[i], unsafe { std::mem::zeroed() });
-            let imem = std::mem::replace(&mut self.index_memories[i], unsafe { std::mem::zeroed() });
+            let vmem =
+                std::mem::replace(&mut self.vertex_memories[i], unsafe { std::mem::zeroed() });
+            let imem =
+                std::mem::replace(&mut self.index_memories[i], unsafe { std::mem::zeroed() });
             allocator.free(vmem).unwrap();
             allocator.free(imem).unwrap();
         }
@@ -116,7 +118,9 @@ impl UIRenderer {
         let mut current_index_byte_offset = 0;
         for item in geometry {
             if let egui::epaint::Primitive::Mesh(x) = &item.primitive {
-                let vertex_memory = self.vertex_memories[frame_index].mapped_slice_mut().unwrap();
+                let vertex_memory = self.vertex_memories[frame_index]
+                    .mapped_slice_mut()
+                    .unwrap();
                 let vertex_writeable_slice = &mut vertex_memory[current_vertex_byte_offset
                     ..current_vertex_byte_offset + x.vertices.len() * size_of::<epaint::Vertex>()];
 
@@ -174,7 +178,12 @@ impl UIRenderer {
 
         for job in draw_jobs {
             unsafe {
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffers[frame_index]], &[0]);
+                device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &[self.vertex_buffers[frame_index]],
+                    &[0],
+                );
                 device.cmd_bind_index_buffer(
                     command_buffer,
                     self.index_buffers[frame_index],
@@ -314,8 +323,8 @@ impl UIRenderer {
     ) {
         let shaders = create_pipeline_layout_from_vert_frag(
             device.clone(),
-            Path::new("shaders/egui_vert.spv"),
-            Path::new("shaders/egui_frag.spv"),
+            Path::new("shaders/egui.vert.spv"),
+            Path::new("shaders/egui.frag.spv"),
         );
         let desc = &GraphicsPipelineDesc {
             vertex_input_state: VertexInputState {
@@ -501,11 +510,7 @@ impl UIRenderer {
                     .unwrap();
                 context
                     .device
-                    .bind_buffer_memory(
-                        index_buffer,
-                        index_memory.memory(),
-                        index_memory.offset(),
-                    )
+                    .bind_buffer_memory(index_buffer, index_memory.memory(), index_memory.offset())
                     .unwrap();
             }
 
@@ -515,13 +520,11 @@ impl UIRenderer {
             index_memories_vec.push(index_memory);
         }
 
-        let vertex_buffers: [vk::Buffer; FRAMES_IN_FLIGHT] =
-            vertex_buffers_vec.try_into().unwrap();
+        let vertex_buffers: [vk::Buffer; FRAMES_IN_FLIGHT] = vertex_buffers_vec.try_into().unwrap();
         let index_buffers: [vk::Buffer; FRAMES_IN_FLIGHT] = index_buffers_vec.try_into().unwrap();
         let vertex_memories: [Allocation; FRAMES_IN_FLIGHT] =
             vertex_memories_vec.try_into().unwrap();
-        let index_memories: [Allocation; FRAMES_IN_FLIGHT] =
-            index_memories_vec.try_into().unwrap();
+        let index_memories: [Allocation; FRAMES_IN_FLIGHT] = index_memories_vec.try_into().unwrap();
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 64,
