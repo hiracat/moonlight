@@ -24,6 +24,6 @@ void main() {
 
     // change to sampler texture again
     f_color    = vec4(0.10, 0.02, 0.0, 1);
-    f_normal   = in_normal;
+    f_normal   = normalize(in_normal);
     f_position = in_position;
 }

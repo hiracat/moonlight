@@ -242,7 +242,7 @@ impl WorldRenderer {
                             }
                         }
                         PipelineJob::Compute(compute_dispatch) => {
-                            let (pipeline_layout, set_layout) =
+                            let (pipeline_layout, descriptor_sets) =
                                 &self.descriptor_manager[frame_in_flight].bind(
                                     resource_manager,
                                     graph,
@@ -255,7 +255,7 @@ impl WorldRenderer {
                                     vk::PipelineBindPoint::COMPUTE,
                                     *pipeline_layout,
                                     0,
-                                    set_layout.as_ref(),
+                                    descriptor_sets.as_ref(),
                                     &[],
                                 );
                             }
@@ -274,7 +274,11 @@ impl WorldRenderer {
         }
     }
 
-    #[instrument(name = "pipeline_setup", skip(self, resource_manager, world))]
+    #[instrument(
+        level = "trace",
+        name = "draw job building",
+        skip(self, resource_manager, world)
+    )]
     fn setup_gpu_build_draw_jobs(
         &mut self,
         resource_manager: &mut ResourceManager,
@@ -285,7 +289,6 @@ impl WorldRenderer {
         let mut jobs: HashMap<PipelineHandle, PipelineJob> = HashMap::new();
 
         for (handle, pipeline) in self.pipeline_manager.all_pipelines() {
-            trace!(?handle, "building draw jobs");
             let job_set = (pipeline.write_data_and_build_draw_jobs)(
                 world,
                 resource_manager,

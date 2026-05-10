@@ -23,11 +23,6 @@ struct MeshInfo {
     mat4 local_to_world;
 };
 
-vec3 easedMix(vec3 a, vec3 b, float t, float power) {
-    float eased = t < 0.5 ? 0.5 * pow(2.0 * t, power) : 1.0 - 0.5 * pow(2.0 - 2.0 * t, power);
-    return mix(a, b, eased);
-}
-
 layout(set = 2, binding = 0) uniform RadianceConfigUBO {
     vec4     start_position;
     uint     count_x;
@@ -50,15 +45,14 @@ layout(set = 2, binding = 0) uniform RadianceConfigUBO {
 }
 config;
 
-layout(set = 3, binding = 0) readonly buffer PositionBuffer {
-    vec3 positions[];
+layout(set = 2, binding = 1) readonly buffer PositionBuffer {
+    vec4 positions[];
 }
 pos;
-layout(set = 3, binding = 1) readonly buffer IndexBuffer {
+layout(set = 2, binding = 2) readonly buffer IndexBuffer {
     uint indices[];
 }
 idx;
-
 struct DirectionalLight {
     vec4  sun_position;
     vec4  sun_color;
@@ -70,7 +64,7 @@ struct DirectionalLight {
     float pad3;
 };
 
-layout(set = 4, binding = 0) uniform LightData {
+layout(set = 3, binding = 0) uniform LightData {
     DirectionalLight sky;
     uint             point_light_count;
     uint             _pad0;
@@ -80,31 +74,30 @@ layout(set = 4, binding = 0) uniform LightData {
     vec4             point_light_colors[32];    // xyz = color (intensity baked in), w = unused
 }
 lights;
+vec3 easedMix(vec3 a, vec3 b, float t, float power) {
+    float eased = t < 0.5 ? 0.5 * pow(2.0 * t, power) : 1.0 - 0.5 * pow(2.0 - 2.0 * t, power);
+    return mix(a, b, eased);
+}
 
 #define NO_HIT 1e30
-#define EPS .00002
+#define EPS .002
 
 struct Ray {
     vec3 direction;
     vec3 origin;
 };
 float raySphereIntersect(Ray ray, vec3 s0, float sr) {
-    // - r0: ray origin
-    // - rd: normalized ray direction
-    // - s0: sphere center
-    // - sr: sphere radius
-    // - Returns distance from r0 to first intersecion with sphere,
-    //   or -1.0 if no intersection.
-    // float a     = dot(ray.direction, ray.direction);
     // always 1 if ray.direction is normalized, which it is
     float a     = 1.0;
     vec3  s0_r0 = ray.origin - s0;
     float b     = 2.0 * dot(ray.direction, s0_r0);
     float c     = dot(s0_r0, s0_r0) - (sr * sr);
-    if (b * b - 4.0 * a * c < 0.0) {
-        return -1.0;
+    float disc  = b * b - 4.0 * a * c;
+    if (disc < 0.0) {
+        return NO_HIT;
     }
-    return (-b - sqrt((b * b) - 4.0 * a * c)) / (2.0 * a);
+    float t = (-b - sqrt(disc)) / (2.0 * a);
+    return t > 0.0 ? t : NO_HIT;
 }
 
 /**
@@ -153,8 +146,6 @@ float rayHeightmapIntersect(Ray ray, sampler2D hmap, float hmap_size, float hmap
     float step_size = (end - start) / float(steps);
 
     float t_prev = start;
-    float h_prev =
-        ray.origin.y + ray.direction.y * start - sampleHeight(hmap, ray.origin.xz + ray.direction.xz * start, hmap_size, hmap_height);
 
     for (int i = 1; i <= steps; i++) {
         float t    = start + float(i) * step_size;
@@ -180,7 +171,6 @@ float rayHeightmapIntersect(Ray ray, sampler2D hmap, float hmap_size, float hmap
         }
 
         t_prev = t;
-        h_prev = diff;
     }
     return NO_HIT;
 }
@@ -220,23 +210,83 @@ float intersectAABB(Ray ray, vec3 boxMin, vec3 boxMax) {
 }
 
 // https://pbr-book.org/4ed/Geometry_and_Transformations/Spherical_Geometry#fragment-Reparameterizedirectionsinthez0portionoftheoctahedron-0
+// modified because the book uses z as up
 vec3 unitVectorFrom2d(float x, float y, float range) {
     vec3 v;
-    v.x = -1 + 2 * (x / range);
-    v.y = -1 + 2 * (y / range);
-    v.z = 1 - (abs(v.x) + abs(v.y));
-    if (v.z < 0) {
+    v.x = -1 + 2 * ((x + 0.5) / range);
+    v.z = -1 + 2 * ((y + 0.5) / range);
+    v.y = 1 - (abs(v.x) + abs(v.z));
+    if (v.y < 0) {
         float xo = v.x;
-        v.x      = (1 - abs(v.y)) * sign(xo);
-        v.y      = (1 - abs(xo)) * sign(v.y);
+        v.x      = (1 - abs(v.z)) * sign(xo);
+        v.z      = (1 - abs(xo)) * sign(v.z);
     }
     return normalize(v);
 }
+
 vec4 merge_intervals(vec4 near, vec4 far) {
     /* Far radiance can get occluded by near visibility term */
     const vec3 radiance = near.rgb + (far.rgb * near.a);
 
     return vec4(radiance, near.a * far.a);
+}
+
+ivec2 get_texel(uvec3 probe, uvec2 ray) {
+    // --- z level ---
+    uint z_col = probe.z % config.z_cols;
+    uint z_row = probe.z / config.z_cols;
+
+    // --- xy level ---
+    uint xy_idx = probe.y * config.count_x + probe.x; // flatten x,y into one index
+    uint xy_col = xy_idx % config.xy_cols;
+    uint xy_row = xy_idx / config.xy_cols;
+
+    uint texel_x = z_col * (config.xy_cols * config.sqrt_ray_count) + xy_col * config.sqrt_ray_count + ray.x;
+    uint texel_y = z_row * (config.xy_rows * config.sqrt_ray_count) + xy_row * config.sqrt_ray_count + ray.y;
+
+    return ivec2(texel_x, texel_y);
+}
+
+ivec2 get_above_texel(uvec3 probe, uvec2 ray) {
+    uint z_col = probe.z % config.above_z_cols;
+    uint z_row = probe.z / config.above_z_cols;
+
+    uint xy_idx = probe.y * (config.count_x / 2) + probe.x;
+    uint xy_col = xy_idx % config.above_xy_cols;
+    uint xy_row = xy_idx / config.above_xy_cols;
+
+    uint above_sqrt_ray = config.sqrt_ray_count * 2;
+
+    uint texel_x = z_col * (config.above_xy_cols * above_sqrt_ray) + xy_col * above_sqrt_ray + ray.x;
+    uint texel_y = z_row * (config.above_xy_rows * above_sqrt_ray) + xy_row * above_sqrt_ray + ray.y;
+
+    return ivec2(texel_x, texel_y);
+}
+
+/* Sub-texel offset to bilinear interpolation weights */
+float[8] trilinear_weights(vec3 ratio) {
+    float w[8];
+    // go from corner ( -1, -1, -1) with z outermost and x innermost, to (+1,+1,+1)
+    w[0] = (1 - ratio.x) * (1 - ratio.y) * (1 - ratio.z);
+    w[1] = (ratio.x) * (1 - ratio.y) * (1 - ratio.z);
+    w[2] = (1 - ratio.x) * (ratio.y) * (1 - ratio.z);
+    w[3] = (ratio.x) * (ratio.y) * (1 - ratio.z);
+    w[4] = (1 - ratio.x) * (1 - ratio.y) * (ratio.z);
+    w[5] = (ratio.x) * (1 - ratio.y) * (ratio.z);
+    w[6] = (1 - ratio.x) * (ratio.y) * (ratio.z);
+    w[7] = (ratio.x) * (ratio.y) * (ratio.z);
+
+    return w;
+}
+
+void trilinear_samples(vec3 dest_center, vec3 trilinear_size, out float weights[8], out ivec3 base_index) {
+    /* Coordinate of the top-left trilinear probe when floored */
+
+    const vec3 base_coord = (dest_center / trilinear_size);
+
+    const vec3 ratio = fract(base_coord); /* Sub-trilinear probe position */
+    weights          = trilinear_weights(ratio);
+    base_index       = ivec3(floor(base_coord)); /* Top-left trilinear probe coordinate */
 }
 
 void main() {
@@ -249,45 +299,18 @@ void main() {
     uint probe_y = (probe_flat / config.count_x) % config.count_y;
     uint probe_z = probe_flat / (config.count_x * config.count_y);
 
-    uint ray_col = ray_flat % config.sqrt_ray_count;
-    uint ray_row = ray_flat / config.sqrt_ray_count;
-
     if (probe_x >= config.count_x || probe_y >= config.count_y || probe_z >= config.count_z) {
         return;
     }
+
+    uint ray_row = ray_flat / config.sqrt_ray_count;
+    uint ray_col = ray_flat % config.sqrt_ray_count;
+
     vec3 probe_world_pos = config.start_position.xyz + vec3(probe_x, probe_y, probe_z) * config.probe_spacing;
-    // --- z level ---
-    uint z_col = probe_z % config.z_cols;
-    uint z_row = probe_z / config.z_cols;
 
-    // --- xy level ---
-    uint xy_idx = probe_y * config.count_x + probe_x; // flatten x,y into one index
-    uint xy_col = xy_idx % config.xy_cols;
-    uint xy_row = xy_idx / config.xy_cols;
+    vec3 direction = unitVectorFrom2d(float(ray_col), float(ray_row), float(config.sqrt_ray_count));
 
-    uint texel_x = z_col * (config.xy_cols * config.sqrt_ray_count) + xy_col * config.sqrt_ray_count + ray_col;
-    uint texel_y = z_row * (config.xy_rows * config.sqrt_ray_count) + xy_row * config.sqrt_ray_count + ray_row;
-
-    // ------------------- above
-    // above cascade has half the probes per axis
-    uint above_probe_x = probe_x / 2;
-    uint above_probe_y = probe_y / 2;
-    uint above_probe_z = probe_z / 2;
-
-    uint above_xy_idx = above_probe_y * (config.count_x / 2) + above_probe_x;
-    uint above_xy_col = above_xy_idx % config.above_xy_cols;
-    uint above_xy_row = above_xy_idx / config.above_xy_cols;
-    uint above_z_col  = above_probe_z % config.above_z_cols;
-    uint above_z_row  = above_probe_z / config.above_z_cols;
-
-    uint above_sqrt_ray = config.sqrt_ray_count * 4;
-    uint above_ray_col  = uint(float(ray_col) / float(config.sqrt_ray_count) * float(above_sqrt_ray));
-    uint above_ray_row  = uint(float(ray_row) / float(config.sqrt_ray_count) * float(above_sqrt_ray));
-    uint above_texel_x  = above_z_col * (config.above_xy_cols * above_sqrt_ray) + above_xy_col * above_sqrt_ray + above_ray_col;
-    uint above_texel_y  = above_z_row * (config.above_xy_rows * above_sqrt_ray) + above_xy_row * above_sqrt_ray + above_ray_row;
-    // -------------------  above
-
-    vec3 direction = unitVectorFrom2d(ray_row, ray_col, config.sqrt_ray_count);
+    ivec2 texel = get_texel(uvec3(probe_x, probe_y, probe_z), uvec2(ray_col, ray_row));
 
     // CHECK RAY FOR EACH TRIANGLE
     Ray   ray     = Ray(direction, probe_world_pos);
@@ -300,16 +323,16 @@ void main() {
         vec4 world_aabb_min = mesh_info.local_to_world * mesh_info.aabb_local_min;
 
         // IF THE RAY MISSES THE AABB FOR THE MESH  SKIP THE MESH
-        float aabb_hit = intersectAABB(ray, world_aabb_min.xyz, world_aabb_max.xyz);
-        if (aabb_hit > closest) {
-            continue;
-        }
+        // float aabb_hit = intersectAABB(ray, world_aabb_min.xyz, world_aabb_max.xyz);
+        // if (aabb_hit >= closest) {
+        //     continue;
+        // }
 
         // CHECK THE RAY AGAINST EVERY TRIANGLE, (should replace with a bvh probably, am lazy)
         for (int j = 0; j < mesh_info.index_count; j += 3) {
-            vec4 p1 = vec4(pos.positions[idx.indices[j + 0 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
-            vec4 p2 = vec4(pos.positions[idx.indices[j + 1 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
-            vec4 p3 = vec4(pos.positions[idx.indices[j + 2 + mesh_info.index_offset] + mesh_info.vertex_offset], 1.0);
+            vec4 p1 = vec4(pos.positions[idx.indices[j + 0 + mesh_info.index_offset] + mesh_info.vertex_offset]);
+            vec4 p2 = vec4(pos.positions[idx.indices[j + 1 + mesh_info.index_offset] + mesh_info.vertex_offset]);
+            vec4 p3 = vec4(pos.positions[idx.indices[j + 2 + mesh_info.index_offset] + mesh_info.vertex_offset]);
 
             vec3 worldp1 = (mesh_info.local_to_world * p1).xyz;
             vec3 worldp2 = (mesh_info.local_to_world * p2).xyz;
@@ -319,9 +342,7 @@ void main() {
             // if the distance is closer than the other then use this ray
             if (d < closest) {
                 closest = d;
-                color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission
-                // early out becaues we are using the same color (black) for all objects, no emission
-                break;
+                color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission, no transmittance
             }
         }
     }
@@ -335,27 +356,75 @@ void main() {
         }
     }
     float d = rayHeightmapIntersect(ray, height_map, ubo.size, ubo.height, config.interval_start, config.interval_end);
+
     if (d < closest) {
         closest = d;
-        color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission
+        color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission, no transmittance
     }
 
-    vec4 above_radiance;
+    uint above_sqrt_ray = config.sqrt_ray_count * 2;
 
+    vec4 merged = vec4(0.0);
     if (config.is_top_cascade == 0) {
-        above_radiance = imageLoad(above_radiance_field, ivec2(above_texel_x, above_texel_y)).rgba;
+        // for each nearby ray, because we need to average the 4 surrounding rays
+        float weights[8];
+        ivec3 base_index;
+        // find the spacing of the above probes, to get the weights and base index for what probes to use
+        vec3 above_local_pos = probe_world_pos - config.start_position.xyz;
+        trilinear_samples(above_local_pos, vec3(config.probe_spacing * 2.0), weights, base_index);
+
+        for (int ray_idx = 0; ray_idx < 4; ray_idx++) {
+            int ray_row_offset = ray_idx / 2;
+            int ray_col_offset = ray_idx % 2;
+
+            uint above_ray_row =
+                clamp(uint(float(ray_row) / float(config.sqrt_ray_count) * float(above_sqrt_ray)) + ray_row_offset, 0, above_sqrt_ray - 1);
+            uint above_ray_col =
+                clamp(uint(float(ray_col) / float(config.sqrt_ray_count) * float(above_sqrt_ray)) + ray_col_offset, 0, above_sqrt_ray - 1);
+
+            vec4 radiance = vec4(0.0);
+            for (int probe_idx = 0; probe_idx < 8; probe_idx++) {
+                // alternates
+                int dx = probe_idx & 1;
+                // every 2 switches
+                int dy = (probe_idx >> 1) & 1;
+                // every 4 switches
+                int dz = (probe_idx >> 2) & 1;
+
+                // ------------------- above
+                // above cascade has half the probes per axis
+                // its a count not an index so subtract one
+
+                uint trilinear_probe_x = uint(clamp(base_index.x + dx, 0, int(config.count_x / 2) - 1));
+                uint trilinear_probe_y = uint(clamp(base_index.y + dy, 0, int(config.count_y / 2) - 1));
+                uint trilinear_probe_z = uint(clamp(base_index.z + dz, 0, int(config.count_z / 2) - 1));
+
+                ivec2 above_texel =
+                    get_above_texel(uvec3(trilinear_probe_x, trilinear_probe_y, trilinear_probe_z), uvec2(above_ray_col, above_ray_row));
+
+                // -------------------  above
+                radiance += merge_intervals(color, imageLoad(above_radiance_field, above_texel)) * weights[probe_idx];
+            }
+            merged += radiance;
+        }
+        merged /= 4.0;
     } else {
-        float sun_dot   = dot(direction, lights.sky.sun_position.xyz);
-        float t         = max(ray.direction.y, 0.0);
-        vec3  sky_color = easedMix(lights.sky.sky_zenith_color.xyz, lights.sky.sky_horizon_color.xyz, t, lights.sky.sky_gradient_sharpness);
+        float sun_dot   = dot(direction, normalize(lights.sky.sun_position.xyz));
+        float t         = max(direction.y, 0.0);
+        vec3  sky_color = easedMix(lights.sky.sky_horizon_color.xyz, lights.sky.sky_zenith_color.xyz, t, lights.sky.sky_gradient_sharpness);
 
         vec3 incoming_color = sky_color;
-        if (sun_dot > 0.99) {
+        if (sun_dot > (1.0 - clamp(lights.sky.sun_color.w, 0.0, 1.0) * 0.05)) {
             incoming_color = lights.sky.sun_color.xyz;
         }
-        above_radiance = vec4(incoming_color, 1.0);
+        vec4 above_radiance = vec4(incoming_color, 1.0);
+        merged              = merge_intervals(color, above_radiance);
     }
-    vec4 merged = merge_intervals(color, above_radiance);
 
-    imageStore(radiance_field, ivec2(texel_x, texel_y), merged);
+    // debug border
+    // if (ray_col == 0 || ray_row == 0 || ray_col == config.sqrt_ray_count - 1 || ray_row == config.sqrt_ray_count - 1) {
+    //     merged = vec4(0.0, 0.0, 0.0, 1.0);
+    // }
+
+    imageStore(radiance_field, texel, merged);
 }

@@ -242,7 +242,7 @@ impl From<(&PointLight, &Transform)> for PointLightUBO {
 #[repr(C)]
 pub struct DirectionalLightUBO {
     pub sun_position: uv::Vec4,
-    pub sun_color: uv::Vec4,
+    pub sun_color: uv::Vec4, // w = size, between 0 and 1
     pub sky_zenith_color: uv::Vec4,
     pub sky_horizon_color: uv::Vec4,
     pub sky_gradient_sharpness: f32,
@@ -252,8 +252,13 @@ pub struct DirectionalLightUBO {
 impl From<&DirectionalLight> for DirectionalLightUBO {
     fn from(light: &DirectionalLight) -> Self {
         DirectionalLightUBO {
-            sun_position: light.sun_position.into_homogeneous_point(),
-            sun_color: light.sun_color.into_homogeneous_point(),
+            sun_position: light.sun_position.normalized().into_homogeneous_point(),
+            sun_color: uv::Vec4::new(
+                light.sun_color.x,
+                light.sun_color.y,
+                light.sun_color.z,
+                light.sun_size,
+            ),
             sky_zenith_color: light.sky_zenith_color.into_homogeneous_point(),
             sky_horizon_color: light.sky_horizon_color.into_homogeneous_point(),
             sky_gradient_sharpness: light.sky_gradient_sharpness,

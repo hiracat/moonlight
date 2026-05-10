@@ -262,6 +262,9 @@ local function read_sun_sky(world, widgets)
 	-- Sky gradient sharpness
 	slider(widgets, "sky.gradient_sharpness").value = dl.sky_gradient_sharpness
 
+	-- Sun size
+	slider(widgets, "sun.size").value = dl.sun_size
+
 	set_label(widgets, "sun.status", "read ok")
 end
 
@@ -293,6 +296,7 @@ local function apply_sun_sky(world, widgets)
 		z = slider(widgets, "sky.horizon.b").value,
 	}
 	dl.sky_gradient_sharpness = slider(widgets, "sky.gradient_sharpness").value
+	dl.sun_size = slider(widgets, "sun.size").value
 
 	set_label(widgets, "sun.status", "applied ok")
 end
@@ -464,6 +468,8 @@ local function init_ui(ui)
 		["sky.horizon.r"] = Slider("Horizon R", 0.5, 0.0, 2.0),
 		["sky.horizon.g"] = Slider("Horizon G", 0.6, 0.0, 2.0),
 		["sky.horizon.b"] = Slider("Horizon B", 0.8, 0.0, 2.0),
+		-- Sun size (0..1, controls disc angular size in shader)
+		["sun.size"] = Slider("Sun Size", 0.5, 0.0, 1.0),
 		-- Sky gradient sharpness
 		["sky.gradient_sharpness"] = Slider("Sky Gradient Sharpness", 4.0, 0.1, 20.0),
 		-- Read / Apply buttons + status
@@ -602,6 +608,8 @@ local function init_ui(ui)
 					{ type = "Field", data = "sky.horizon.b" },
 					{ type = "Field", data = "separator" },
 					{ type = "Field", data = "sky.gradient_sharpness" },
+					{ type = "Field", data = "separator" },
+					{ type = "Field", data = "sun.size" },
 					{ type = "Field", data = "sun.btn.read" },
 					{ type = "Field", data = "sun.btn.apply" },
 					{ type = "Field", data = "sun.status" },
@@ -665,7 +673,7 @@ function Update(world, engine)
 	local widgets = ui.widgets
 
 	local time_res = world:get_resource("Time") ---@type Time
-	apply_day_night(world, widgets, time_res and time_res.delta_time or 0.016)
+	-- apply_day_night(world, widgets, time_res and time_res.delta_time or 0.016)
 
 	-----------------------------------------------------------------
 	-- PLAYER & WORLD SETTINGS (live, every frame)

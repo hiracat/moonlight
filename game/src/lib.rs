@@ -108,10 +108,11 @@ fn start(world: &mut World, engine: &mut Engine) {
     );
     let directional = DirectionalLight::create(
         Vec3::new(200.0, 10.0, 0.0),
-        Vec3::new(2.0, 1.6, 1.5),
-        Vec3::new(0.2, 0.3, 0.8),
-        Vec3::new(0.3, 0.4, 0.8),
-        1.0,
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 0.0),
+        0.0,
+        0.0,
     );
     let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.35);
 
@@ -197,14 +198,14 @@ fn start(world: &mut World, engine: &mut Engine) {
 
     // ground
     let ground = world.spawn("ground");
-    let ground_tex = engine.resource_manager.create_texture(
-        "data/models/textures/ground_roots.png",
-        resources::TextureFormat::Srgba,
-    );
+    // let ground_tex = engine.resource_manager.create_texture(
+    //     "data/models/textures/ground_roots.png",
+    //     resources::TextureFormat::Srgba,
+    // );
 
-    world
-        .add(ground, Material::create(ground_tex, None))
-        .unwrap();
+    // world
+    //     .add(ground, Material::create(ground_tex, None))
+    //     .unwrap();
 
     world
         .add(
@@ -212,7 +213,7 @@ fn start(world: &mut World, engine: &mut Engine) {
             Transform::from(
                 Some(Vec3::new(0.0, 40.0, 0.0)),
                 None,
-                Some(Vec3::new(40.0, 1.0, 40.0)),
+                Some(Vec3::new(1000.0, 1.0, 1000.0)),
             ),
         )
         .unwrap();
@@ -355,7 +356,7 @@ fn start(world: &mut World, engine: &mut Engine) {
 fn game_update(world: &mut World, _engine: &mut Engine) {
     let delta_time = world.get_resource::<Time>().unwrap().delta_time;
     player_update(world, delta_time);
-    physics_update(world, delta_time);
+    physics_update(world, delta_time.clamp(0.0, 0.3));
     let camera_offset = world.get_resource::<CameraOffset>().unwrap().offset;
     camera_update(world, delta_time, camera_offset);
 }
@@ -447,14 +448,13 @@ pub enum Widget {
 }
 impl Widget {
     fn label(&self) -> Option<&str> {
-        dbg!(self);
         match self {
             Widget::Slider(slider) => slider.label.as_deref(),
             Widget::Button(button) => button.label.as_deref(),
             Widget::Label(label) => Some(label.text.as_ref()),
             Widget::TextInput(text_input) => text_input.label.as_deref(),
             Widget::NumberInput(number_input) => number_input.label.as_deref(),
-            Widget::Separator => None,
+            Widget::Separator => Some(""),
         }
     }
 }

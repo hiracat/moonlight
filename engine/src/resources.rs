@@ -613,7 +613,7 @@ pub struct GpuMesh {
     pub vertex_alloc: Allocation,
     pub index_count: u32,
     pub vertex_type: VertexType,
-    pub positions: Vec<uv::Vec3>,
+    pub positions: Vec<uv::Vec4>,
     pub indices: Vec<u32>,
     device: Arc<ash::Device>,
     allocator: SharedAllocator,
@@ -1164,7 +1164,10 @@ impl ResourceManager {
         );
 
         GpuMesh {
-            positions: vertices.iter().map(|x| x.position).collect(),
+            positions: vertices
+                .iter()
+                .map(|x| x.position.into_homogeneous_point())
+                .collect(),
             index_count: indices.len() as u32,
             indices,
             index_alloc: index_alloc.remove(0),
@@ -1247,7 +1250,10 @@ impl ResourceManager {
         );
 
         GpuMesh {
-            positions: vertices.iter().map(|x| x.position).collect(),
+            positions: vertices
+                .iter()
+                .map(|x| x.position.into_homogeneous_point())
+                .collect(),
             index_count: indices.len() as u32,
             indices,
             index_alloc: index_alloc.remove(0),

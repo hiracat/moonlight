@@ -103,6 +103,7 @@ impl PointLight {
 pub struct DirectionalLight {
     pub sun_position: uv::Vec3,
     pub sun_color: uv::Vec3,
+    pub sun_size: f32,
 
     pub sky_zenith_color: uv::Vec3,
     pub sky_horizon_color: uv::Vec3,
@@ -116,6 +117,7 @@ impl DirectionalLight {
         sky_zenith_color: uv::Vec3,
         sky_horizon_color: uv::Vec3,
         sky_gradient_sharpness: f32,
+        sun_size: f32,
     ) -> Self {
         Self {
             sun_position: sun_pos.normalized(),
@@ -123,6 +125,7 @@ impl DirectionalLight {
             sky_zenith_color,
             sky_horizon_color,
             sky_gradient_sharpness,
+            sun_size,
         }
     }
 }

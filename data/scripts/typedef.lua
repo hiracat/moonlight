@@ -59,6 +59,7 @@
 ---@class DirectionalLight
 ---@field sun_position Vec3
 ---@field sun_color Vec3
+---@field sun_size number
 ---@field sky_zenith_color Vec3
 ---@field sky_horizon_color Vec3
 ---@field sky_gradient_sharpness number

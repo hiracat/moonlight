@@ -1050,21 +1050,30 @@ pub fn create_builtin_graphics_pipelines(
         top_level_probes_x: 8,
         top_level_probes_y: 6,
         top_level_probes_z: 8,
-        smallest_object_size: 0.5,
-        cascade_count: 4,
+        smallest_object_size: 0.1,
+        cascade_count: 5,
         sqrt_ray_count: 4,
     };
-    let probe_spacing_top = radiance_config.smallest_object_size
-        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0);
-    // half-offset using (N-1)/2 so probes are centered on the target, not edge-aligned
-    let half_size_xz = (radiance_config.top_level_probes_x as f32 - 1.0) / 2.0 * probe_spacing_top;
-    let half_size_y = (radiance_config.top_level_probes_y as f32 - 1.0) / 2.0 * probe_spacing_top;
+    let probe_spacing_finest = radiance_config.smallest_object_size; // 2^0 = 1.0
+    let half_size_x = (radiance_config.top_level_probes_x as f32
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0)
+        - 1.0)
+        / 2.0
+        * probe_spacing_finest;
+    let half_size_y = (radiance_config.top_level_probes_y as f32
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0)
+        - 1.0)
+        / 2.0
+        * probe_spacing_finest;
+    let half_size_z = (radiance_config.top_level_probes_z as f32
+        * 2f32.powf(radiance_config.cascade_count as f32 - 1.0)
+        - 1.0)
+        / 2.0
+        * probe_spacing_finest;
 
     radiance_config.grid_origin =
-        Vec3::new(0.0 - half_size_xz, 45.0 - half_size_y, 0.0 - half_size_xz);
+        Vec3::new(0.0 - half_size_x, 43.0 - half_size_y, 0.0 - half_size_z);
 
-    trace!(?radiance_config.grid_origin);
-    trace!(?half_size_xz, ?half_size_y);
     // == PASS 1: Create all cascade images ==
     let mut cascade_images: Vec<ImageVersion> =
         Vec::with_capacity(radiance_config.cascade_count as usize);
@@ -1077,15 +1086,7 @@ pub fn create_builtin_graphics_pipelines(
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
         let probe_count_z = radiance_config.top_level_probes_z
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
-        let sqrt_ray_count = radiance_config.sqrt_ray_count * 4u32.pow(cascade_level);
-
-        dbg!(
-            radiance_config.top_level_probes_x,
-            radiance_config.top_level_probes_y,
-            radiance_config.top_level_probes_z,
-            radiance_config.cascade_count,
-            radiance_config.sqrt_ray_count
-        );
+        let sqrt_ray_count = radiance_config.sqrt_ray_count * 2u32.pow(cascade_level);
 
         // fold z into a 2D grid of z-blocks
         // z slices per row
@@ -1103,10 +1104,6 @@ pub fn create_builtin_graphics_pipelines(
             if s * s >= xy { s } else { s + 1 }
         };
         let xy_rows = xy.div_ceil(xy_cols);
-        dbg!(z_cols * xy_cols * sqrt_ray_count);
-        dbg!(z_rows * xy_rows * sqrt_ray_count);
-
-        dbg!(z_cols, xy_cols, sqrt_ray_count, z_rows, xy_rows);
 
         let cascade_image = graph.add_image(ImageDesc::Custom {
             name: "cascade_image",
@@ -1117,7 +1114,6 @@ pub fn create_builtin_graphics_pipelines(
                 depth: 1,
             },
         });
-        dbg!(&cascade_image);
 
         cascade_images.push(cascade_image);
     }
@@ -1136,11 +1132,12 @@ pub fn create_builtin_graphics_pipelines(
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
         let probe_count_z = radiance_config.top_level_probes_z
             * 2u32.pow(radiance_config.cascade_count - 1 - cascade_level);
-        let sqrt_ray_count = radiance_config.sqrt_ray_count * 4u32.pow(cascade_level);
+        let sqrt_ray_count = radiance_config.sqrt_ray_count * 2u32.pow(cascade_level);
 
         let above_probe_count_x = probe_count_x / 2;
         let above_probe_count_y = probe_count_y / 2;
         let above_probe_count_z = probe_count_z / 2;
+        let is_top_cascade = cascade_level == radiance_config.cascade_count - 1;
 
         // fold z into a 2D grid of z-blocks
         let above_z_cols = {
@@ -1180,9 +1177,11 @@ pub fn create_builtin_graphics_pipelines(
         } else {
             radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32 - 1.0)
         };
-        let interval_end = radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32);
-
-        let is_top_cascade = cascade_level == radiance_config.cascade_count - 1;
+        let interval_end = if is_top_cascade {
+            f32::MAX // or some large number like 1e30
+        } else {
+            radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32)
+        };
 
         // Each cascade reads from the next coarser level (level + 1), except the top
         let (lower, upper) = cascade_images.split_at_mut(cascade_level as usize + 1);
@@ -1223,29 +1222,32 @@ pub fn create_builtin_graphics_pipelines(
                       _extent| {
                     // if world.get_resource::<RadianceMeshBuffers>().is_none() {
                     if true {
-                        let mut all_positions: Vec<Vec3> = Vec::new();
+                        let mut all_positions: Vec<Vec4> = Vec::new();
                         let mut all_indices: Vec<u32> = Vec::new();
                         let mut mesh_infos: Vec<MeshInfo> = Vec::new();
 
                         {
-                            for (_, (mesh_handle, transform)) in
-                                world.query::<(Req<Mesh>, Req<Transform>)>()
+                            for (_, (mesh_handle, transform)) in world
+                                .query::<(Req<Mesh>, Req<Transform>)>()
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
                             {
                                 if let Some(mesh) = resource_manager.get_mesh(*mesh_handle) {
+                                    let vertex_offset = all_positions.len() as u32;
+                                    let index_offset = all_indices.len() as u32;
                                     all_positions.extend_from_slice(&mesh.positions);
                                     all_indices.extend_from_slice(&mesh.indices);
                                     let mut aabb_min = Vec3::broadcast(f32::MAX);
                                     let mut aabb_max = Vec3::broadcast(f32::MIN);
                                     for pos in &mesh.positions {
-                                        // returns the min/max of each component, not one of the actual
-                                        // vectors
-                                        aabb_min = aabb_min.min_by_component(*pos);
-                                        aabb_max = aabb_max.max_by_component(*pos);
+                                        aabb_min = aabb_min.min_by_component(pos.xyz());
+                                        aabb_max = aabb_max.max_by_component(pos.xyz());
                                     }
 
                                     mesh_infos.push(MeshInfo {
-                                        vertex_offset: all_positions.len() as u32,
-                                        index_offset: all_indices.len() as u32,
+                                        vertex_offset,
+                                        index_offset,
                                         index_count: mesh.index_count,
                                         _pad: 0,
                                         local_to_world: ModelUBO::from(transform).model,
@@ -1255,7 +1257,7 @@ pub fn create_builtin_graphics_pipelines(
                                 }
                             }
                         }
-                        let pos_size = (all_positions.len() * size_of::<Vec3>()) as u64;
+                        let pos_size = (all_positions.len() * size_of::<Vec4>()) as u64;
                         let idx_size = (all_indices.len() * size_of::<u32>()) as u64;
 
                         let (mut pos_buffers, mut pos_allocs) = alloc_buffers(
@@ -1307,7 +1309,7 @@ pub fn create_builtin_graphics_pipelines(
                         if let Some(value) = world.get_mut_resource::<RadianceMeshBuffers>() {
                             *value = resource
                         } else {
-                            world.add_resource(resource);
+                            world.add_resource(resource).unwrap();
                         }
                     }
 
@@ -1347,10 +1349,15 @@ pub fn create_builtin_graphics_pipelines(
                         .query::<(Req<PointLight>, Req<Transform>)>()
                         .enumerate()
                     {
-                        light_positions[idx] = transform.position.into_homogeneous_point();
+                        light_positions[idx] = Vec4::new(
+                            transform.position.x,
+                            transform.position.y,
+                            transform.position.z,
+                            light.size,
+                        );
                         // the w component is the radius
                         light_colors[idx] =
-                            Vec4::new(light.color.x, light.color.y, light.color.z, light.size);
+                            Vec4::new(light.color.x, light.color.y, light.color.z, 1.0);
 
                         count += 1;
                     }
@@ -1403,7 +1410,7 @@ pub fn create_builtin_graphics_pipelines(
                         ),
                         descriptor_manager.request_bind(
                             handle,
-                            4,
+                            3,
                             0,
                             BindingData::Uniform {
                                 data: bytes_of(&lighting_ubo).to_vec(),
@@ -1413,16 +1420,16 @@ pub fn create_builtin_graphics_pipelines(
 
                     bindings.push(descriptor_manager.request_bind(
                         handle,
-                        3,
-                        0,
+                        2,
+                        1,
                         BindingData::Ssbo {
                             buffer: buffers.position_ssbo,
                         },
                     ));
                     bindings.push(descriptor_manager.request_bind(
                         handle,
-                        3,
-                        1,
+                        2,
+                        2,
                         BindingData::Ssbo {
                             buffer: buffers.index_ssbo,
                         },
@@ -1482,14 +1489,14 @@ pub fn create_builtin_graphics_pipelines(
                     .query::<(Req<PointLight>, Req<Transform>)>()
                     .enumerate()
                 {
-                    light_positions[idx] = transform.position.into_homogeneous_point();
-                    // the w component is the radius
-                    light_colors[idx] = Vec4::new(
-                        light.color.x,
-                        light.color.y,
-                        light.color.z,
+                    light_positions[idx] = Vec4::new(
+                        transform.position.x,
+                        transform.position.y,
+                        transform.position.z,
                         light.size,
                     );
+
+                    light_colors[idx] = Vec4::new(light.color.x, light.color.y, light.color.z, 0.0);
 
                     count += 1;
                 }
@@ -1527,7 +1534,6 @@ pub fn create_builtin_graphics_pipelines(
                     3,
                     BindingData::RenderGraphImage { id: final_image_id },
                 );
-                tracing::error!(start_position = ?radiance_info.start_position, probe_spacing = radiance_info.probe_spacing, probe_x = radiance_info.probe_x_count, probe_y = radiance_info.probe_y_count, probe_z = radiance_info.probe_z_count, "ambient radiance_info");
                 let radiance_info = descriptor_manager.request_bind(
                     handle,
                     1,
