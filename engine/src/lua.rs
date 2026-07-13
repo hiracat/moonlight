@@ -128,6 +128,7 @@ impl LuaVM {
     }
 }
 
+//BUG: add a generation counter and a get_checked so that stale worlds arnt accessed in lua
 pub struct LuaWorld {
     pub world: *mut World,
     pub type_registry: Arc<TypeRegistry>,
