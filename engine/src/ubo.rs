@@ -54,6 +54,7 @@ pub struct MeshInfo {
     pub aabb_local_min: uv::Vec4,
     pub aabb_local_max: uv::Vec4,
     pub local_to_world: uv::Mat4,
+    pub world_to_local: uv::Mat4,
 }
 
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]

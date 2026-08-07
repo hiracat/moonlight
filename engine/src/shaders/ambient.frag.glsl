@@ -197,7 +197,7 @@ void main() {
                 vec4  rad     = texelFetch(cascade_0, ivec2(texel_x, texel_y), 0);
                 vec3  ray_dir = normalize(unitVectorFrom2d(float(i), float(j), float(info.sqrt_ray_count)));
                 float weight  = max(0.0, dot(ray_dir, normal));
-                probe_radiance += rad.rgb * weight;
+                probe_radiance += rad.rgb * weight * rad.a;
             }
         }
         total_radiance += probe_radiance * weights[probe_idx];

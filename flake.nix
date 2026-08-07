@@ -21,6 +21,10 @@
           vulkan-validation-layers
           wayland
 
+          # rdp dependancies
+          libGL
+          fontconfig
+
           shaderc
 
           cloc
@@ -32,6 +36,7 @@
           export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
           export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib:$LD_LIBRARY_PATH
           export LD_LIBRARY_PATH=${pkgs.libxkbcommon}/lib:$LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH=${pkgs.libGL}/lib:$LD_LIBRARY_PATH 
           export SHADERC_LIB_DIR=${pkgs.shaderc.lib}/lib
           zsh
         '';

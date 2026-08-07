@@ -243,7 +243,6 @@ impl PipelineBuilder {
 #[educe(Debug)]
 pub struct CompiledRenderGraph {
     pub sampler: vk::Sampler,
-    pub commands: Vec<GraphCommand>,
     image_size: vk::Extent2D,
     execution_order: Vec<usize>,
     image_states: Vec<TrackedImageState>,
@@ -252,6 +251,7 @@ pub struct CompiledRenderGraph {
 
     depth: Option<ImageId>,
 }
+
 
 impl Drop for CompiledRenderGraph {
     fn drop(&mut self) {
@@ -271,51 +271,38 @@ struct TrackedImageState {
     format: vk::Format,
     name: &'static str,
 
+    image_id: ImageId,
     image: TrackedImageStorage,
 }
 
 enum TrackedImageStorage {
     Owned(Image),
-    Imported {
-        image: vk::Image,
-        view: vk::ImageView,
-    },
+    Imported ,
 }
 impl std::fmt::Debug for TrackedImageStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrackedImageStorage::Owned(_) => write!(f, "Owned(..)"),
-            TrackedImageStorage::Imported { image, view } => f
+            TrackedImageStorage::Imported => f
                 .debug_struct("Imported")
-                .field("image", image)
-                .field("view", view)
                 .finish(),
-        }
-    }
-}
-impl TrackedImageStorage {
-    fn get_view(&self) -> vk::ImageView {
-        match self {
-            TrackedImageStorage::Owned(image) => image.view,
-            TrackedImageStorage::Imported { view, .. } => *view,
         }
     }
 }
 
 pub struct ImportedImageBinding {
-    pub pre_initialized: bool,
-    pub image: vk::Image,
-    pub view: vk::ImageView,
     pub current_layout: vk::ImageLayout,
     pub last_access: vk::AccessFlags2,
     pub last_stage: vk::PipelineStageFlags2,
 }
 
 impl CompiledRenderGraph {
-    pub fn get_image_info(&self, id: &ImageId) -> vk::DescriptorImageInfo {
+    pub fn get_image_info(&self, id: &ImageId,
+        imported_images: &HashMap<ImageId, vk::ImageView>,
+        ) -> vk::DescriptorImageInfo {
         vk::DescriptorImageInfo {
             sampler: self.sampler,
-            image_view: self.get_view_from_id(id),
+            image_view: self.get_view_from_id(id, imported_images),
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }
     }
@@ -493,6 +480,7 @@ impl CompiledRenderGraph {
                         layer_count: 1,
                     };
 
+                    let image_id = ImageId { arr_idx: idx };
                     let image = create_image(
                         &device,
                         &allocator,
@@ -500,11 +488,12 @@ impl CompiledRenderGraph {
                         *extent,
                         *format,
                         *image_usages
-                            .get(&ImageId { arr_idx: idx })
+                            .get(&image_id)
                             .expect("all images should have usage flags"),
                         subresource_range,
                     );
                     TrackedImageState {
+                        image_id,
                         initialized: false,
                         format: *format,
                         name,
@@ -527,6 +516,7 @@ impl CompiledRenderGraph {
                         layer_count: 1,
                     };
 
+                    let image_id = ImageId { arr_idx: idx };
                     let image = create_image(
                         &device,
                         &allocator,
@@ -538,11 +528,12 @@ impl CompiledRenderGraph {
                         },
                         *format,
                         *image_usages
-                            .get(&ImageId { arr_idx: idx })
+                            .get(&image_id)
                             .expect("all images should have usage flags"),
                         subresource_range,
                     );
                     TrackedImageState {
+                        image_id,
                         initialized: false,
                         format: *format,
                         name,
@@ -553,29 +544,60 @@ impl CompiledRenderGraph {
                     }
                 }
                 ImageDesc::Imported { format, name } => {
+                    let image_id = ImageId { arr_idx: idx };
                     let imported_image = imported_images
-                        .get(&ImageId { arr_idx: idx })
+                        .get(&image_id)
                         .expect("all imported images should have a binding");
                     TrackedImageState {
-                        initialized: imported_image.pre_initialized,
+                        initialized: false,
                         format: *format,
                         name,
                         current_layout: imported_image.current_layout,
                         last_access: imported_image.last_access,
                         last_stage: imported_image.last_stage,
-                        image: TrackedImageStorage::Imported {
-                            image: imported_image.image,
-                            view: imported_image.view,
-                        },
+                        image_id,
+                        image: TrackedImageStorage::Imported,
                     }
                 }
             });
         }
 
-        let mut commands = Vec::new();
+        let sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo {
+                    mag_filter: vk::Filter::NEAREST,
+                    min_filter: vk::Filter::NEAREST,
+                    mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+                    address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    ..Default::default()
+                },
+                None,
+            )
+        }
+        .unwrap();
+        CompiledRenderGraph{
+            sampler,
+            image_size: vk::Extent2D {
+                width: image_width,
+                height: image_height,
+            },
+            execution_order,
+            image_states: tracked_image_states,
+            device,
+            depth: None, 
+        }
 
-        //NOTE:  Emit Commands
-        for &pipeline_index in &execution_order {
+    }
+
+    pub fn commands(&mut self, graph: &RenderGraph) -> Vec<GraphCommand> {
+        for image in &mut self.image_states {
+            image.initialized = false;
+        }
+
+        let mut commands = Vec::new();
+        for &pipeline_index in &self.execution_order {
             let pipeline = &graph.pipelines[pipeline_index];
 
             let mut color_attachments = Vec::new();
@@ -583,7 +605,7 @@ impl CompiledRenderGraph {
             //BUG: if a pipeline reads and writes the same thing, this will break, but cycle
             //detection will catch that, so until thats needed its fine
             for write in pipeline.writes.iter() {
-                let state = &mut tracked_image_states[write.id.arr_idx];
+                let state = &mut self.image_states[write.id.arr_idx];
                 //PERF: this should come from either reflection or from user declaration on the
                 //.write, but im too lazy
                 let (dst_stage, dst_access) = match (
@@ -627,7 +649,7 @@ impl CompiledRenderGraph {
                     vk::ImageAspectFlags::COLOR
                 };
                 if state.current_layout != dst_layout {
-                    if pipeline.pipeline.is_compute && !state.initialized{
+                    if pipeline.pipeline.is_compute  {
                         commands.push(GraphCommand::ImageBarrier {
                             image_id: write.id,
                             src_layout: state.current_layout,
@@ -687,14 +709,14 @@ impl CompiledRenderGraph {
                         panic!("only one depth attachment allowed");
                     }
                     depth_attachments = Some(RenderingAttachmentInfo {
-                        view: state.image.get_view(),
+                        image: state.image_id,
                         initial_layout: state.current_layout,
                         load_op,
                         store_op: vk::AttachmentStoreOp::STORE,
                     });
                 } else {
                     color_attachments.push(RenderingAttachmentInfo {
-                        view: state.image.get_view(),
+                        image: state.image_id,
                         initial_layout: state.current_layout,
                         load_op,
                         store_op: vk::AttachmentStoreOp::STORE,
@@ -703,7 +725,7 @@ impl CompiledRenderGraph {
             }
 
             for read_write in &pipeline.read_writes {
-                let state = &mut tracked_image_states[read_write.id.arr_idx];
+                let state = &mut self.image_states[read_write.id.arr_idx];
                 let (dst_layout, dst_stage, dst_access) = if pipeline.pipeline.is_compute {
                     (
                         vk::ImageLayout::GENERAL,
@@ -755,7 +777,7 @@ impl CompiledRenderGraph {
                 // depth attachment binding is graphics only
                 if !pipeline.pipeline.is_compute && is_depth_format(state.format) {
                     depth_attachments = Some(RenderingAttachmentInfo {
-                        view: state.image.get_view(),
+                        image: state.image_id,
                         initial_layout: dst_layout,
                         load_op: vk::AttachmentLoadOp::LOAD,
                         store_op: vk::AttachmentStoreOp::STORE,
@@ -764,7 +786,7 @@ impl CompiledRenderGraph {
             }
 
             for read in &pipeline.reads {
-                let state = &mut tracked_image_states[read.id.arr_idx];
+                let state = &mut self.image_states[read.id.arr_idx];
                 let (dst_layout, dst_stage, dst_access) = if pipeline.pipeline.is_compute {
                     (
                         vk::ImageLayout::GENERAL,
@@ -812,7 +834,9 @@ impl CompiledRenderGraph {
                 // depth attachment binding is graphics only
                 if !pipeline.pipeline.is_compute && is_depth_format(state.format) {
                     depth_attachments = Some(RenderingAttachmentInfo {
-                        view: state.image.get_view(),
+
+                        image: state.image_id,
+
                         initial_layout: dst_layout,
                         load_op: vk::AttachmentLoadOp::LOAD,
                         store_op: vk::AttachmentStoreOp::NONE,
@@ -839,48 +863,25 @@ impl CompiledRenderGraph {
                 commands.push(GraphCommand::EndRendering);
             }
         }
-        let sampler = unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo {
-                    mag_filter: vk::Filter::NEAREST,
-                    min_filter: vk::Filter::NEAREST,
-                    mipmap_mode: vk::SamplerMipmapMode::NEAREST,
-                    address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                    ..Default::default()
-                },
-                None,
-            )
-        }
-        .unwrap();
-
-        dbg!(&commands);
-        CompiledRenderGraph {
-            sampler,
-            image_size: vk::Extent2D {
-                width: image_width,
-                height: image_height,
-            },
-            commands,
-            execution_order,
-            image_states: tracked_image_states,
-            device,
-            depth: graph.depth,
-        }
+        commands
     }
-    pub fn get_image_from_id(&self, id: &ImageId) -> vk::Image {
+    pub fn get_image_from_id(&self, id: &ImageId,
+        imported_images: &HashMap<ImageId, vk::Image>,
+        ) -> vk::Image {
         match &self.image_states[id.arr_idx].image {
             TrackedImageStorage::Owned(image) => image.image,
-            TrackedImageStorage::Imported { image, .. } => *image,
+            TrackedImageStorage::Imported  => *imported_images.get(id).unwrap(),
         }
     }
-    pub fn get_view_from_id(&self, id: &ImageId) -> vk::ImageView {
+    pub fn get_view_from_id(&self, id: &ImageId,
+        imported_images: &HashMap<ImageId, vk::ImageView>,
+        ) -> vk::ImageView {
         match &self.image_states[id.arr_idx].image {
             TrackedImageStorage::Owned(image) => image.view,
-            TrackedImageStorage::Imported { view, .. } => *view,
+            TrackedImageStorage::Imported  => *imported_images.get(id).unwrap(),
         }
     }
+
 }
 
 fn is_depth_format(format: vk::Format) -> bool {
@@ -897,16 +898,16 @@ fn is_depth_format(format: vk::Format) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct RenderingAttachmentInfo {
-    view: vk::ImageView,
+    pub image: ImageId,
     load_op: vk::AttachmentLoadOp,
     store_op: vk::AttachmentStoreOp,
     initial_layout: vk::ImageLayout,
 }
 
 impl RenderingAttachmentInfo {
-    pub fn to_vulkan<'a>(&'a self) -> vk::RenderingAttachmentInfo<'a> {
+    pub fn to_vulkan<'a>(&'a self, view: vk::ImageView) -> vk::RenderingAttachmentInfo<'a> {
         vk::RenderingAttachmentInfo {
-            image_view: self.view,
+            image_view: view,
             image_layout: self.initial_layout,
             load_op: self.load_op,
             store_op: self.store_op,

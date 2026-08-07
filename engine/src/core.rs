@@ -261,6 +261,7 @@ impl Engine {
             frame.command_buffer,
             window_size_v,
             &mut self.resource_manager,
+            &self.swapchain,
             self.swapchain_image_index,
             self.frame_in_flight,
         );
@@ -595,13 +596,9 @@ impl App {
 impl ApplicationHandler for App {
     #[allow(clippy::too_many_lines)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // ───────────────────────────────────────────────────────
-        // 1) Window & input setup
-        // ───────────────────────────────────────────────────────
         if self.engine.is_some() {
             return;
         }
-        //HACK: magic number, i dont care right now
 
         self.engine = Some(Engine::init(event_loop));
 
@@ -659,7 +656,6 @@ impl ApplicationHandler for App {
                 .window
                 .request_redraw();
         }
-        let _world = &mut self.world;
 
         match event {
             WindowEvent::CloseRequested => {
@@ -761,12 +757,10 @@ impl ApplicationHandler for App {
                 window.set_cursor_visible(false);
                 self.world.get_mut_resource::<MouseState>().unwrap().locked = true;
             }
-            WindowEvent::Focused(focused) => {
-                if focused {
-                    let engine = self.engine.as_mut().unwrap();
-                    self.world.get_mut_resource::<Time>().unwrap().delta_time = 0.0;
-                    engine.prev_frame_end = Instant::now();
-                }
+            WindowEvent::Focused(focused) if focused => {
+                let engine = self.engine.as_mut().unwrap();
+                self.world.get_mut_resource::<Time>().unwrap().delta_time = 0.0;
+                engine.prev_frame_end = Instant::now();
             }
             _ => {}
         }

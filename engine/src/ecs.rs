@@ -418,7 +418,6 @@ pub struct ReqM<C>(pub C);
 pub struct NotM<C>(pub C);
 
 pub struct World {
-    pub name: String,
     entities: HashSet<EntityId>,
 
     component_storages: HashMap<TypeId, Box<dyn ErasedComponentStorage>>,
@@ -1035,14 +1034,10 @@ impl World {
             entities: HashSet::new(),
             component_storages: HashMap::new(),
             resource_storage: HashMap::new(),
-            name: "".to_string(),
 
             next_free: 0,
             last_dead: Vec::new(),
         }
-    }
-    pub fn name(&mut self, name: &str) {
-        self.name = name.to_string();
     }
     pub fn spawn_unnamed(&mut self) -> EntityId {
         let free = {

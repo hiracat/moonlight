@@ -4,6 +4,8 @@ debug/
 target/
 demo/
 
+# just some tools
+RadeonDeveloperToolSuite-2026-02-02-1757/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
@@ -30,4 +32,3 @@ core
 perf.data
 perf.data.old
 flamegraph.svg
-RadeonDeveloperToolSuite-2026-02-02-1757/

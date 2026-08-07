@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt,
+    fmt, ptr,
     sync::Arc,
 };
 
@@ -10,6 +10,7 @@ use rspirv_reflect as rr;
 
 use crate::{
     renderers::world::{
+        draw::FRAMES_IN_FLIGHT,
         pipelines::PipelineHandle,
         rendergraph::{CompiledRenderGraph, ImageId},
     },
@@ -46,9 +47,11 @@ pub struct DescriptorManager {
     pipeline_resources: HashMap<PipelineHandle, PipelineResources>,
     // for deduplication
     set_layout_cache: HashMap<SetKey, vk::DescriptorSetLayout>,
+    empty_set: vk::DescriptorSet,
+    empty_pool: vk::DescriptorPool,
     //PERF: this needs some help, like a smarter way of reusing descriptor sets, but i cant think of one, and its not an issue right now
-    descriptor_pool: vk::DescriptorPool,
-    uniform_memory: LinearAllocator,
+    descriptor_pool: [vk::DescriptorPool; FRAMES_IN_FLIGHT],
+    uniform_memory: [LinearAllocator; FRAMES_IN_FLIGHT],
     #[educe(Debug(ignore))]
     device: Arc<ash::Device>,
     descriptor_sets: Vec<vk::DescriptorSet>,
@@ -57,10 +60,12 @@ pub struct DescriptorManager {
 impl Drop for DescriptorManager {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.descriptor_pool.iter().for_each(|x| {
+                self.device.destroy_descriptor_pool(*x, None);
+            });
+            self.device.destroy_descriptor_pool(self.empty_pool, None);
 
-            for (_, layout) in self.set_layout_cache.iter() {
+            for layout in self.set_layout_cache.values() {
                 self.device.destroy_descriptor_set_layout(*layout, None);
             }
         }
@@ -96,7 +101,7 @@ impl DescriptorManager {
             },
         ];
 
-        let descriptor_pool = unsafe {
+        let descriptor_pools = std::array::from_fn(|_| unsafe {
             device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo {
@@ -108,14 +113,58 @@ impl DescriptorManager {
                     None,
                 )
                 .unwrap()
+        });
+
+        let mut set_layout_cache = HashMap::new();
+        let empty_layout = set_layout_cache
+            .entry(SetKey { bindings: vec![] })
+            .or_insert_with(|| unsafe {
+                device
+                    .create_descriptor_set_layout(
+                        &vk::DescriptorSetLayoutCreateInfo {
+                            binding_count: 0,
+                            p_bindings: ptr::null(),
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .unwrap()
+            });
+
+        let empty_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo {
+                        max_sets: 1,
+                        pool_size_count: 0, // no actual descriptors needed — layout has 0 bindings
+                        p_pool_sizes: ptr::null(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+        let empty_set = unsafe {
+            device
+                .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
+                    descriptor_pool: empty_pool, // any pool works, it's never written
+                    descriptor_set_count: 1,
+                    p_set_layouts: empty_layout,
+                    ..Default::default()
+                })
+                .unwrap()[0]
         };
 
         Self {
+            empty_set,
+            empty_pool,
             pipeline_resources: HashMap::new(),
-            set_layout_cache: HashMap::new(),
-            descriptor_pool,
+            set_layout_cache,
+            descriptor_pool: descriptor_pools,
             // give it 64 kb
-            uniform_memory: LinearAllocator::create(allocator, &device, 1024 * 64),
+            uniform_memory: core::array::from_fn(|_| {
+                LinearAllocator::create(allocator.clone(), &device, 1024 * 64)
+            }),
             descriptor_sets: Vec::new(),
             device,
         }
@@ -150,10 +199,12 @@ impl DescriptorManager {
     /// expensive to call then request_bind
     pub fn bind(
         &mut self,
+        frame_in_flight: usize,
         resource_manager: &mut ResourceManager,
         graph: &CompiledRenderGraph,
         pipeline: PipelineHandle,
         handles: &[BindingHandle],
+        imported_views: &HashMap<ImageId, vk::ImageView>,
     ) -> (vk::PipelineLayout, Vec<vk::DescriptorSet>) {
         let pipeline_resources = &self.pipeline_resources[&pipeline];
 
@@ -166,14 +217,6 @@ impl DescriptorManager {
         let mut set_indices: Vec<u32> = handles.iter().map(|h| h.set_index).collect();
         set_indices.sort_unstable();
         set_indices.dedup();
-        assert!(
-            set_indices
-                .iter()
-                .enumerate()
-                .all(|(i, &si)| si == i as u32),
-            "descriptor set indices must be contiguous starting from 0, got {:?}",
-            set_indices
-        );
 
         let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = set_indices
             .iter()
@@ -195,7 +238,7 @@ impl DescriptorManager {
         let descriptor_sets = unsafe {
             self.device
                 .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo {
-                    descriptor_pool: self.descriptor_pool,
+                    descriptor_pool: self.descriptor_pool[frame_in_flight],
                     descriptor_set_count: descriptor_set_layouts.len() as u32,
                     p_set_layouts: descriptor_set_layouts.as_ptr(),
                     ..Default::default()
@@ -221,7 +264,7 @@ impl DescriptorManager {
 
             match binding_data {
                 BindingData::Uniform { data } => {
-                    let (buffer, offset) = self.uniform_memory.push_raw(data);
+                    let (buffer, offset) = self.uniform_memory[frame_in_flight].push_raw(data);
 
                     buffer_infos.push(vk::DescriptorBufferInfo {
                         buffer,
@@ -257,7 +300,7 @@ impl DescriptorManager {
                     });
                 }
                 BindingData::RenderGraphImage { id } => {
-                    let view = graph.get_view_from_id(id);
+                    let view = graph.get_view_from_id(id, imported_views);
                     image_infos.push(vk::DescriptorImageInfo {
                         sampler: graph.sampler, // needs a sampler somehow
                         image_view: view,
@@ -265,7 +308,7 @@ impl DescriptorManager {
                     });
                 }
                 BindingData::StorageImage { id } => {
-                    let view = graph.get_view_from_id(id);
+                    let view = graph.get_view_from_id(id, imported_views);
                     image_infos.push(vk::DescriptorImageInfo {
                         sampler: vk::Sampler::null(), // needs a sampler somehow
                         image_view: view,
@@ -362,16 +405,30 @@ impl DescriptorManager {
             self.device.update_descriptor_sets(&writes, &[]);
         }
 
-        (pipeline_resources.pipeline_layout, descriptor_sets)
+        let max_set = *pipeline_resources.set_layouts.keys().max().unwrap();
+        // fill any gaps with empty sets
+        let full_descriptor_sets: Vec<vk::DescriptorSet> = (0..=max_set)
+            .map(|i| {
+                set_index_to_descriptor_set
+                    .get(&i)
+                    .copied()
+                    .unwrap_or(self.empty_set)
+            })
+            .collect();
+
+        (pipeline_resources.pipeline_layout, full_descriptor_sets)
     }
-    pub fn begin_frame(&mut self) {
-        self.uniform_memory.reset();
+    pub fn begin_frame(&mut self, frame_in_flight: usize) {
+        self.uniform_memory[frame_in_flight].reset();
         unsafe {
             self.device
-                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+                .reset_descriptor_pool(
+                    self.descriptor_pool[frame_in_flight],
+                    vk::DescriptorPoolResetFlags::empty(),
+                )
                 .unwrap();
         }
-        for (_handle, resources) in self.pipeline_resources.iter_mut() {
+        for resources in self.pipeline_resources.values_mut() {
             resources.requested_bind_cmds.clear();
         }
     }
@@ -459,10 +516,15 @@ impl DescriptorManager {
             set_layouts.insert(*set_index, layout);
         }
 
+        let max_set = *merged_sets.keys().max().unwrap();
+        let empty_binding = self.set_layout_cache.get(&SetKey { bindings: vec![] });
+        let empty_layout = empty_binding.as_ref().unwrap();
+
+        for i in 0..=max_set {
+            set_layouts.entry(i).or_insert(**empty_layout);
+        }
         let ordered_layouts: Vec<vk::DescriptorSetLayout> =
-            (0..=*merged_sets.keys().max().unwrap())
-                .map(|i| set_layouts[&i])
-                .collect();
+            (0..=max_set).map(|i| set_layouts[&i]).collect();
 
         let pipeline_layout = unsafe {
             self.device
@@ -556,10 +618,14 @@ impl DescriptorManager {
             set_layouts.insert(*set_index, layout);
         }
 
+        let empty_binding = self.set_layout_cache.get(&SetKey { bindings: vec![] });
+        let empty_layout = empty_binding.as_ref().unwrap();
+        let max_set = *merged_sets.keys().max().unwrap();
+        for i in 0..=max_set {
+            set_layouts.entry(i).or_insert(**empty_layout);
+        }
         let ordered_layouts: Vec<vk::DescriptorSetLayout> =
-            (0..=*merged_sets.keys().max().unwrap())
-                .map(|i| set_layouts[&i])
-                .collect();
+            (0..=max_set).map(|i| set_layouts[&i]).collect();
 
         let pipeline_layout = unsafe {
             self.device
@@ -729,6 +795,7 @@ impl DescriptorWriteBuilder<'_> {
         descriptor_set
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_ssbo(
         &mut self,
         resource_manager: &mut ResourceManager,

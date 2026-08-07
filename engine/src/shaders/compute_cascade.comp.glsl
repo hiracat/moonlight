@@ -21,6 +21,7 @@ struct MeshInfo {
     vec4 aabb_local_min;
     vec4 aabb_local_max;
     mat4 local_to_world;
+    mat4 world_to_local;
 };
 
 layout(set = 2, binding = 0) uniform RadianceConfigUBO {
@@ -319,14 +320,16 @@ void main() {
     for (int i = 0; i < config.mesh_count; i++) {
         MeshInfo mesh_info = config.meshes[i];
 
-        vec4 world_aabb_max = mesh_info.local_to_world * mesh_info.aabb_local_max;
-        vec4 world_aabb_min = mesh_info.local_to_world * mesh_info.aabb_local_min;
-
-        // IF THE RAY MISSES THE AABB FOR THE MESH  SKIP THE MESH
-        // float aabb_hit = intersectAABB(ray, world_aabb_min.xyz, world_aabb_max.xyz);
-        // if (aabb_hit >= closest) {
-        //     continue;
-        // }
+        mat4 inv              = mesh_info.world_to_local;
+        vec3 local_ray_origin = (inv * vec4(ray.origin, 1.0)).xyz;
+        vec3 local_ray_dir    = (inv * vec4(ray.direction, 0.0)).xyz;
+        // note: don't normalize local_ray_dir, the scale needs to be preserved
+        // so that the t values are in world space units
+        Ray   local_ray = Ray(local_ray_origin, local_ray_dir);
+        float aabb_hit  = intersectAABB(local_ray, mesh_info.aabb_local_min.xyz, mesh_info.aabb_local_max.xyz);
+        if (aabb_hit >= closest) {
+            continue;
+        }
 
         // CHECK THE RAY AGAINST EVERY TRIANGLE, (should replace with a bvh probably, am lazy)
         for (int j = 0; j < mesh_info.index_count; j += 3) {
@@ -355,12 +358,12 @@ void main() {
             color = vec4(lights.point_light_colors[i].xyz, 0.0);
         }
     }
-    float d = rayHeightmapIntersect(ray, height_map, ubo.size, ubo.height, config.interval_start, config.interval_end);
+    // float d = rayHeightmapIntersect(ray, height_map, ubo.size, ubo.height, config.interval_start, config.interval_end);
 
-    if (d < closest) {
-        closest = d;
-        color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission, no transmittance
-    }
+    // if (d < closest) {
+    //     closest = d;
+    //     color   = vec4(0.0, 0.0, 0.0, 0.0); // opaque, no emission, no transmittance
+    // }
 
     uint above_sqrt_ray = config.sqrt_ray_count * 2;
 

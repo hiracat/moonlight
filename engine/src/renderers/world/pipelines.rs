@@ -13,23 +13,20 @@ use bytemuck::bytes_of;
 use educe::Educe;
 use egui::TextBuffer;
 use rspirv_reflect::{self as rr, Reflection};
-use tracing::trace;
 use ultraviolet::{Vec3, Vec4};
 
 use crate::core::TerrainMap;
 use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
 use crate::renderers::world::descriptors::{BindingData, DescriptorManager};
-use crate::renderers::world::draw::{
-    ComputeDispatch, DrawStyle, FRAMES_IN_FLIGHT, PipelineJob, alloc_buffers,
-};
+use crate::renderers::world::draw::{ComputeDispatch, DrawStyle, PipelineJob, alloc_buffers};
 use crate::renderers::world::rendergraph::{ImageDesc, ImageId, ImageVersion, RenderGraph};
 use crate::resources::{
     Animated, AnimatedVertex, IsVertex, ResourceManager, SsboBinding, SsboHandle, Vertex,
 };
-use crate::resources::{Material, Mesh, Skybox};
+use crate::resources::{Material, Mesh};
 use crate::ubo::{
     CameraInverseUBO, CameraUBO, DirectionalLightUBO, LightDataUBO, MaterialUBO, MeshInfo,
-    ModelUBO, PointLightUBO, RadianceConfigUBO, RadianceInfoUBO, TerrainUBO,
+    ModelUBO, RadianceConfigUBO, RadianceInfoUBO, TerrainUBO,
 };
 use crate::vulkan::SharedAllocator;
 use crate::{
@@ -197,12 +194,7 @@ pub fn create_builtin_graphics_pipelines(
     swapchain_image_format: vk::Format,
     depth_format: vk::Format,
     color_attachment_formats: &[vk::Format],
-) -> (
-    RenderGraph,
-    PipelineManager,
-    [DescriptorManager; FRAMES_IN_FLIGHT],
-    ImageId,
-) {
+) -> (RenderGraph, PipelineManager, DescriptorManager, ImageId) {
     let geometry_desc = GraphicsPipelineDesc {
         tesselation_state: None,
         viewport_state: None,
@@ -216,7 +208,7 @@ pub fn create_builtin_graphics_pipelines(
             alpha_to_one_enable: true,
         },
         raster_state: RasterState {
-            cull_mode: vk::CullModeFlags::BACK,
+            cull_mode: vk::CullModeFlags::NONE,
             front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             line_width: 1.0,
             depth_clamp_enable: false,
@@ -466,19 +458,14 @@ pub fn create_builtin_graphics_pipelines(
     let invert_comp = pipeline_manager.allocate_compute_handle("invert");
 
     // --- build descriptor managers, get layouts ---
-    let mut descriptor_managers: Vec<DescriptorManager> = (0..FRAMES_IN_FLIGHT)
-        .map(|_| DescriptorManager::new(device.clone(), allocator.clone()))
-        .collect();
+    let mut descriptor_manager: DescriptorManager =
+        DescriptorManager::new(device.clone(), allocator.clone());
 
     let mut register = |handle: PipelineHandle,
                         vert: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
                         frag: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>|
      -> vk::PipelineLayout {
-        let layout = descriptor_managers[0].add_pipeline(handle, vert.clone(), frag.clone());
-        for dm in descriptor_managers.iter_mut().skip(1) {
-            dm.add_pipeline(handle, vert.clone(), frag.clone());
-        }
-        layout
+        descriptor_manager.add_pipeline(handle, vert.clone(), frag.clone())
     };
 
     let static_geometry_layout = register(
@@ -506,10 +493,7 @@ pub fn create_builtin_graphics_pipelines(
     let mut register_comp = |handle: PipelineHandle,
                              comp: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>|
      -> vk::PipelineLayout {
-        let layout = descriptor_managers[0].add_compute(handle, comp.clone());
-        for dm in descriptor_managers.iter_mut().skip(1) {
-            dm.add_compute(handle, comp.clone());
-        }
+        let layout = descriptor_manager.add_compute(handle, comp.clone());
         layout
     };
     let invert_layout = register_comp(invert_comp, invert_data.1);
@@ -833,12 +817,14 @@ pub fn create_builtin_graphics_pipelines(
                   descriptor_manager: &mut DescriptorManager,
                   handle: PipelineHandle,
                   extent| {
-                let bindings = vec![descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::StorageImage { id: albedo_id },
-                )];
+                let bindings = vec![
+                //     descriptor_manager.request_bind(
+                //     handle,
+                //     0,
+                //     0,
+                //     BindingData::StorageImage { id: albedo_id },
+                // )
+                ];
                 let x = extent.width.div_ceil(8);
                 let y = extent.height.div_ceil(8);
                 let dispatch = ComputeDispatch {
@@ -1251,6 +1237,7 @@ pub fn create_builtin_graphics_pipelines(
                                         index_count: mesh.index_count,
                                         _pad: 0,
                                         local_to_world: ModelUBO::from(transform).model,
+                                        world_to_local: ModelUBO::from(transform).model.inversed(),
                                         aabb_local_min: aabb_min.into_homogeneous_point(),
                                         aabb_local_max: aabb_max.into_homogeneous_point(),
                                     });
@@ -1372,20 +1359,20 @@ pub fn create_builtin_graphics_pipelines(
                     };
 
                     let mut bindings = vec![
-                        descriptor_manager.request_bind(
-                            handle,
-                            0,
-                            0,
-                            BindingData::Texture { texture: map.map },
-                        ),
-                        descriptor_manager.request_bind(
-                            handle,
-                            0,
-                            1,
-                            BindingData::Uniform {
-                                data: bytes_of(&TerrainUBO::from(map)).to_vec(),
-                            },
-                        ),
+                        // descriptor_manager.request_bind(
+                        //     handle,
+                        //     0,
+                        //     0,
+                        //     BindingData::Texture { texture: map.map },
+                        // ),
+                        // descriptor_manager.request_bind(
+                        //     handle,
+                        //     0,
+                        //     1,
+                        //     BindingData::Uniform {
+                        //         data: bytes_of(&TerrainUBO::from(map)).to_vec(),
+                        //     },
+                        // ),
                         descriptor_manager.request_bind(
                             handle,
                             1,
@@ -1435,7 +1422,7 @@ pub fn create_builtin_graphics_pipelines(
                         },
                     ));
 
-                    // 4x4x4 chunk for each workgroup
+                    // 64x1 chunk for each workgroup
                     PipelineJob::Compute(ComputeDispatch {
                         x: (probe_count_x
                             * probe_count_y
@@ -1644,12 +1631,7 @@ pub fn create_builtin_graphics_pipelines(
     //     .reads_depth(&depth)
     //     .build();
 
-    (
-        graph,
-        pipeline_manager,
-        descriptor_managers.try_into().unwrap(),
-        final_color.id,
-    )
+    (graph, pipeline_manager, descriptor_manager, final_color.id)
 }
 
 /*--------------PIPELINE CREATION HELPERS-------------

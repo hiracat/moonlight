@@ -15,17 +15,9 @@ use gpu_allocator::vulkan::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io::Write, ptr};
-use tracing::{instrument, trace};
+use tracing::instrument;
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
-
-//HACK: this is bad, but i just wanna get it to work, ill fix it later
-pub struct Ids {
-    pub albedo: ImageId,
-    pub position: ImageId,
-    pub normal: ImageId,
-    pub final_color: ImageId,
-}
 
 pub struct WorldRenderer {
     swapchain_image_id: ImageId,
@@ -33,10 +25,10 @@ pub struct WorldRenderer {
     // indexed by PipelineHandle
     pub pipeline_manager: PipelineManager,
     pub rendergraph_config: RenderGraph,
-    // one per swapchain image
-    pub graph: Vec<CompiledRenderGraph>,
+    //ir to quicly convert rendergraph into commands
+    pub graph: CompiledRenderGraph,
 
-    pub descriptor_manager: [DescriptorManager; FRAMES_IN_FLIGHT],
+    pub descriptor_manager: DescriptorManager,
 
     device: Arc<ash::Device>,
 }
@@ -68,7 +60,7 @@ pub struct ComputeDispatch {
 }
 
 impl WorldRenderer {
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn record_commands(
         &mut self,
         world: &mut World,
@@ -76,10 +68,23 @@ impl WorldRenderer {
         command_buffer: vk::CommandBuffer,
         window_size: vk::Extent2D,
         resource_manager: &mut ResourceManager,
+        swapchain_resources: &SwapchainResources,
         swapchain_image_index: usize,
         frame_in_flight: usize,
     ) {
-        self.descriptor_manager[frame_in_flight].begin_frame();
+        self.descriptor_manager.begin_frame(frame_in_flight);
+
+        let mut imported_images: HashMap<ImageId, vk::Image> = HashMap::new();
+        imported_images.insert(
+            self.swapchain_image_id,
+            swapchain_resources.swapchain_images[swapchain_image_index],
+        );
+        let mut imported_views: HashMap<ImageId, vk::ImageView> = HashMap::new();
+        imported_views.insert(
+            self.swapchain_image_id,
+            swapchain_resources.swapchain_image_views[swapchain_image_index],
+        );
+
         let jobs =
             self.setup_gpu_build_draw_jobs(resource_manager, world, frame_in_flight, window_size);
         let scissor = vk::Rect2D {
@@ -95,8 +100,8 @@ impl WorldRenderer {
             min_depth: 0.0,
         };
 
-        let graph = &self.graph[swapchain_image_index];
-        for cmd in &graph.commands {
+        let graph = &mut self.graph;
+        for cmd in &graph.commands(&self.rendergraph_config) {
             match cmd {
                 GraphCommand::ClearImage {
                     image,
@@ -106,7 +111,7 @@ impl WorldRenderer {
                     unsafe {
                         self.device.cmd_clear_color_image(
                             command_buffer,
-                            graph.get_image_from_id(image),
+                            graph.get_image_from_id(image, &imported_images),
                             *image_layout,
                             &vk::ClearColorValue::default(),
                             &[*range],
@@ -117,8 +122,10 @@ impl WorldRenderer {
                     color_attachments,
                     depth,
                 } => unsafe {
-                    let color_attachments_vk: Vec<_> =
-                        color_attachments.iter().map(|x| x.to_vulkan()).collect();
+                    let color_attachments_vk: Vec<_> = color_attachments
+                        .iter()
+                        .map(|x| x.to_vulkan(graph.get_view_from_id(&x.image, &imported_views)))
+                        .collect();
 
                     device.cmd_begin_rendering(
                         command_buffer,
@@ -132,7 +139,9 @@ impl WorldRenderer {
                             p_color_attachments: color_attachments_vk.as_ptr(),
                             p_depth_attachment: &depth
                                 .as_ref()
-                                .map(|x| x.to_vulkan())
+                                .map(|x| {
+                                    x.to_vulkan(graph.get_view_from_id(&x.image, &imported_views))
+                                })
                                 .unwrap_or(vk::RenderingAttachmentInfo::default()),
                             ..Default::default()
                         },
@@ -152,7 +161,7 @@ impl WorldRenderer {
                     aspect_mask,
                 } => {
                     let image_barriers = [vk::ImageMemoryBarrier2 {
-                        image: graph.get_image_from_id(image_id),
+                        image: graph.get_image_from_id(image_id, &imported_images),
                         old_layout: *src_layout,
                         new_layout: *dst_layout,
                         src_stage_mask: *src_stage,
@@ -191,13 +200,14 @@ impl WorldRenderer {
                     match job_list {
                         PipelineJob::Graphics(draw_jobs) => {
                             for job in draw_jobs {
-                                let (pipeline_layout, set_layout) =
-                                    &self.descriptor_manager[frame_in_flight].bind(
-                                        resource_manager,
-                                        graph,
-                                        *pipeline_handle,
-                                        &job.descriptor_sets,
-                                    );
+                                let (pipeline_layout, set_layout) = &self.descriptor_manager.bind(
+                                    frame_in_flight,
+                                    resource_manager,
+                                    graph,
+                                    *pipeline_handle,
+                                    &job.descriptor_sets,
+                                    &imported_views,
+                                );
                                 unsafe {
                                     device.cmd_bind_descriptor_sets(
                                         command_buffer,
@@ -242,13 +252,14 @@ impl WorldRenderer {
                             }
                         }
                         PipelineJob::Compute(compute_dispatch) => {
-                            let (pipeline_layout, descriptor_sets) =
-                                &self.descriptor_manager[frame_in_flight].bind(
-                                    resource_manager,
-                                    graph,
-                                    *pipeline_handle,
-                                    &compute_dispatch.bindings,
-                                );
+                            let (pipeline_layout, descriptor_sets) = &self.descriptor_manager.bind(
+                                frame_in_flight,
+                                resource_manager,
+                                graph,
+                                *pipeline_handle,
+                                &compute_dispatch.bindings,
+                                &imported_views,
+                            );
                             unsafe {
                                 device.cmd_bind_descriptor_sets(
                                     command_buffer,
@@ -292,7 +303,7 @@ impl WorldRenderer {
             let job_set = (pipeline.write_data_and_build_draw_jobs)(
                 world,
                 resource_manager,
-                &mut self.descriptor_manager[frame_in_flight],
+                &mut self.descriptor_manager,
                 handle,
                 extent,
             );
@@ -317,33 +328,27 @@ impl WorldRenderer {
                 &color_formats,
             );
 
-        let mut graphs = Vec::new();
-        for i in 0..swapchain_resources.swapchain_images.len() {
-            let mut imported_images = HashMap::new();
-            imported_images.insert(
-                final_color,
-                ImportedImageBinding {
-                    pre_initialized: false,
-                    image: swapchain_resources.swapchain_images[i],
-                    view: swapchain_resources.swapchain_image_views[i],
-                    current_layout: vk::ImageLayout::UNDEFINED,
-                    last_access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-                    last_stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
-                },
-            );
-            graphs.push(graph.compile(
-                context.device.clone(),
-                context.allocator(),
-                &imported_images,
-                swapchain_resources.image_size.width,
-                swapchain_resources.image_size.height,
-            ));
-        }
+        let mut imported_images = HashMap::new();
+        imported_images.insert(
+            final_color,
+            ImportedImageBinding {
+                current_layout: vk::ImageLayout::UNDEFINED,
+                last_access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                last_stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
+            },
+        );
+        let compiled_graph = graph.compile(
+            context.device.clone(),
+            context.allocator(),
+            &imported_images,
+            swapchain_resources.image_size.width,
+            swapchain_resources.image_size.height,
+        );
 
         WorldRenderer {
             descriptor_manager: descriptor_managers,
             swapchain_image_id: final_color,
-            graph: graphs,
+            graph: compiled_graph,
             rendergraph_config: graph,
             device: context.device.clone(),
             pipeline_manager: pipelines,
@@ -355,30 +360,24 @@ impl WorldRenderer {
         context: &VulkanContext,
         swapchain_resources: &SwapchainResources,
     ) {
-        let mut graphs = Vec::new();
-        for i in 0..swapchain_resources.swapchain_images.len() {
-            let mut imported_images = HashMap::new();
-            imported_images.insert(
-                self.swapchain_image_id,
-                ImportedImageBinding {
-                    pre_initialized: false,
-                    image: swapchain_resources.swapchain_images[i],
-                    view: swapchain_resources.swapchain_image_views[i],
-                    current_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    last_access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-                    last_stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
-                },
-            );
-            graphs.push(self.rendergraph_config.compile(
-                context.device.clone(),
-                context.allocator(),
-                &imported_images,
-                swapchain_resources.image_size.width,
-                swapchain_resources.image_size.height,
-            ));
-        }
+        let mut imported_images = HashMap::new();
+        imported_images.insert(
+            self.swapchain_image_id,
+            ImportedImageBinding {
+                current_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                last_access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                last_stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
+            },
+        );
+        let graph = self.rendergraph_config.compile(
+            context.device.clone(),
+            context.allocator(),
+            &imported_images,
+            swapchain_resources.image_size.width,
+            swapchain_resources.image_size.height,
+        );
 
-        self.graph = graphs;
+        self.graph = graph;
     }
 }
 

@@ -108,7 +108,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     );
     let directional = DirectionalLight::create(
         Vec3::new(200.0, 10.0, 0.0),
-        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(0.0, 0.0, 0.0),
         0.0,
@@ -171,8 +171,8 @@ fn start(world: &mut World, engine: &mut Engine) {
         .add(
             fox,
             Controllable {
-                speed: 7.0,
-                sprint_speed: 20.0,
+                speed: 2.0,
+                sprint_speed: 6.0,
             },
         )
         .unwrap();
@@ -328,12 +328,12 @@ fn start(world: &mut World, engine: &mut Engine) {
     // lights
     let blue_light = world.spawn("blue_light");
     world
-        .add(blue_light, PointLight::new(Vec3::new(1.0, 1.4, 5.0), 2.0))
+        .add(blue_light, PointLight::new(Vec3::new(0.2, 1.0, 0.7), 1.0))
         .unwrap();
     world
         .add(
             blue_light,
-            Transform::from(Some(Vec3::new(8.0, 50.0, -5.0)), None, None),
+            Transform::from(Some(Vec3::new(5.0, 41.0, 0.0)), None, None),
         )
         .unwrap();
 

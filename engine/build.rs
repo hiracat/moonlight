@@ -28,7 +28,10 @@ fn main() {
 
         let reflect_path = output_dir.join(format!("{filename}.reflect.spv"));
 
-        for (extra_flags, out) in [(&["-gVS"][..], &output_path), (&[][..], &reflect_path)] {
+        for (extra_flags, out, optimize) in [
+            (&["-gVS"][..], &output_path, true),
+            (&[][..], &reflect_path, true),
+        ] {
             let result = Command::new("glslangValidator")
                 .args(extra_flags)
                 .args([
@@ -43,19 +46,28 @@ fn main() {
                 ])
                 .output()
                 .expect("failed to run glslangValidator — is it installed?");
-
             let stdout = String::from_utf8_lossy(&result.stdout);
             let stderr = String::from_utf8_lossy(&result.stderr);
-
             if !result.status.success() {
                 eprintln!("{stdout}");
                 eprintln!("{stderr}");
                 panic!("glslangValidator failed for {}", path.display());
             }
-
             for line in stdout.lines() {
                 if line.contains("WARNING") {
                     println!("cargo:warning={line}");
+                }
+            }
+
+            if optimize {
+                let opt_result = Command::new("spirv-opt")
+                    .args(["-O", out.to_str().unwrap(), "-o", out.to_str().unwrap()])
+                    .output()
+                    .expect("failed to run spirv-opt — is it installed?");
+                if !opt_result.status.success() {
+                    let err = String::from_utf8_lossy(&opt_result.stderr);
+                    eprintln!("{err}");
+                    panic!("spirv-opt failed for {}", path.display());
                 }
             }
         }
