@@ -116,23 +116,23 @@ fn start(world: &mut World, engine: &mut Engine) {
     );
     let ambient = AmbientLight::create(Vec3::new(1.0, 1.0, 0.8), 0.35);
 
-    let heightmap = TerrainMap {
-        map: engine.resource_manager.create_texture(
-            "data/simple_heightmap.exr",
-            resources::TextureFormat::HeightF32,
-        ),
-        cpu_map: ImageReader::open("data/simple_heightmap.exr")
-            .unwrap()
-            .decode()
-            .unwrap()
-            .to_luma32f(),
-        size: 2000.0,
-        height: 300.0,
-        resolution: 1000,
-    };
+    // let heightmap = TerrainMap {
+    //     map: engine.resource_manager.create_texture(
+    //         "data/simple_heightmap.exr",
+    //         resources::TextureFormat::HeightF32,
+    //     ),
+    //     cpu_map: ImageReader::open("data/simple_heightmap.exr")
+    //         .unwrap()
+    //         .decode()
+    //         .unwrap()
+    //         .to_luma32f(),
+    //     size: 2000.0,
+    //     height: 300.0,
+    //     resolution: 10,
+    // };
 
     world.add_resource(UIStuff::default()).unwrap();
-    world.add_resource(heightmap).unwrap();
+    // world.add_resource(heightmap).unwrap();
     let config = Config::default();
     world.add_resource(config).unwrap();
 
@@ -160,7 +160,7 @@ fn start(world: &mut World, engine: &mut Engine) {
         .add(
             fox,
             Transform::from(
-                Some(Vec3::new(0.0, 42.0, 0.0)),
+                Some(Vec3::new(0.0, 3.0, 0.0)),
                 Some(Rotor3::identity()),
                 Some(Vec3::new(1.0, 1.0, 1.0)),
             ),
@@ -198,20 +198,11 @@ fn start(world: &mut World, engine: &mut Engine) {
 
     // ground
     let ground = world.spawn("ground");
-    // let ground_tex = engine.resource_manager.create_texture(
-    //     "data/models/textures/ground_roots.png",
-    //     resources::TextureFormat::Srgba,
-    // );
-
-    // world
-    //     .add(ground, Material::create(ground_tex, None))
-    //     .unwrap();
-
     world
         .add(
             ground,
             Transform::from(
-                Some(Vec3::new(0.0, 40.0, 0.0)),
+                Some(Vec3::new(0.0, -2.0, 0.0)),
                 None,
                 Some(Vec3::new(1000.0, 1.0, 1000.0)),
             ),
@@ -237,93 +228,101 @@ fn start(world: &mut World, engine: &mut Engine) {
             )),
         )
         .unwrap();
+    // let ground_tex = engine.resource_manager.create_texture(
+    //     "data/models/textures/ground_roots.png",
+    //     resources::TextureFormat::Srgba,
+    // );
+
+    // world
+    //     .add(ground, Material::create(ground_tex, None))
+    //     .unwrap();
 
     // cube 1
-    let cube1 = world.spawn("cube1");
-    world
-        .add(
-            cube1,
-            Transform::from(
-                Some(Vec3::new(-5.0, 42.0, 0.0)),
-                None,
-                Some(Vec3::new(1.0, 1.0, 1.0)),
-            ),
-        )
-        .unwrap();
-    world.add(cube1, RigidBody::new()).unwrap();
-    world
-        .add(
-            cube1,
-            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
-        )
-        .unwrap();
-    world
-        .add(
-            cube1,
-            engine
-                .resource_manager
-                .load_gltf_asset("data/models/large_cube.glb")
-                .0,
-        )
-        .unwrap();
-
-    // cube 2
-    let cube2 = world.spawn("cube2");
-    world
-        .add(
-            cube2,
-            Transform::from(
-                Some(Vec3::new(4.0, 45.0, -3.0)),
-                None,
-                Some(Vec3::new(1.5, 1.5, 1.5)),
-            ),
-        )
-        .unwrap();
-    world.add(cube2, RigidBody::new()).unwrap();
-    world
-        .add(
-            cube2,
-            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
-        )
-        .unwrap();
-    world
-        .add(
-            cube2,
-            engine
-                .resource_manager
-                .load_gltf_asset("data/models/large_cube.glb")
-                .0,
-        )
-        .unwrap();
-
-    // cube 3
-    let cube3 = world.spawn("cube3");
-    world
-        .add(
-            cube3,
-            Transform::from(
-                Some(Vec3::new(0.0, 41.0, 6.0)),
-                None,
-                Some(Vec3::new(0.8, 0.8, 0.8)),
-            ),
-        )
-        .unwrap();
-    world.add(cube3, RigidBody::new()).unwrap();
-    world
-        .add(
-            cube3,
-            Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
-        )
-        .unwrap();
-    world
-        .add(
-            cube3,
-            engine
-                .resource_manager
-                .load_gltf_asset("data/models/large_cube.glb")
-                .0,
-        )
-        .unwrap();
+    // let cube1 = world.spawn("cube1");
+    // world
+    //     .add(
+    //         cube1,
+    //         Transform::from(
+    //             Some(Vec3::new(-5.0, 4.0, 0.0)),
+    //             None,
+    //             Some(Vec3::new(1.0, 1.0, 1.0)),
+    //         ),
+    //     )
+    //     .unwrap();
+    // world.add(cube1, RigidBody::new()).unwrap();
+    // world
+    //     .add(
+    //         cube1,
+    //         Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         cube1,
+    //         engine
+    //             .resource_manager
+    //             .load_gltf_asset("data/models/large_cube.glb")
+    //             .0,
+    //     )
+    //     .unwrap();
+    //
+    // // cube 2
+    // let cube2 = world.spawn("cube2");
+    // world
+    //     .add(
+    //         cube2,
+    //         Transform::from(
+    //             Some(Vec3::new(4.0, 5.0, -3.0)),
+    //             None,
+    //             Some(Vec3::new(1.5, 1.5, 1.5)),
+    //         ),
+    //     )
+    //     .unwrap();
+    // world.add(cube2, RigidBody::new()).unwrap();
+    // world
+    //     .add(
+    //         cube2,
+    //         Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         cube2,
+    //         engine
+    //             .resource_manager
+    //             .load_gltf_asset("data/models/large_cube.glb")
+    //             .0,
+    //     )
+    //     .unwrap();
+    //
+    // // cube 3
+    // let cube3 = world.spawn("cube3");
+    // world
+    //     .add(
+    //         cube3,
+    //         Transform::from(
+    //             Some(Vec3::new(0.0, 1.0, 6.0)),
+    //             None,
+    //             Some(Vec3::new(0.8, 0.8, 0.8)),
+    //         ),
+    //     )
+    //     .unwrap();
+    // world.add(cube3, RigidBody::new()).unwrap();
+    // world
+    //     .add(
+    //         cube3,
+    //         Collider::Obb(Obb::new(Vec3::new(2.0, 2.0, 2.0), Vec3::zero())),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         cube3,
+    //         engine
+    //             .resource_manager
+    //             .load_gltf_asset("data/models/large_cube.glb")
+    //             .0,
+    //     )
+    //     .unwrap();
 
     // lights
     let blue_light = world.spawn("blue_light");
@@ -333,23 +332,23 @@ fn start(world: &mut World, engine: &mut Engine) {
     world
         .add(
             blue_light,
-            Transform::from(Some(Vec3::new(5.0, 41.0, 0.0)), None, None),
+            Transform::from(Some(Vec3::new(0.0, 0.0, 0.0)), None, None),
         )
         .unwrap();
 
-    let warm_light = world.spawn("warm_light");
-    world
-        .add(
-            warm_light,
-            PointLight::new(Vec3::new(1.0 * 5.0, 0.7 * 5.0, 0.3 * 5.0), 1.0),
-        )
-        .unwrap();
-    world
-        .add(
-            warm_light,
-            Transform::from(Some(Vec3::new(-6.0, 46.0, 4.0)), None, None),
-        )
-        .unwrap();
+    // let warm_light = world.spawn("warm_light");
+    // world
+    //     .add(
+    //         warm_light,
+    //         PointLight::new(Vec3::new(1.0 * 5.0, 0.7 * 5.0, 0.3 * 5.0), 1.0),
+    //     )
+    //     .unwrap();
+    // world
+    //     .add(
+    //         warm_light,
+    //         Transform::from(Some(Vec3::new(-6.0, 6.0, 4.0)), None, None),
+    //     )
+    //     .unwrap();
     world.add_resource(TracingConfig::default()).unwrap();
 }
 
@@ -691,15 +690,16 @@ fn physics_update(world: &mut World, delta_time: f32) {
             }
         }
     }
-    let terrain = unsafe { &mut *(world_ptr) }
-        .get_resource::<TerrainMap>()
-        .unwrap();
-    for collider in collidable {
-        let distance = collider.1.0.position.y
-            - terrain.get_height_at(collider.1.0.position.x, collider.1.0.position.z);
-        if distance < 0.0 && collider.1.2.is_some() {
-            collider.1.0.position.y -= distance;
-            collision_penetrations.push((collider.0, Vec3::new(0.0, distance, 0.0)));
+    if let Some(terrain) = unsafe { &mut *(world_ptr) }.get_resource::<TerrainMap>() {
+        for collider in collidable {
+            let distance = collider.1.0.position.y
+                - terrain.get_height_at(collider.1.0.position.x, collider.1.0.position.z);
+
+            if distance < 0.0 && collider.1.2.is_some() {
+                collider.1.0.position.y -= distance;
+
+                collision_penetrations.push((collider.0, Vec3::new(0.0, distance, 0.0)));
+            }
         }
     }
 
@@ -731,8 +731,8 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let camera = *world.get_mut_resource::<Camera>().unwrap();
     let height = world
         .get_resource::<TerrainMap>()
-        .unwrap()
-        .get_height_at(camera.position.x, camera.position.z);
+        .map(|x| x.get_height_at(camera.position.x, camera.position.z))
+        .unwrap_or(f32::NEG_INFINITY);
     let camera = world.get_mut_resource::<Camera>().unwrap();
 
     let sensativity = 0.002;
@@ -773,21 +773,24 @@ fn player_update(world: &mut World, delta_time: f32) {
         fp_trap::enable();
     }
 
-    // first pass: get player position
+    // First pass: get player position.
     let player_pos = {
         let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>)>();
         let (_, (_, transform)) = binding.next().unwrap();
         transform.position
     };
 
-    // sample terrain while we have no other borrows
-    let (terrain_normal, terrain_height) = {
-        let terrainmap = world.get_resource::<TerrainMap>().unwrap();
-        (
-            terrainmap.get_normal_at(player_pos.x, player_pos.z),
-            terrainmap.get_height_at(player_pos.x, player_pos.z),
-        )
-    };
+    // Sample terrain if a TerrainMap exists.
+    // If there is no terrain map, fall back to flat ground.
+    let (terrain_normal, terrain_height) = world
+        .get_resource::<TerrainMap>()
+        .map(|terrainmap| {
+            (
+                terrainmap.get_normal_at(player_pos.x, player_pos.z),
+                terrainmap.get_height_at(player_pos.x, player_pos.z),
+            )
+        })
+        .unwrap_or((Vec3::unit_y(), player_pos.y));
 
     let keyboard = world
         .get_resource::<Keyboard>()
@@ -796,34 +799,45 @@ fn player_update(world: &mut World, delta_time: f32) {
 
     let mut delta_v = Vec3::zero();
     let mut jump = 0.0;
+
     let camera_rotation = world.get_resource::<Camera>().unwrap().rotation;
+
     let mut binding = world.query_mut::<(ReqM<Controllable>, ReqM<Transform>, ReqM<RigidBody>)>();
+
     let (_, (control, transform, rigidbody)) = binding.next().expect("player should exist!");
+
     let mut max_speed = control.speed;
 
     if keyboard.is_down(KeyCode::ShiftLeft) {
         max_speed = control.sprint_speed;
     }
+
     if keyboard.is_down(KeyCode::KeyW) {
         delta_v += Vec3::new(0.0, 0.0, -1.0);
     }
+
     if keyboard.is_down(KeyCode::KeyS) {
         delta_v += Vec3::new(0.0, 0.0, 1.0);
     }
+
     if keyboard.is_down(KeyCode::KeyD) {
         delta_v += Vec3::new(1.0, 0.0, 0.0);
     }
+
     if keyboard.is_down(KeyCode::KeyA) {
         delta_v += Vec3::new(-1.0, 0.0, 0.0);
     }
 
-    // BUG: allows the player to jump at the apex of their jump, but the period of time which the
-    // bug is viable to exploit is almost zero so not going to fix
+    // BUG: allows the player to jump at the apex of their jump,
+    // but the period of time which the bug is viable to exploit
+    // is almost zero so not going to fix.
     if keyboard.is_down(KeyCode::Space) && rigidbody.velocity.y.abs() < 0.00001 {
-        jump = 8.0
+        jump = 8.0;
     }
+
     delta_v = camera_rotation * delta_v;
 
+    // Don't allow camera pitch to affect horizontal movement.
     delta_v = Vec3 {
         x: delta_v.x,
         y: 0.0,
@@ -839,48 +853,54 @@ fn player_update(world: &mut World, delta_time: f32) {
     if delta_v != Vec3::zero() {
         let on_ground = (terrain_height - player_pos.y).abs() < 0.6;
         let n = terrain_normal.normalized();
-        trace!(?n);
-        // rotor 1: tilts from flat ground to terrain slope — only pitch/roll, no yaw
-        let tilt = if n.dot(Vec3::unit_y()) < -1.0 + 1e-6 {
-            // terrain is exactly upside down — rotate 180° around any horizontal axis
-            Rotor3::from_rotation_between(Vec3::unit_y(), Vec3::unit_x())
-                * Rotor3::from_rotation_between(Vec3::unit_x(), n)
-        } else {
-            Rotor3::from_rotation_between(Vec3::unit_y(), n)
-        };
-        let face_direction = {
-            // rotor 2: spins to face movement direction — only yaw, no pitch/roll
-            let forward = Vec3::new(0.0, 0.0, -1.0);
-            let yaw = if delta_v.dot(forward) < -1.0 + 1e-6 {
-                // moving exactly backwards — rotate 180° around Y
-                Rotor3::from_angle_plane(PI, Bivec3::from_normalized_axis(Vec3::unit_y()))
-            } else {
-                Rotor3::from_rotation_between(forward, delta_v)
-            };
 
-            if on_ground { tilt } else { Rotor3::identity() }
-        };
-
+        // Keep horizontal movement constrained to the ground plane.
         let horizontal_velocity = rigidbody.velocity - n * n.dot(rigidbody.velocity);
+
         let speed_remaining = (max_speed - horizontal_velocity.mag()).clamp(0.0, max_speed);
+
         let acceleration = 20.0;
 
-        trace!(?horizontal_velocity, speed_remaining, ?delta_v);
-        delta_v = if on_ground { tilt * delta_v } else { delta_v };
+        trace!(
+            ?horizontal_velocity,
+            speed_remaining,
+            ?delta_v,
+            ?terrain_normal,
+            terrain_height,
+            on_ground
+        );
+
+        // Apply terrain tilt only when actually on the ground.
+        //
+        // This is intentionally left disabled for now, matching
+        // the original code's commented-out behavior.
+        //
+        // delta_v = if on_ground {
+        //     tilt * delta_v
+        // } else {
+        //     delta_v
+        // };
+
         delta_v *= speed_remaining * delta_time * acceleration;
+
         trace!(delta_v_final = ?delta_v);
+
         rigidbody.velocity += delta_v;
 
         let rotation_speed = 5.0;
-        transform.rotation = transform
-            .rotation
-            .slerp(face_direction, rotation_speed * delta_time)
-            .normalized();
+
+        // transform.rotation = transform
+        //     .rotation
+        //     .slerp(face_direction, rotation_speed * delta_time)
+        //     .normalized();
     }
+
     if transform.position.y < -50.0 {
         transform.position.y = 20.0;
     }
+
     rigidbody.velocity.y += jump;
+
     #[cfg(debug_assertions)]
     unsafe {
         fp_trap::disable();

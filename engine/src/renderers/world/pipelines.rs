@@ -205,7 +205,7 @@ pub fn create_builtin_graphics_pipelines(
             min_sample_shading: 0.0,
             sample_mask: None,
             alpha_to_coverage_enable: false,
-            alpha_to_one_enable: true,
+            alpha_to_one_enable: false,
         },
         raster_state: RasterState {
             cull_mode: vk::CullModeFlags::NONE,
@@ -318,7 +318,13 @@ pub fn create_builtin_graphics_pipelines(
     };
 
     let ambient_desc = GraphicsPipelineDesc {
-        color_attachment_formats: vec![vk::Format::R32G32B32A32_SFLOAT],
+        color_attachment_formats: vec![
+            vk::Format::R32G32B32A32_SFLOAT,
+            vk::Format::R32G32B32A32_SFLOAT,
+            vk::Format::R32G32B32A32_SFLOAT,
+            vk::Format::R32G32B32A32_SFLOAT,
+            vk::Format::R32G32B32A32_SFLOAT,
+        ],
         depth_attachment_format: None,
         depth_stencil_state: DepthStencilState {
             depth_test_enable: false,
@@ -330,6 +336,30 @@ pub fn create_builtin_graphics_pipelines(
             back: vk::StencilOpState::default(),
             min_depth_bounds: 0.0,
             max_depth_bounds: 0.0,
+        },
+        color_blend_state: ColorBlendState {
+            logic_op: None,
+            blend_constants: [0.0; 4],
+            attachments: vec![vk::PipelineColorBlendAttachmentState {
+                color_blend_op: vk::BlendOp::ADD,
+                src_color_blend_factor: vk::BlendFactor::ONE,
+                dst_color_blend_factor: vk::BlendFactor::ONE,
+                alpha_blend_op: vk::BlendOp::MAX,
+                src_alpha_blend_factor: vk::BlendFactor::ONE,
+                dst_alpha_blend_factor: vk::BlendFactor::ONE,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+                blend_enable: vk::TRUE,
+            }]
+            .into_iter()
+            .chain(vec![
+                vk::PipelineColorBlendAttachmentState {
+                    blend_enable: vk::FALSE,
+                    color_write_mask: vk::ColorComponentFlags::RGBA,
+                    ..Default::default()
+                };
+                4
+            ])
+            .collect(),
         },
         ..lighting_desc.clone()
     };
@@ -461,42 +491,30 @@ pub fn create_builtin_graphics_pipelines(
     let mut descriptor_manager: DescriptorManager =
         DescriptorManager::new(device.clone(), allocator.clone());
 
-    let mut register = |handle: PipelineHandle,
-                        vert: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
-                        frag: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>|
-     -> vk::PipelineLayout {
-        descriptor_manager.add_pipeline(handle, vert.clone(), frag.clone())
-    };
-
-    let static_geometry_layout = register(
+    let static_geometry_layout = descriptor_manager.add_pipeline(
         static_geometry,
         static_geometry_data.1,
         static_geometry_data.2,
     );
-    let animated_geometry_layout = register(
+    let animated_geometry_layout = descriptor_manager.add_pipeline(
         animated_geometry,
         animated_geometry_data.1,
         animated_geometry_data.2,
     );
-    let clipped_geometry_layout = register(
+    let clipped_geometry_layout = descriptor_manager.add_pipeline(
         clipped_geometry,
         clipped_geometry_data.1,
         clipped_geometry_data.2,
     );
-    let terrain_layout = register(terrain, terrain_data.1, terrain_data.2);
-    let ambient_layout = register(ambient, ambient_data.1, ambient_data.2);
-    let tonemap_layout = register(tonemap, tonemap_data.1, tonemap_data.2);
-    let directional_layout = register(directional, directional_data.1, directional_data.2);
-    let point_layout = register(point, point_data.1, point_data.2);
-    let skybox_layout = register(skybox, skybox_data.1, skybox_data.2);
+    let terrain_layout = descriptor_manager.add_pipeline(terrain, terrain_data.1, terrain_data.2);
+    let ambient_layout = descriptor_manager.add_pipeline(ambient, ambient_data.1, ambient_data.2);
+    let tonemap_layout = descriptor_manager.add_pipeline(tonemap, tonemap_data.1, tonemap_data.2);
+    let directional_layout =
+        descriptor_manager.add_pipeline(directional, directional_data.1, directional_data.2);
+    let point_layout = descriptor_manager.add_pipeline(point, point_data.1, point_data.2);
+    let skybox_layout = descriptor_manager.add_pipeline(skybox, skybox_data.1, skybox_data.2);
 
-    let mut register_comp = |handle: PipelineHandle,
-                             comp: BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>|
-     -> vk::PipelineLayout {
-        let layout = descriptor_manager.add_compute(handle, comp.clone());
-        layout
-    };
-    let invert_layout = register_comp(invert_comp, invert_data.1);
+    let invert_layout = descriptor_manager.add_compute(invert_comp, invert_data.1);
 
     let mut graph = RenderGraph::new();
 
@@ -522,6 +540,22 @@ pub fn create_builtin_graphics_pipelines(
     });
     let mut hdr_color = graph.add_image(ImageDesc::Managed {
         name: "hdr_color",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
+    let mut tmp1 = graph.add_image(ImageDesc::Managed {
+        name: "tmp1",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
+    let mut tmp2 = graph.add_image(ImageDesc::Managed {
+        name: "tmp2",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
+    let mut tmp3 = graph.add_image(ImageDesc::Managed {
+        name: "tmp3",
+        format: vk::Format::R32G32B32A32_SFLOAT,
+    });
+    let mut tmp4 = graph.add_image(ImageDesc::Managed {
+        name: "tmp4",
         format: vk::Format::R32G32B32A32_SFLOAT,
     });
 
@@ -770,40 +804,47 @@ pub fn create_builtin_graphics_pipelines(
              handle: PipelineHandle,
              _extent| {
                 let camera = world.get_resource::<Camera>().unwrap();
-                let heightmap = world.get_resource::<TerrainMap>().unwrap();
 
-                let height_map_handle = descriptor_manager.request_bind(
-                    handle,
-                    0,
-                    0,
-                    BindingData::Uniform {
-                        data: bytes_of(&TerrainUBO::from(heightmap)).to_vec(),
-                    },
-                );
-                let camera_handle = descriptor_manager.request_bind(
-                    handle,
-                    1,
-                    0,
-                    BindingData::Uniform {
-                        data: bytes_of(&CameraUBO::from(camera)).to_vec(),
-                    },
-                );
-                let height_texture_handle = descriptor_manager.request_bind(
-                    handle,
-                    2,
-                    0,
-                    BindingData::Texture {
-                        texture: heightmap.map,
-                    },
-                );
+                if let Some(heightmap) = world.get_resource::<TerrainMap>() {
+                    let height_map_handle = descriptor_manager.request_bind(
+                        handle,
+                        0,
+                        0,
+                        BindingData::Uniform {
+                            data: bytes_of(&TerrainUBO::from(heightmap)).to_vec(),
+                        },
+                    );
+                    let camera_handle = descriptor_manager.request_bind(
+                        handle,
+                        1,
+                        0,
+                        BindingData::Uniform {
+                            data: bytes_of(&CameraUBO::from(camera)).to_vec(),
+                        },
+                    );
+                    let height_texture_handle = descriptor_manager.request_bind(
+                        handle,
+                        2,
+                        0,
+                        BindingData::Texture {
+                            texture: heightmap.map,
+                        },
+                    );
 
-                let jobs = vec![DrawJob {
-                    mesh: DrawStyle::VertexCount(
-                        (heightmap.resolution - 1) * (heightmap.resolution - 1) * 6,
-                    ),
-                    descriptor_sets: vec![height_map_handle, camera_handle, height_texture_handle],
-                }];
-                PipelineJob::Graphics(jobs)
+                    let jobs = vec![DrawJob {
+                        mesh: DrawStyle::VertexCount(
+                            (heightmap.resolution - 1) * (heightmap.resolution - 1) * 6,
+                        ),
+                        descriptor_sets: vec![
+                            height_map_handle,
+                            camera_handle,
+                            height_texture_handle,
+                        ],
+                    }];
+                    PipelineJob::Graphics(jobs)
+                } else {
+                    PipelineJob::Graphics(vec![])
+                }
             },
         ),
     );
@@ -893,106 +934,6 @@ pub fn create_builtin_graphics_pipelines(
         ),
     );
 
-    // pipeline_manager.add_pipeline(
-    //     point,
-    //     &lighting_desc,
-    //     &point_data.0,
-    //     point_layout,
-    //     Box::new(
-    //         move |world: &mut World,
-    //               _resource_manager: &mut ResourceManager,
-    //               descriptor_manager: &mut DescriptorManager,
-    //               handle: PipelineHandle,
-    //               _extent| {
-    //             let mut jobs = Vec::new();
-    //
-    //             let gbuffer_albedo = descriptor_manager.request_bind(
-    //                 handle,
-    //                 0,
-    //                 0,
-    //                 BindingData::RenderGraphImage { id: albedo_id },
-    //             );
-    //             let gbuffer_normal = descriptor_manager.request_bind(
-    //                 handle,
-    //                 0,
-    //                 1,
-    //                 BindingData::RenderGraphImage { id: normal_id },
-    //             );
-    //             let gbuffer_position = descriptor_manager.request_bind(
-    //                 handle,
-    //                 0,
-    //                 2,
-    //                 BindingData::RenderGraphImage { id: position_id },
-    //             );
-    //
-    //             for entity in world.query::<(Req<PointLight>, Req<Transform>)>() {
-    //                 let (_entityid, (point_light, transform)) = entity;
-    //
-    //                 let point_handle = descriptor_manager.request_bind(
-    //                     handle,
-    //                     1,
-    //                     0,
-    //                     BindingData::Uniform {
-    //                         data: bytes_of(&PointLightUBO::from((point_light, transform))).to_vec(),
-    //                     },
-    //                 );
-    //
-    //                 jobs.push(DrawJob {
-    //                     mesh: DrawStyle::VertexCount(3),
-    //                     descriptor_sets: vec![
-    //                         gbuffer_albedo,
-    //                         gbuffer_normal,
-    //                         gbuffer_position,
-    //                         point_handle,
-    //                     ],
-    //                 });
-    //             }
-    //
-    //             PipelineJob::Graphics(jobs)
-    //         },
-    //     ),
-    // );
-
-    // pipeline_manager.add_pipeline(
-    //     skybox,
-    //     &skybox_desc,
-    //     &skybox_data.0,
-    //     skybox_layout,
-    //     Box::new(
-    //         |world: &mut World,
-    //          _resource_manager: &mut ResourceManager,
-    //          descriptor_manager: &mut DescriptorManager,
-    //          handle: PipelineHandle,
-    //          _extent| {
-    //             let cubemap = *world.get_resource::<Skybox>().unwrap();
-    //             let camera = world.get_resource::<Camera>().unwrap();
-    //
-    //             let camera_handle = descriptor_manager.request_bind(
-    //                 handle,
-    //                 0,
-    //                 0,
-    //                 BindingData::Uniform {
-    //                     data: bytes_of(&CameraInverseUBO::from(camera)).to_vec(),
-    //                 },
-    //             );
-    //             let cubemap_handle = descriptor_manager.request_bind(
-    //                 handle,
-    //                 1,
-    //                 0,
-    //                 BindingData::Texture {
-    //                     texture: cubemap.material.albedo,
-    //                 },
-    //             );
-    //
-    //             let jobs = vec![DrawJob {
-    //                 mesh: DrawStyle::VertexCount(3),
-    //                 descriptor_sets: vec![camera_handle, cubemap_handle],
-    //             }];
-    //             PipelineJob::Graphics(jobs)
-    //         },
-    //     ),
-    // );
-
     let graph = graph
         .add_pipeline("static_geometry")
         .pipeline(static_geometry)
@@ -1025,14 +966,9 @@ pub fn create_builtin_graphics_pipelines(
         .writes(&mut position)
         .writes_depth(&mut depth)
         .build();
-    // let mut graph = graph
-    //     .add_pipeline("invert")
-    //     .pipeline(invert_comp)
-    //     .read_writes(&mut albedo)
-    //     .build();
 
     let mut radiance_config = RadianceConfig {
-        grid_origin: Vec3::new(0.0, 46.0, 0.0),
+        grid_origin: Vec3::new(0.0, 0.0, 0.0),
         top_level_probes_x: 8,
         top_level_probes_y: 6,
         top_level_probes_z: 8,
@@ -1057,11 +993,15 @@ pub fn create_builtin_graphics_pipelines(
         / 2.0
         * probe_spacing_finest;
 
-    radiance_config.grid_origin =
-        Vec3::new(0.0 - half_size_x, 43.0 - half_size_y, 0.0 - half_size_z);
+    let center = Vec3::new(0.0, 0.0, 0.0);
+    radiance_config.grid_origin = center - Vec3::new(half_size_x, half_size_y, half_size_z);
 
     // == PASS 1: Create all cascade images ==
     let mut cascade_images: Vec<ImageVersion> =
+        Vec::with_capacity(radiance_config.cascade_count as usize);
+    let mut dbg1_images: Vec<ImageVersion> =
+        Vec::with_capacity(radiance_config.cascade_count as usize);
+    let mut dbg2_images: Vec<ImageVersion> =
         Vec::with_capacity(radiance_config.cascade_count as usize);
 
     // from 0 (coarse but many to fine but few)
@@ -1100,8 +1040,28 @@ pub fn create_builtin_graphics_pipelines(
                 depth: 1,
             },
         });
+        let dbg1 = graph.add_image(ImageDesc::Custom {
+            name: "dbg1",
+            format: vk::Format::R16G16B16A16_SFLOAT,
+            extent: vk::Extent3D {
+                width: z_cols * xy_cols * sqrt_ray_count,
+                height: z_rows * xy_rows * sqrt_ray_count,
+                depth: 1,
+            },
+        });
+        let dbg2 = graph.add_image(ImageDesc::Custom {
+            name: "dbg2",
+            format: vk::Format::R16G16B16A16_SFLOAT,
+            extent: vk::Extent3D {
+                width: z_cols * xy_cols * sqrt_ray_count,
+                height: z_rows * xy_rows * sqrt_ray_count,
+                depth: 1,
+            },
+        });
 
         cascade_images.push(cascade_image);
+        dbg1_images.push(dbg1);
+        dbg2_images.push(dbg2);
     }
 
     let mut radiance_info = RadianceInfoUBO::default();
@@ -1161,17 +1121,19 @@ pub fn create_builtin_graphics_pipelines(
         let interval_start = if cascade_level == 0 {
             0.0
         } else {
-            radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32 - 1.0)
+            radiance_config.smallest_object_size * (4f32.powi(cascade_level as i32) - 1.0) / 3.0
         };
         let interval_end = if is_top_cascade {
-            f32::MAX // or some large number like 1e30
+            f32::MAX
         } else {
-            radiance_config.smallest_object_size * 2f32.powf(cascade_level as f32)
+            radiance_config.smallest_object_size * (4f32.powi(cascade_level as i32 + 1) - 1.0) / 3.0
         };
 
         // Each cascade reads from the next coarser level (level + 1), except the top
         let (lower, upper) = cascade_images.split_at_mut(cascade_level as usize + 1);
+
         let cascade_image = &mut lower[cascade_level as usize];
+
         let above_image = upper.first_mut(); // None if top cascade, Some(&mut next) otherwise
 
         let cascade_id = cascade_image.id;
@@ -1179,7 +1141,8 @@ pub fn create_builtin_graphics_pipelines(
         let above_id = above_image.as_ref().map(|img| img.id);
 
         let radiance_comp = pipeline_manager.allocate_compute_handle("radiance");
-        let radiance_layout = register_comp(radiance_comp, radiance_data.1.clone());
+        let radiance_layout =
+            descriptor_manager.add_compute(radiance_comp, radiance_data.1.clone());
 
         let device_clone = device.clone();
         let allocator_clone = allocator.clone();
@@ -1195,6 +1158,12 @@ pub fn create_builtin_graphics_pipelines(
             sqrt_ray_count,
             probe_spacing,
         };
+
+        let dbg1_id = dbg1_images[cascade_level as usize].id;
+        let dbg2_id = dbg2_images[cascade_level as usize].id;
+
+        let dbg1_image = &mut dbg1_images[cascade_level as usize];
+        let dbg2_image = &mut dbg2_images[cascade_level as usize];
 
         pipeline_manager.add_compute_pipeline(
             radiance_comp,
@@ -1247,66 +1216,76 @@ pub fn create_builtin_graphics_pipelines(
                         let pos_size = (all_positions.len() * size_of::<Vec4>()) as u64;
                         let idx_size = (all_indices.len() * size_of::<u32>()) as u64;
 
-                        let (mut pos_buffers, mut pos_allocs) = alloc_buffers(
-                            allocator_clone.clone(),
-                            1,
-                            pos_size,
-                            &device_clone,
-                            vk::SharingMode::EXCLUSIVE,
-                            vk::BufferUsageFlags::STORAGE_BUFFER,
-                            gpu_allocator::MemoryLocation::CpuToGpu,
-                            true,
-                            bytemuck::cast_slice(&all_positions),
-                            "radiance positions",
-                        );
-                        let (mut idx_buffers, mut idx_allocs) = alloc_buffers(
-                            allocator_clone.clone(),
-                            1,
-                            idx_size,
-                            &device_clone,
-                            vk::SharingMode::EXCLUSIVE,
-                            vk::BufferUsageFlags::STORAGE_BUFFER,
-                            gpu_allocator::MemoryLocation::CpuToGpu,
-                            true,
-                            bytemuck::cast_slice(&all_indices),
-                            "radiance indices",
-                        );
+                        if pos_size > 0 {
+                            let (mut pos_buffers, mut pos_allocs) = alloc_buffers(
+                                allocator_clone.clone(),
+                                1,
+                                pos_size,
+                                &device_clone,
+                                vk::SharingMode::EXCLUSIVE,
+                                vk::BufferUsageFlags::STORAGE_BUFFER,
+                                gpu_allocator::MemoryLocation::CpuToGpu,
+                                true,
+                                bytemuck::cast_slice(&all_positions),
+                                "radiance positions",
+                            )
+                            .unwrap();
+                            let (mut idx_buffers, mut idx_allocs) = alloc_buffers(
+                                allocator_clone.clone(),
+                                1,
+                                idx_size,
+                                &device_clone,
+                                vk::SharingMode::EXCLUSIVE,
+                                vk::BufferUsageFlags::STORAGE_BUFFER,
+                                gpu_allocator::MemoryLocation::CpuToGpu,
+                                true,
+                                bytemuck::cast_slice(&all_indices),
+                                "radiance indices",
+                            )
+                            .unwrap();
 
-                        let position_ssbo =
-                            resource_manager.ssbo_registry.register_ssbo(SsboBinding {
-                                buffer: pos_buffers.remove(0),
-                                allocation: pos_allocs.remove(0),
-                                offset: 0,
-                                size: pos_size,
-                            });
-                        let index_ssbo =
-                            resource_manager.ssbo_registry.register_ssbo(SsboBinding {
-                                buffer: idx_buffers.remove(0),
-                                allocation: idx_allocs.remove(0),
-                                offset: 0,
-                                size: idx_size,
-                            });
-
-                        let resource = RadianceMeshBuffers {
-                            position_ssbo,
-                            index_ssbo,
-                            mesh_infos,
-                        };
-
-                        if let Some(value) = world.get_mut_resource::<RadianceMeshBuffers>() {
-                            *value = resource
-                        } else {
-                            world.add_resource(resource).unwrap();
+                            let position_ssbo =
+                                resource_manager.ssbo_registry.register_ssbo(SsboBinding {
+                                    buffer: pos_buffers.remove(0),
+                                    allocation: pos_allocs.remove(0),
+                                    offset: 0,
+                                    size: pos_size,
+                                });
+                            let index_ssbo =
+                                resource_manager.ssbo_registry.register_ssbo(SsboBinding {
+                                    buffer: idx_buffers.remove(0),
+                                    allocation: idx_allocs.remove(0),
+                                    offset: 0,
+                                    size: idx_size,
+                                });
+                            let resource = RadianceMeshBuffers {
+                                position_ssbo,
+                                index_ssbo,
+                                mesh_infos,
+                            };
+                            if let Some(value) = world.get_mut_resource::<RadianceMeshBuffers>() {
+                                *value = resource
+                            } else {
+                                world.add_resource(resource).unwrap();
+                            }
                         }
                     }
 
-                    let map = world.get_resource::<TerrainMap>().unwrap();
-                    let buffers = world.get_resource::<RadianceMeshBuffers>().unwrap();
                     let mut meshes_array = [MeshInfo::default(); 64];
-                    meshes_array[..buffers.mesh_infos.len()].copy_from_slice(&buffers.mesh_infos);
+                    let mut mesh_infos = None;
+                    let mut position_ssbo = None;
+                    let mut index_ssbo = None;
+                    if let Some(buffers) = world.get_resource::<RadianceMeshBuffers>() {
+                        let len = buffers.mesh_infos.len().min(64);
+                        position_ssbo = Some(buffers.position_ssbo);
+                        index_ssbo = Some(buffers.index_ssbo);
+                        mesh_infos = Some(buffers.mesh_infos.clone());
+                        meshes_array[..len].copy_from_slice(&buffers.mesh_infos[..len]);
+                    }
 
                     // Use a sentinel id (or handle None) for the top cascade which has no above
                     let resolved_above_id = above_id.unwrap_or(cascade_id); // top reads itself, shader should ignore
+
                     let config_ubo = RadianceConfigUBO {
                         _pad: 0,
                         start_position: radiance_config.grid_origin.into_homogeneous_point(),
@@ -1318,7 +1297,7 @@ pub fn create_builtin_graphics_pipelines(
                         interval_end,
                         is_top_cascade: if is_top_cascade { 1 } else { 0 },
                         sqrt_ray_count,
-                        mesh_count: buffers.mesh_infos.len() as u32,
+                        mesh_count: mesh_infos.unwrap_or_default().len() as u32,
                         meshes: meshes_array,
                         z_cols,
                         xy_cols,
@@ -1389,6 +1368,18 @@ pub fn create_builtin_graphics_pipelines(
                         ),
                         descriptor_manager.request_bind(
                             handle,
+                            1,
+                            2,
+                            BindingData::StorageImage { id: dbg1_id },
+                        ),
+                        descriptor_manager.request_bind(
+                            handle,
+                            1,
+                            3,
+                            BindingData::StorageImage { id: dbg2_id },
+                        ),
+                        descriptor_manager.request_bind(
+                            handle,
                             2,
                             0,
                             BindingData::Uniform {
@@ -1405,22 +1396,22 @@ pub fn create_builtin_graphics_pipelines(
                         ),
                     ];
 
-                    bindings.push(descriptor_manager.request_bind(
-                        handle,
-                        2,
-                        1,
-                        BindingData::Ssbo {
-                            buffer: buffers.position_ssbo,
-                        },
-                    ));
-                    bindings.push(descriptor_manager.request_bind(
-                        handle,
-                        2,
-                        2,
-                        BindingData::Ssbo {
-                            buffer: buffers.index_ssbo,
-                        },
-                    ));
+                    if let Some(p_ssbo) = position_ssbo {
+                        bindings.push(descriptor_manager.request_bind(
+                            handle,
+                            2,
+                            1,
+                            BindingData::Ssbo { buffer: p_ssbo },
+                        ));
+                    }
+                    if let Some(i_ssbo) = index_ssbo {
+                        bindings.push(descriptor_manager.request_bind(
+                            handle,
+                            2,
+                            2,
+                            BindingData::Ssbo { buffer: i_ssbo },
+                        ));
+                    }
 
                     // 64x1 chunk for each workgroup
                     PipelineJob::Compute(ComputeDispatch {
@@ -1442,6 +1433,8 @@ pub fn create_builtin_graphics_pipelines(
             graph
                 .add_pipeline(format!("cascade_{}", cascade_level).as_str())
                 .pipeline(radiance_comp)
+                .writes(dbg1_image)
+                .writes(dbg2_image)
                 .writes(cascade_image)
                 .build()
         } else {
@@ -1449,6 +1442,8 @@ pub fn create_builtin_graphics_pipelines(
                 .add_pipeline(format!("cascade_{}", cascade_level).as_str())
                 .pipeline(radiance_comp)
                 .writes(cascade_image)
+                .writes(dbg1_image)
+                .writes(dbg2_image)
                 .reads(above_image.as_ref().unwrap())
                 .build()
         };
@@ -1596,6 +1591,10 @@ pub fn create_builtin_graphics_pipelines(
         .reads(&position)
         .reads(&cascade_images[0])
         .writes(&mut hdr_color)
+        .writes(&mut tmp1)
+        .writes(&mut tmp2)
+        .writes(&mut tmp3)
+        .writes(&mut tmp4)
         .build();
 
     let graph = graph
@@ -1997,15 +1996,17 @@ pub fn create_compute_pipeline(
     }
 }
 
+pub struct GetPipelineDataResult(
+    Vec<ShaderStage>,
+    BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
+    BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
+);
+
 pub fn get_pipeline_data(
     device: Arc<ash::Device>,
     vertex_path: &path::Path,
     fragment_path: &path::Path,
-) -> (
-    Vec<ShaderStage>,
-    BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
-    BTreeMap<u32, BTreeMap<u32, rr::DescriptorInfo>>,
-) {
+) -> GetPipelineDataResult {
     let (vertex_code, vertex_reflection) = load_path_data(vertex_path);
     let (fragment_code, fragment_reflection) = load_path_data(fragment_path);
 
@@ -2059,7 +2060,7 @@ pub fn get_pipeline_data(
     let vertex_descriptor_sets = vertex_reflection.get_descriptor_sets().unwrap();
     let fragment_descriptor_sets = fragment_reflection.get_descriptor_sets().unwrap();
 
-    (
+    GetPipelineDataResult(
         vec![vertex_stage, fragment_stage],
         vertex_descriptor_sets,
         fragment_descriptor_sets,
@@ -2286,7 +2287,7 @@ pub fn create_pipeline_layout_from_vert_frag(
 fn load_path_data(path: &path::Path) -> (Vec<u32>, Reflection) {
     let out_dir = PathBuf::from(env!("OUT_DIR"));
     let bytes = fs::read(out_dir.join(path))
-        .unwrap_or_else(|_| panic!("failed to read file: {}", &path.to_string_lossy().as_str()));
+        .unwrap_or_else(|_| panic!("failed to read file: {}", path.to_string_lossy().as_str()));
     let code: Vec<u32> = bytes
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))

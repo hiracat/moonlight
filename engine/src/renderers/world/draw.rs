@@ -431,6 +431,10 @@ pub(crate) fn instant_submit_command_buffer(
     unsafe { device.destroy_fence(fence, None) };
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AllocationFailure {
+    ZeroSizeBuffer,
+}
 pub fn alloc_buffers(
     memory_allocator: SharedAllocator,
     buffer_count: usize,
@@ -442,9 +446,12 @@ pub fn alloc_buffers(
     linear: bool,
     data: &[u8],
     name: &str,
-) -> (Vec<vk::Buffer>, Vec<Allocation>) {
+) -> Result<(Vec<vk::Buffer>, Vec<Allocation>), AllocationFailure> {
     let mut buffers = vec![];
     let mut allocations = vec![];
+    if size == 0 {
+        return Err(AllocationFailure::ZeroSizeBuffer);
+    }
     for _ in 0..buffer_count {
         let buffer = unsafe {
             device.create_buffer(
@@ -482,5 +489,5 @@ pub fn alloc_buffers(
         allocations.push(alloc);
         buffers.push(buffer);
     }
-    (buffers, allocations)
+    Ok((buffers, allocations))
 }

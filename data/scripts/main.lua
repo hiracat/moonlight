@@ -657,8 +657,8 @@ function Update(world, engine)
 	---@type UIStuff
 	local ui = world:get_resource("UIStuff")
 
-	---@type TerrainMap
-	local terrainmap = world:get_resource("TerrainMap")
+	-- ---@type TerrainMap
+	-- local terrainmap = world:get_resource("TerrainMap")
 
 	---@type CameraOffset
 	local offset = world:get_resource("CameraOffset")
@@ -702,7 +702,7 @@ function Update(world, engine)
 	}
 
 	config.gravity_strength = slider(widgets, "world.gravity").value
-	terrainmap.resolution = slider(widgets, "terrain.heightmap.res").value
+	-- terrainmap.resolution = slider(widgets, "terrain.heightmap.res").value
 
 	-----------------------------------------------------------------
 	-- TREE SPAWNING BUTTONS

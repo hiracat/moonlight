@@ -178,7 +178,8 @@ impl AnimationResources {
             // leave data uninitialized, we update it later
             cast_slice(&[uv::Mat4::identity()]),
             "transform memory",
-        );
+        )
+        .unwrap();
         let (normal_buffer, mut normal_allocation) = alloc_buffers(
             memory_allocator.clone(),
             1,
@@ -191,7 +192,8 @@ impl AnimationResources {
             // leave data uninitialized, we update it later
             cast_slice(&[uv::Mat3::identity()]),
             "normal memory",
-        );
+        )
+        .unwrap();
         let transform_handle = registry.register_ssbo(SsboBinding {
             buffer: transform_buffer[0],
             allocation: transform_allocation.swap_remove(0),
@@ -677,7 +679,8 @@ impl LinearAllocator {
             true,
             &vec![0u8; capacity as usize],
             "linear allocator",
-        );
+        )
+        .unwrap();
         Self {
             buffer: buffers.0.swap_remove(0),
             memory: buffers.1.swap_remove(0),
@@ -729,7 +732,8 @@ impl LinearAllocator {
             true,
             &vec![0u8; new_capacity as usize],
             "linear allocator",
-        );
+        )
+        .unwrap();
         unsafe {
             self.device.destroy_buffer(self.buffer, None);
         }
@@ -752,7 +756,8 @@ impl LinearAllocator {
             true,
             &vec![0u8; new_capacity as usize],
             "linear allocator",
-        );
+        )
+        .unwrap();
         let old_buffer = std::mem::replace(&mut self.buffer, buffers.0.remove(0));
         let old_memory = std::mem::replace(&mut self.memory, buffers.1.remove(0));
         self.pending_free = Some((old_buffer, old_memory));
@@ -1148,7 +1153,8 @@ impl ResourceManager {
             true,
             bytemuck::cast_slice(vertices.as_ref()),
             "vertex buffer",
-        );
+        )
+        .unwrap();
 
         let (index_buffer, mut index_alloc) = alloc_buffers(
             allocator.clone(),
@@ -1161,7 +1167,8 @@ impl ResourceManager {
             true,
             bytemuck::cast_slice(indices.as_ref()),
             "index buffer",
-        );
+        )
+        .unwrap();
 
         GpuMesh {
             positions: vertices
@@ -1234,7 +1241,8 @@ impl ResourceManager {
             true,
             bytemuck::cast_slice(vertices.as_ref()),
             "vertex buffer",
-        );
+        )
+        .unwrap();
 
         let (index_buffer, mut index_alloc) = alloc_buffers(
             allocator.clone(),
@@ -1247,7 +1255,8 @@ impl ResourceManager {
             true,
             bytemuck::cast_slice(indices.as_ref()),
             "index buffer",
-        );
+        )
+        .unwrap();
 
         GpuMesh {
             positions: vertices

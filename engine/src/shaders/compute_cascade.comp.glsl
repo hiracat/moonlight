@@ -1,4 +1,5 @@
 #version 450 core
+#extension GL_EXT_debug_printf : enable
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -12,6 +13,9 @@ ubo;
 
 layout(rgba16f, set = 1, binding = 0) uniform image2D radiance_field;
 layout(rgba16f, set = 1, binding = 1) uniform image2D above_radiance_field;
+
+layout(rgba16f, set = 1, binding = 2) uniform image2D dbg1;
+layout(rgba16f, set = 1, binding = 3) uniform image2D dbg2;
 
 struct MeshInfo {
     uint vertex_offset;
@@ -81,12 +85,13 @@ vec3 easedMix(vec3 a, vec3 b, float t, float power) {
 }
 
 #define NO_HIT 1e30
-#define EPS .002
+#define EPS 1e-6
 
 struct Ray {
     vec3 direction;
     vec3 origin;
 };
+
 float raySphereIntersect(Ray ray, vec3 s0, float sr) {
     // always 1 if ray.direction is normalized, which it is
     float a     = 1.0;
@@ -97,8 +102,18 @@ float raySphereIntersect(Ray ray, vec3 s0, float sr) {
     if (disc < 0.0) {
         return NO_HIT;
     }
-    float t = (-b - sqrt(disc)) / (2.0 * a);
-    return t > 0.0 ? t : NO_HIT;
+
+    float sqrt_disc = sqrt(disc);
+    float t_near    = (-b - sqrt_disc) / (2.0 * a);
+    float t_far     = (-b + sqrt_disc) / (2.0 * a);
+
+    if (t_near > 0.0) {
+        return t_near;
+    }
+    if (t_far > 0.0) {
+        return t_far;
+    }
+    return NO_HIT;
 }
 
 /**
@@ -122,11 +137,14 @@ float rayTriangleIntersect(Ray ray, vec3 point1, vec3 point2, vec3 point3) {
     float bary_1         = dot(directionxedge2, origin_to_p1) * invdeterminant;
     vec3  txedge1        = cross(origin_to_p1, edge1);
     float bary_2         = dot(txedge1, ray.direction) * invdeterminant;
-    if (bary_1 < 0.0 || bary_2 < 0.0 || bary_1 + bary_2 > 1.0) {
+
+    const float EDGE_EPS = 1e-6;
+    if (bary_1 < -EDGE_EPS || bary_2 < -EDGE_EPS || bary_1 + bary_2 > 1.0 + EDGE_EPS) {
         return -1.0;
     }
 
     float distance_along_ray = dot(txedge1, edge2) * invdeterminant;
+    // ray hit right at origin
     if (distance_along_ray < EPS) {
         return -1.0;
     }
@@ -190,6 +208,8 @@ float segmentSphereIntersect(Ray ray, vec3 pos, float radius, float start, float
         return distance;
     }
     return NO_HIT;
+    // float distance = raySphereIntersect(ray, pos, radius);
+    // return distance;
 }
 
 // adapted from intersectCube in https://github.com/evanw/webgl-path-tracing/blob/master/webgl-path-tracing.js
@@ -291,6 +311,8 @@ void trilinear_samples(vec3 dest_center, vec3 trilinear_size, out float weights[
 }
 
 void main() {
+    bool debug_this = false;
+
     uint flat_idx   = gl_GlobalInvocationID.x;
     uint ray_count  = config.sqrt_ray_count * config.sqrt_ray_count;
     uint ray_flat   = flat_idx % ray_count;
@@ -307,29 +329,35 @@ void main() {
     uint ray_row = ray_flat / config.sqrt_ray_count;
     uint ray_col = ray_flat % config.sqrt_ray_count;
 
-    vec3 probe_world_pos = config.start_position.xyz + vec3(probe_x, probe_y, probe_z) * config.probe_spacing;
+    vec3 probe_world_pos = config.start_position.xyz + (vec3(probe_x, probe_y, probe_z) * config.probe_spacing);
 
     vec3 direction = unitVectorFrom2d(float(ray_col), float(ray_row), float(config.sqrt_ray_count));
 
     ivec2 texel = get_texel(uvec3(probe_x, probe_y, probe_z), uvec2(ray_col, ray_row));
 
+    if (texel.x == 308 && texel.y == 477) {
+        debug_this = true;
+    }
+
+    if (debug_this) {
+        debugPrintfEXT("cooked pixel thread: %d", gl_GlobalInvocationID);
+    }
+
     // CHECK RAY FOR EACH TRIANGLE
     Ray   ray     = Ray(direction, probe_world_pos);
     float closest = NO_HIT;
-    vec4  color   = vec4(0.0, 0.0, 0.0, 1.0);
+    // by default rays dont hit anything, so ray visibility term is 1.0
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
     for (int i = 0; i < config.mesh_count; i++) {
-        MeshInfo mesh_info = config.meshes[i];
 
-        mat4 inv              = mesh_info.world_to_local;
-        vec3 local_ray_origin = (inv * vec4(ray.origin, 1.0)).xyz;
-        vec3 local_ray_dir    = (inv * vec4(ray.direction, 0.0)).xyz;
+        MeshInfo mesh_info        = config.meshes[i];
+        mat4     inv              = mesh_info.world_to_local;
+        vec3     local_ray_origin = (inv * vec4(ray.origin, 1.0)).xyz;
+        vec3     local_ray_dir    = (inv * vec4(ray.direction, 0.0)).xyz;
+
         // note: don't normalize local_ray_dir, the scale needs to be preserved
         // so that the t values are in world space units
-        Ray   local_ray = Ray(local_ray_origin, local_ray_dir);
-        float aabb_hit  = intersectAABB(local_ray, mesh_info.aabb_local_min.xyz, mesh_info.aabb_local_max.xyz);
-        if (aabb_hit >= closest) {
-            continue;
-        }
+        Ray local_ray = Ray(local_ray_origin, local_ray_dir);
 
         // CHECK THE RAY AGAINST EVERY TRIANGLE, (should replace with a bvh probably, am lazy)
         for (int j = 0; j < mesh_info.index_count; j += 3) {
@@ -430,4 +458,21 @@ void main() {
     // }
 
     imageStore(radiance_field, texel, merged);
+
+    // Ray direction
+    imageStore(dbg1, texel, vec4(probe_world_pos, 1.0));
+
+    // Ray hit world location.
+    // If there was no hit, use the ray endpoint at interval_end.
+    // vec3  ray_hit_world = probe_world_pos + direction * config.interval_end;
+    vec3  ray_hit_world = vec3(0.0);
+    float hit_alpha     = -227.0;
+
+    if (closest != NO_HIT) {
+        // Move along the ray by closest units, starting at probe_world_pos.
+        ray_hit_world = probe_world_pos + direction * closest;
+        hit_alpha     = 225.0;
+    }
+
+    imageStore(dbg2, texel, vec4(ray_hit_world, hit_alpha));
 }
