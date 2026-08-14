@@ -314,18 +314,11 @@ impl WorldRenderer {
 
     #[allow(clippy::too_many_lines)]
     pub fn init(context: &VulkanContext, swapchain_resources: &SwapchainResources) -> Self {
-        let color_formats = [
-            vk::Format::A2B10G10R10_UNORM_PACK32,
-            vk::Format::R16G16B16A16_SFLOAT,
-            vk::Format::R32G32B32A32_SFLOAT,
-        ];
         let (graph, pipelines, descriptor_managers, final_color) =
             create_builtin_graphics_pipelines(
                 context.device.clone(),
                 context.allocator(),
                 swapchain_resources.swapchain_image_format.format,
-                vk::Format::D32_SFLOAT,
-                &color_formats,
             );
 
         let mut imported_images = HashMap::new();

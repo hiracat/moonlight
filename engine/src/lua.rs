@@ -1,9 +1,8 @@
-use egui::IntoAtoms;
 use std::{any::TypeId, collections::HashMap, sync::Arc};
 use tracing::{debug, error, trace};
 
+use glam as gl;
 use mlua::AnyUserData;
-use ultraviolet::{self as uv};
 
 use crate::{
     core::{Engine, TerrainMap},
@@ -457,7 +456,7 @@ impl ::mlua::UserData for Rotor3Lua {
     }
 }
 
-impl LuaSeralize for uv::Rotor3 {
+impl LuaSeralize for gl::Quat {
     fn from_lua(value: &mlua::Value, _world: &mut World) -> mlua::Result<Self> {
         let (roll, pitch, yaw) = match value {
             ::mlua::Value::UserData(ud) => {
@@ -472,13 +471,10 @@ impl LuaSeralize for uv::Rotor3 {
                 )));
             }
         };
-        Ok(uv::Rotor3::from_euler_angles(roll, pitch, yaw))
+        Ok(gl::Quat::from_euler(gl::EulerRot::YXZ, roll, pitch, yaw))
     }
     fn to_lua(&self, lua: &::mlua::Lua, _world: &mut World) -> ::mlua::Result<::mlua::Value> {
-        let mat = self.into_matrix();
-        let pitch = mat.cols[2].y.asin();
-        let yaw = (-mat.cols[2].x).atan2(mat.cols[2].z);
-        let roll = (-mat.cols[0].y).atan2(mat.cols[1].y);
+        let (yaw, pitch, roll) = self.to_euler(gl::EulerRot::YXZ);
         let ud = lua.create_userdata(Rotor3Lua { roll, pitch, yaw })?;
         Ok(::mlua::Value::UserData(ud))
     }
@@ -503,7 +499,7 @@ impl LuaSeralize for f32 {
         Ok(mlua::Value::Number(*self as f64))
     }
 }
-impl LuaSeralize for uv::Vec3 {
+impl LuaSeralize for gl::Vec3 {
     fn from_lua(value: &mlua::Value, _world: &mut World) -> mlua::Result<Self> {
         let table = value.as_table().ok_or_else(|| {
             mlua::Error::RuntimeError(format!(
@@ -512,7 +508,7 @@ impl LuaSeralize for uv::Vec3 {
             ))
         })?;
 
-        Ok(uv::Vec3::new(
+        Ok(gl::Vec3::new(
             table.get("x")?,
             table.get("y")?,
             table.get("z")?,

@@ -1,5 +1,5 @@
+use glam::{Quat, Vec3};
 use proc_macros::{LuaRef, LuaUnion};
-use ultraviolet::{Rotor3, Vec3};
 
 use crate::components::Transform;
 
@@ -11,7 +11,7 @@ pub struct RigidBody {
 impl RigidBody {
     pub fn new() -> Self {
         Self {
-            velocity: Vec3::zero(),
+            velocity: Vec3::ZERO,
         }
     }
 }
@@ -34,13 +34,13 @@ pub struct Aabb {
 }
 impl Default for Aabb {
     fn default() -> Self {
-        Self::new(Vec3::one(), Vec3::zero())
+        Self::new(Vec3::ONE, Vec3::ZERO)
     }
 }
 
 impl Default for Obb {
     fn default() -> Self {
-        Self::new(Vec3::one(), Vec3::zero())
+        Self::new(Vec3::ONE, Vec3::ZERO)
     }
 }
 
@@ -79,9 +79,9 @@ struct ObbWorld {
 impl ObbWorld {
     fn from_obb(obb: &Obb, transform: &Transform) -> Self {
         let axes = [
-            transform.rotation * Vec3::unit_x(),
-            transform.rotation * Vec3::unit_y(),
-            transform.rotation * Vec3::unit_z(),
+            transform.rotation * Vec3::X,
+            transform.rotation * Vec3::Y,
+            transform.rotation * Vec3::Z,
         ];
         let center =
             transform.position + transform.rotation * (obb.center_offset * transform.scale);
@@ -121,7 +121,7 @@ impl Collider {
                     half_extents: (from.max - from.min) * 0.5,
                 };
                 let from_tr = Transform {
-                    rotation: Rotor3::identity(),
+                    rotation: Quat::IDENTITY,
                     ..*from_tr
                 };
 
@@ -133,7 +133,7 @@ impl Collider {
                     half_extents: (to.max - to.min) * 0.5,
                 };
                 let to_tr = Transform {
-                    rotation: Rotor3::identity(),
+                    rotation: Quat::IDENTITY,
                     ..*to_tr
                 };
                 obb_vs_obb(from, &to_obb, from_tr, &to_tr)
@@ -195,7 +195,7 @@ fn obb_vs_obb(from: &Obb, to: &Obb, from_tr: &Transform, to_tr: &Transform) -> O
 
     // build all 15 axes to test
     // 3 face normals from each box = 6
-    let mut axes = [Vec3::zero(); 15];
+    let mut axes = [Vec3::ZERO; 15];
     axes[0..3].copy_from_slice(&from_w.axes);
     axes[3..6].copy_from_slice(&to_w.axes);
     // 9 cross products of each pair of edges = 9
@@ -210,13 +210,13 @@ fn obb_vs_obb(from: &Obb, to: &Obb, from_tr: &Transform, to_tr: &Transform) -> O
     // find the axis with the smallest overlap
     // that gives us the minimum push direction
     let mut min_overlap = f32::MAX;
-    let mut min_axis = Vec3::zero();
+    let mut min_axis = Vec3::ZERO;
 
     for axis in axes {
-        if axis.mag_sq() < 1e-10 {
+        if axis.length_squared() < 1e-6 {
             continue;
         }
-        let axis = axis.normalized();
+        let axis = axis.normalize();
         let (from_min, from_max) = from_w.project(axis);
         let (to_min, to_max) = to_w.project(axis);
 
@@ -251,13 +251,13 @@ impl Ray {
     pub fn new(origin: Vec3, target: Vec3) -> Self {
         Self {
             origin,
-            dir: (target - origin).normalized(),
+            dir: (target - origin).normalize(),
         }
     }
     pub fn from_direction(origin: Vec3, dir: Vec3) -> Self {
         Self {
             origin,
-            dir: dir.normalized(),
+            dir: dir.normalize(),
         }
     }
     pub fn ray_box(ray: &Ray, collider: &Collider, _collider_position: Vec3) -> Option<f32> {
@@ -306,7 +306,7 @@ fn ray_hits_aabb_center() {
         min: Vec3::new(-1.0, -1.0, -1.0),
         max: Vec3::new(1.0, 1.0, 1.0),
     });
-    let collider_position = Vec3::zero();
+    let collider_position = Vec3::ZERO;
 
     let result = Ray::ray_box(&ray, &collider, collider_position);
 
@@ -322,7 +322,7 @@ fn ray_misses_aabb() {
         min: Vec3::new(-1.0, -1.0, -1.0),
         max: Vec3::new(1.0, 1.0, 1.0),
     });
-    let collider_position = Vec3::zero();
+    let collider_position = Vec3::ZERO;
 
     let result = Ray::ray_box(&ray, &collider, collider_position);
 
@@ -336,7 +336,7 @@ fn ray_starts_inside_aabb() {
         min: Vec3::new(-1.0, -1.0, -1.0),
         max: Vec3::new(1.0, 1.0, 1.0),
     });
-    let collider_position = Vec3::zero();
+    let collider_position = Vec3::ZERO;
 
     let result = Ray::ray_box(&ray, &collider, collider_position);
 

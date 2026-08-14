@@ -7,8 +7,8 @@ use std::f32::consts::PI;
 use std::sync::OnceLock;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::reload;
-use ultraviolet::Bivec3;
 
+use glam::{Quat, Vec3};
 use image::ImageReader;
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Time, Transform},
@@ -20,7 +20,6 @@ use moonlight::{
 use proc_macros::LuaRef;
 use tracing::{trace, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-use ultraviolet::{Rotor3, Slerp, Vec3};
 use winit::keyboard::KeyCode;
 
 type FilterHandle = tracing_subscriber::reload::Handle<
@@ -103,7 +102,6 @@ fn start(world: &mut World, engine: &mut Engine) {
         Vec3::new(0.0, 5.0, -10.0),
         60.0,
         0.1,
-        200.0,
         height as f32 / width as f32,
     );
     let directional = DirectionalLight::create(
@@ -140,9 +138,7 @@ fn start(world: &mut World, engine: &mut Engine) {
     world.add_resource(directional).unwrap();
     world.add_resource(ambient).unwrap();
     world
-        .add_resource(CameraOffset {
-            offset: Vec3::zero(),
-        })
+        .add_resource(CameraOffset { offset: Vec3::ZERO })
         .unwrap();
 
     let skybox = engine.resource_manager.create_cubemap(&[
@@ -161,7 +157,7 @@ fn start(world: &mut World, engine: &mut Engine) {
             fox,
             Transform::from(
                 Some(Vec3::new(0.0, 3.0, 0.0)),
-                Some(Rotor3::identity()),
+                Some(Quat::IDENTITY),
                 Some(Vec3::new(1.0, 1.0, 1.0)),
             ),
         )
@@ -635,15 +631,15 @@ fn physics_update(world: &mut World, delta_time: f32) {
         //NOTE:COMPUTES THE HORIZONTAL SPEED REDUCTION
         let horizontal_velocity = Vec3::new(rigidbody.velocity.x, 0.0, rigidbody.velocity.z);
         let horizontal_friction: f32 = 20.0; // how many units of speed to remove per second
-        if horizontal_velocity.mag() > 0.0 {
+        if horizontal_velocity.length() > 0.0 {
             // compute how much to drop this frame:
             let frame_decel = horizontal_friction * delta_time;
 
-            if horizontal_velocity.mag() <= frame_decel {
+            if horizontal_velocity.length() <= frame_decel {
                 rigidbody.velocity.x = 0.0;
                 rigidbody.velocity.z = 0.0;
             } else {
-                let direction = horizontal_velocity.normalized();
+                let direction = horizontal_velocity.normalize();
                 let decel = direction * frame_decel;
                 rigidbody.velocity.x -= decel.x;
                 rigidbody.velocity.z -= decel.z;
@@ -709,8 +705,8 @@ fn physics_update(world: &mut World, delta_time: f32) {
             .get_mut::<(RigidBody,)>(entity)
             .expect("thing with collision regesterd should have rigidbody");
         let mut restitution = 0.3;
-        if rigidbody.velocity.mag_sq() < 0.3 {
-            rigidbody.velocity = Vec3::zero();
+        if rigidbody.velocity.length_squared() < 0.3 {
+            rigidbody.velocity = Vec3::ZERO;
             restitution = 0.0;
         }
         rigidbody.velocity = set_axis_component(rigidbody.velocity, pen_vec, restitution);
@@ -720,7 +716,7 @@ fn physics_update(world: &mut World, delta_time: f32) {
 // accepts a velocity, a minimum vector to resolve the collision, a coefficient of restitution, and returns the new
 // velocity
 fn set_axis_component(velocity: Vec3, collision_vector: Vec3, restitution: f32) -> Vec3 {
-    let collision = collision_vector.normalized();
+    let collision = collision_vector.normalize();
     let projection = collision * velocity.dot(collision);
     velocity - (1.0 + restitution) * projection
 }
@@ -744,16 +740,10 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     if camera.pitch / PI > 0.500001 {
         camera.pitch = (PI / 2.0) - 0.000001;
     }
-    camera.rotation = Rotor3::from_euler_angles(0.0, -camera.pitch, -camera.yaw);
+    camera.rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.0, -camera.pitch, -camera.yaw);
 
     let target_distance = 10.0;
-    let backward = Vec3 {
-        x: 0.0,
-        y: 0.0,
-        z: 1.0,
-    }
-    .rotated_by(camera.rotation)
-    .normalized();
+    let backward = camera.rotation * Vec3::Z;
 
     let camera_relative_offset = camera.rotation * offset;
     let target = player_transform.position + camera_relative_offset;
@@ -790,14 +780,14 @@ fn player_update(world: &mut World, delta_time: f32) {
                 terrainmap.get_height_at(player_pos.x, player_pos.z),
             )
         })
-        .unwrap_or((Vec3::unit_y(), player_pos.y));
+        .unwrap_or((Vec3::Y, player_pos.y));
 
     let keyboard = world
         .get_resource::<Keyboard>()
         .expect("keyboard should have been added during resumed")
         .clone();
 
-    let mut delta_v = Vec3::zero();
+    let mut delta_v = Vec3::ZERO;
     let mut jump = 0.0;
 
     let camera_rotation = world.get_resource::<Camera>().unwrap().rotation;
@@ -844,20 +834,20 @@ fn player_update(world: &mut World, delta_time: f32) {
         z: delta_v.z,
     };
 
-    if delta_v.mag_sq() > 1e-6 {
+    if delta_v.length_squared() > 1e-6 {
         delta_v.normalize();
     } else {
-        delta_v = Vec3::zero();
+        delta_v = Vec3::ZERO;
     }
 
-    if delta_v != Vec3::zero() {
+    if delta_v != Vec3::ZERO {
         let on_ground = (terrain_height - player_pos.y).abs() < 0.6;
-        let n = terrain_normal.normalized();
+        let n = terrain_normal.normalize();
 
         // Keep horizontal movement constrained to the ground plane.
         let horizontal_velocity = rigidbody.velocity - n * n.dot(rigidbody.velocity);
 
-        let speed_remaining = (max_speed - horizontal_velocity.mag()).clamp(0.0, max_speed);
+        let speed_remaining = (max_speed - horizontal_velocity.length()).clamp(0.0, max_speed);
 
         let acceleration = 20.0;
 
@@ -892,7 +882,7 @@ fn player_update(world: &mut World, delta_time: f32) {
         // transform.rotation = transform
         //     .rotation
         //     .slerp(face_direction, rotation_speed * delta_time)
-        //     .normalized();
+        //     .normalize();
     }
 
     if transform.position.y < -50.0 {

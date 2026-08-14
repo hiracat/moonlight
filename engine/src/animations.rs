@@ -1,5 +1,4 @@
 use proc_macros::{LuaUnion, LuaVal};
-use ultraviolet::Slerp;
 
 use crate::{
     components::{Time, Transform},

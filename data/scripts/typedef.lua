@@ -35,10 +35,9 @@
 
 ---@class Camera
 ---@field position Vec3
----@field rotation Rotor3
+---@field rotation Quat
 ---@field fov_rads number
 ---@field near number
----@field far number
 ---@field pitch number
 ---@field yaw number
 ---@field aspect_ratio number
@@ -145,7 +144,7 @@
 
 ---@class Transform
 ---@field position Vec3
----@field rotation Rotor3
+---@field rotation Quat
 ---@field scale Vec3
 
 ---@class UISchema

@@ -2,9 +2,9 @@ use std::{collections::HashSet, ptr, sync::Arc, time::Instant};
 use tracing::info;
 
 use ash::vk;
+use glam::Vec3;
 use image::{ImageBuffer, Luma};
 use proc_macros::LuaRef;
-use ultraviolet::Vec3;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -611,7 +611,6 @@ impl ApplicationHandler for App {
             Vec3::new(0.0, 5.0, -6.0),
             60.0,
             1.0,
-            200.0,
             window_size.height as f32 / window_size.width as f32,
         );
         let time = Time::default();

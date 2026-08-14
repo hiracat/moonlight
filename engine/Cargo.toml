@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 bytemuck = { version = "1.20.0", features = ["derive"] }
 thiserror = "2.0.12"
-ultraviolet = { version = "0.10.0", features = ["bytemuck"] }
 image = "0.25.6"
 winit = { version = "0.30.11", features = ["rwh_06"] }
 ash = "0.38.0"
@@ -22,6 +21,7 @@ inventory = "0.3.22"
 proc-macros = { path = "../proc-macros", features = ["internal"] }
 educe = "0.6.0"
 tracing = "0.1.44"
+glam = {version = "0.33.3", features = ["bytemuck", "serde"]}
 
 
 [dev-dependencies]

@@ -2,44 +2,45 @@
 #![allow(unreachable_patterns)]
 
 use bytemuck as bm;
-use ultraviolet as uv;
+use glam as gl;
 
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     core::TerrainMap,
+    renderers::world::radiance::RadianceLevelConfigUBO,
     resources::Material,
 };
 
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct ModelUBO {
-    pub model: uv::Mat4,
-    pub normal: uv::Mat4,
+    pub model: gl::Mat4,
+    pub normal: gl::Mat4,
 }
 
 impl ModelUBO {
-    pub(crate) fn new(position: uv::Vec3, rotation: uv::Rotor3) -> ModelUBO {
-        let rotation_mat = rotation.into_matrix().into_homogeneous();
-        let translation_mat = uv::Mat4::from_translation(position);
+    pub(crate) fn new(position: gl::Vec3, rotation: gl::Quat) -> ModelUBO {
+        let rotation_mat = gl::Mat4::from_quat(rotation);
+        let translation_mat = gl::Mat4::from_translation(position);
         let model_mat = translation_mat * rotation_mat;
 
         ModelUBO {
             model: model_mat,
-            normal: model_mat.inversed().transposed(),
+            normal: model_mat.inverse().transpose(),
         }
     }
 }
 
 impl From<&Transform> for ModelUBO {
     fn from(transform: &Transform) -> Self {
-        let rotation = transform.rotation.into_matrix().into_homogeneous();
-        let scale = uv::Mat4::from_nonuniform_scale(transform.scale);
-        let position = uv::Mat4::from_translation(transform.position);
+        let rotation = gl::Mat4::from_quat(transform.rotation);
+        let scale = gl::Mat4::from_scale(transform.scale);
+        let position = gl::Mat4::from_translation(transform.position);
         let model = position * rotation * scale;
 
         ModelUBO {
             model,
-            normal: model.inversed().transposed(),
+            normal: model.inverse().transpose(),
         }
     }
 }
@@ -51,48 +52,23 @@ pub struct MeshInfo {
     pub index_offset: u32,
     pub index_count: u32,
     pub _pad: u32,
-    pub aabb_local_min: uv::Vec4,
-    pub aabb_local_max: uv::Vec4,
-    pub local_to_world: uv::Mat4,
-    pub world_to_local: uv::Mat4,
+    pub aabb_local_min: gl::Vec4,
+    pub aabb_local_max: gl::Vec4,
+    pub local_to_world: gl::Mat4,
+    pub world_to_local: gl::Mat4,
 }
 
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
-pub struct RadianceConfigUBO {
-    pub start_position: uv::Vec4, // 16 bytes
-    pub count_x: u32,
-    pub count_y: u32,
-    pub count_z: u32,
-    pub z_cols: u32,
-    pub xy_cols: u32,
-    pub xy_rows: u32,
-    pub above_z_cols: u32,
-    pub above_xy_cols: u32,
-    pub above_xy_rows: u32,
-    pub _pad: u32,
-    pub probe_spacing: f32,
-    pub interval_start: f32,
-    pub interval_end: f32,
-    pub is_top_cascade: u32,
-    pub sqrt_ray_count: u32,
+pub struct ComputeRadianceUBO {
+    pub level_config: RadianceLevelConfigUBO,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+
     pub mesh_count: u32,
     // offset 64 here, meshes is naturally aligned, no padding needed
     pub meshes: [MeshInfo; 64],
-}
-
-#[derive(Default, Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
-#[repr(C)]
-pub struct RadianceInfoUBO {
-    pub start_position: uv::Vec4, // world space origin of the probe grid
-    pub probe_x_count: u32,
-    pub probe_y_count: u32,
-    pub probe_z_count: u32,
-    pub z_cols: u32,
-    pub xy_cols: u32,
-    pub xy_rows: u32,
-    pub sqrt_ray_count: u32,
-    pub probe_spacing: f32,
 }
 
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]
@@ -103,8 +79,8 @@ pub struct LightDataUBO {
     pub _pad0: u32,
     pub _pad1: u32,
     pub _pad2: u32,
-    pub point_light_positions: [uv::Vec4; 32], // xyz = pos, w = radius
-    pub point_light_colors: [uv::Vec4; 32],    // xyz = color (intensity baked in), w = unused
+    pub point_light_positions: [gl::Vec4; 32], // xyz = pos, w = radius
+    pub point_light_colors: [gl::Vec4; 32],    // xyz = color (intensity baked in), w = unused
 }
 
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
@@ -124,19 +100,19 @@ impl From<&Material> for MaterialUBO {
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct CameraUBO {
-    view: uv::Mat4,
-    proj: uv::Mat4,
+    view: gl::Mat4,
+    proj: gl::Mat4,
 }
 
 impl From<&Camera> for CameraUBO {
     fn from(camera: &Camera) -> Self {
-        let rotation_matrix = camera.rotation.reversed().into_matrix().into_homogeneous();
-        let translation_matrix = uv::Mat4::from_translation(-camera.position);
+        let rotation_matrix = gl::Mat4::from_quat(camera.rotation.inverse());
+        let translation_matrix = gl::Mat4::from_translation(-camera.position);
         let view = rotation_matrix * translation_matrix;
 
         CameraUBO {
             view,
-            proj: uv::projection::perspective_reversed_infinite_z_vk(
+            proj: gl::camera::rh::proj::vulkan::perspective_infinite_reverse(
                 camera.fov_rads,
                 camera.aspect_ratio,
                 camera.near,
@@ -166,29 +142,28 @@ impl From<&TerrainMap> for TerrainUBO {
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct CameraInverseUBO {
-    view: uv::Mat4,
-    proj: uv::Mat4,
-    inverse_view: uv::Mat4,
-    inverse_proj: uv::Mat4,
+    view: gl::Mat4,
+    proj: gl::Mat4,
+    inverse_view: gl::Mat4,
+    inverse_proj: gl::Mat4,
 }
 
 impl From<&Camera> for CameraInverseUBO {
     fn from(camera: &Camera) -> Self {
-        let rotation_matrix = camera.rotation.reversed().into_matrix().into_homogeneous();
-        let translation_matrix = uv::Mat4::from_translation(-camera.position);
+        let rotation_matrix = gl::Mat4::from_quat(camera.rotation.inverse());
+        let translation_matrix = gl::Mat4::from_translation(-camera.position);
         let view = rotation_matrix * translation_matrix;
-        let proj = uv::projection::perspective_vk(
+        let proj = gl::camera::rh::proj::vulkan::perspective_infinite_reverse(
             camera.fov_rads,
             camera.aspect_ratio,
             camera.near,
-            camera.far,
         );
 
         CameraInverseUBO {
             view,
             proj,
-            inverse_view: view.inversed(),
-            inverse_proj: proj.inversed(),
+            inverse_view: view.inverse(),
+            inverse_proj: proj.inverse(),
         }
     }
 }
@@ -196,7 +171,7 @@ impl From<&Camera> for CameraInverseUBO {
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct AmbientLightUBO {
-    pub(crate) color: uv::Vec3,
+    pub(crate) color: gl::Vec3,
     pub(crate) intensity: f32,
 }
 
@@ -212,15 +187,15 @@ impl From<&AmbientLight> for AmbientLightUBO {
 #[derive(Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct PointLightUBO {
-    color: uv::Vec4, // w = size
-    position: uv::Vec4,
+    color: gl::Vec4, // w = size
+    position: gl::Vec4,
 }
 
 impl PointLightUBO {
     pub(crate) fn new() -> Self {
         PointLightUBO {
-            position: uv::Vec4::zero(),
-            color: uv::Vec4::zero(),
+            position: gl::Vec4::ZERO,
+            color: gl::Vec4::ZERO,
         }
     }
 }
@@ -228,13 +203,8 @@ impl PointLightUBO {
 impl From<(&PointLight, &Transform)> for PointLightUBO {
     fn from((light, transform): (&PointLight, &Transform)) -> Self {
         PointLightUBO {
-            position: transform.position.into_homogeneous_point(),
-            color: uv::Vec4 {
-                x: light.color.x,
-                y: light.color.y,
-                z: light.color.z,
-                w: light.size,
-            },
+            position: transform.position.extend(1.0),
+            color: gl::Vec4::from_array([light.color.x, light.color.y, light.color.z, light.size]),
         }
     }
 }
@@ -242,10 +212,10 @@ impl From<(&PointLight, &Transform)> for PointLightUBO {
 #[derive(Debug, Default, Copy, Clone, bm::Zeroable, bm::Pod)]
 #[repr(C)]
 pub struct DirectionalLightUBO {
-    pub sun_position: uv::Vec4,
-    pub sun_color: uv::Vec4, // w = size, between 0 and 1
-    pub sky_zenith_color: uv::Vec4,
-    pub sky_horizon_color: uv::Vec4,
+    pub sun_position: gl::Vec4,
+    pub sun_color: gl::Vec4, // w = size, between 0 and 1
+    pub sky_zenith_color: gl::Vec4,
+    pub sky_horizon_color: gl::Vec4,
     pub sky_gradient_sharpness: f32,
     pub _pad: [u32; 3],
 }
@@ -253,15 +223,15 @@ pub struct DirectionalLightUBO {
 impl From<&DirectionalLight> for DirectionalLightUBO {
     fn from(light: &DirectionalLight) -> Self {
         DirectionalLightUBO {
-            sun_position: light.sun_position.normalized().into_homogeneous_point(),
-            sun_color: uv::Vec4::new(
+            sun_position: light.sun_position.normalize().extend(1.0),
+            sun_color: gl::Vec4::new(
                 light.sun_color.x,
                 light.sun_color.y,
                 light.sun_color.z,
                 light.sun_size,
             ),
-            sky_zenith_color: light.sky_zenith_color.into_homogeneous_point(),
-            sky_horizon_color: light.sky_horizon_color.into_homogeneous_point(),
+            sky_zenith_color: light.sky_zenith_color.extend(1.0),
+            sky_horizon_color: light.sky_horizon_color.extend(1.0),
             sky_gradient_sharpness: light.sky_gradient_sharpness,
             _pad: [0; 3],
         }

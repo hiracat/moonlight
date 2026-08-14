@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
+use glam::{self as gl, Vec3};
 use proc_macros::LuaRef;
-use ultraviolet::{self as uv, Vec3};
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct Time {
@@ -10,16 +10,16 @@ pub struct Time {
 
 #[derive(LuaRef, Debug, Clone, Copy)]
 pub struct Transform {
-    pub position: uv::Vec3,
-    pub rotation: uv::Rotor3,
-    pub scale: uv::Vec3,
+    pub position: gl::Vec3,
+    pub rotation: gl::Quat,
+    pub scale: gl::Vec3,
 }
 impl Default for Transform {
     fn default() -> Self {
         Self {
             position: Default::default(),
             rotation: Default::default(),
-            scale: Vec3::one(),
+            scale: Vec3::ONE,
         }
     }
 }
@@ -27,41 +27,40 @@ impl Default for Transform {
 impl Transform {
     pub fn new() -> Self {
         Self {
-            rotation: uv::Rotor3::identity(),
-            scale: uv::Vec3::one(),
-            position: uv::Vec3::zero(),
+            rotation: gl::Quat::IDENTITY,
+            scale: gl::Vec3::ONE,
+            position: gl::Vec3::ZERO,
         }
     }
 
     pub fn from(
-        position: Option<uv::Vec3>,
-        rotation: Option<uv::Rotor3>,
-        scale: Option<uv::Vec3>,
+        position: Option<gl::Vec3>,
+        rotation: Option<gl::Quat>,
+        scale: Option<gl::Vec3>,
     ) -> Self {
         Self {
-            rotation: rotation.unwrap_or(uv::Rotor3::identity()),
-            scale: scale.unwrap_or(uv::Vec3::one()),
-            position: position.unwrap_or(uv::Vec3::zero()),
+            rotation: rotation.unwrap_or(gl::Quat::IDENTITY),
+            scale: scale.unwrap_or(gl::Vec3::ONE),
+            position: position.unwrap_or(gl::Vec3::ZERO),
         }
     }
 }
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct Camera {
-    pub position: uv::Vec3,
-    pub rotation: uv::Rotor3,
+    pub position: gl::Vec3,
+    pub rotation: gl::Quat,
     pub fov_rads: f32,
     pub near: f32,
-    pub far: f32,
     pub pitch: f32,
     pub yaw: f32,
     pub aspect_ratio: f32,
 }
 
 impl Camera {
-    pub fn create(position: uv::Vec3, fov: f32, near: f32, far: f32, aspect_ratio: f32) -> Self {
+    pub fn create(position: gl::Vec3, fov: f32, near: f32, aspect_ratio: f32) -> Self {
         let fov_rads = fov * (std::f32::consts::PI / 180.0);
-        let rotation = uv::Rotor3::identity();
+        let rotation = gl::Quat::IDENTITY;
         Camera {
             pitch: 0.0,
             yaw: 0.0,
@@ -69,7 +68,6 @@ impl Camera {
             rotation,
             fov_rads,
             near,
-            far,
             aspect_ratio,
         }
     }
@@ -77,50 +75,50 @@ impl Camera {
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct AmbientLight {
-    pub color: uv::Vec3,
+    pub color: gl::Vec3,
     pub intensity: f32,
 }
 
 impl AmbientLight {
-    pub fn create(color: uv::Vec3, intensity: f32) -> Self {
+    pub fn create(color: gl::Vec3, intensity: f32) -> Self {
         Self { color, intensity }
     }
 }
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct PointLight {
-    pub color: uv::Vec3,
+    pub color: gl::Vec3,
     pub size: f32,
 }
 
 impl PointLight {
-    pub fn new(color: uv::Vec3, size: f32) -> Self {
+    pub fn new(color: gl::Vec3, size: f32) -> Self {
         Self { color, size }
     }
 }
 
 #[derive(LuaRef, Debug, Clone, Copy, Default)]
 pub struct DirectionalLight {
-    pub sun_position: uv::Vec3,
-    pub sun_color: uv::Vec3,
+    pub sun_position: gl::Vec3,
+    pub sun_color: gl::Vec3,
     pub sun_size: f32,
 
-    pub sky_zenith_color: uv::Vec3,
-    pub sky_horizon_color: uv::Vec3,
+    pub sky_zenith_color: gl::Vec3,
+    pub sky_horizon_color: gl::Vec3,
     pub sky_gradient_sharpness: f32,
 }
 
 impl DirectionalLight {
     pub fn create(
-        sun_pos: uv::Vec3,
-        sun_color: uv::Vec3,
-        sky_zenith_color: uv::Vec3,
-        sky_horizon_color: uv::Vec3,
+        sun_pos: gl::Vec3,
+        sun_color: gl::Vec3,
+        sky_zenith_color: gl::Vec3,
+        sky_horizon_color: gl::Vec3,
         sky_gradient_sharpness: f32,
         sun_size: f32,
     ) -> Self {
         Self {
-            sun_position: sun_pos.normalized(),
+            sun_position: sun_pos.normalize(),
             sun_color,
             sky_zenith_color,
             sky_horizon_color,

@@ -8,7 +8,6 @@ moonlight = { path = "../engine" }
 proc-macros = { path = "../proc-macros" }
 bytemuck = "1.20.0"
 thiserror = "2.0.12"
-ultraviolet = { version = "0.10.0", features = ["bytemuck"] }
 image = "0.25.6"
 winit = { version = "0.30.5", features = ["rwh_04", "rwh_05"] }
 half = { version = "2.6.0", features = ["bytemuck"] }
@@ -20,3 +19,4 @@ inventory = "0.3.22"
 libc = "0.2.186"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+glam = {version = "0.33.3", features = ["bytemuck", "serde"]}
