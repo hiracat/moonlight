@@ -9,13 +9,12 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::reload;
 
 use glam::{Quat, Vec3};
-use image::ImageReader;
 use moonlight::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Time, Transform},
     core::{App, Controllable, Engine, Keyboard, MouseState, System, TerrainMap},
     ecs::{OptM, ReqM, World},
     physics::{Collider, Obb, RigidBody},
-    resources::{self, Material, Skybox},
+    resources::Skybox,
 };
 use proc_macros::LuaRef;
 use tracing::{trace, warn};
@@ -734,13 +733,9 @@ fn camera_update(world: &mut World, _delta_time: f32, offset: Vec3) {
     let sensativity = 0.002;
     camera.pitch += mouse.y * sensativity;
     camera.yaw -= mouse.x * sensativity;
-    if camera.pitch / PI < -0.499999 {
-        camera.pitch = -(PI / 2.0) + 0.000001;
-    }
-    if camera.pitch / PI > 0.500001 {
-        camera.pitch = (PI / 2.0) - 0.000001;
-    }
-    camera.rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.0, -camera.pitch, -camera.yaw);
+    camera.pitch = camera.pitch.clamp(-PI / 2.0 + 1e-4, PI / 2.0 - 1e-4);
+    // i could not tell you why the sign is wrong for yaw, it just is
+    camera.rotation = Quat::from_euler(glam::EulerRot::YXZ, camera.yaw, -camera.pitch, 0.0);
 
     let target_distance = 10.0;
     let backward = camera.rotation * Vec3::Z;
@@ -835,7 +830,7 @@ fn player_update(world: &mut World, delta_time: f32) {
     };
 
     if delta_v.length_squared() > 1e-6 {
-        delta_v.normalize();
+        delta_v = delta_v.normalize();
     } else {
         delta_v = Vec3::ZERO;
     }

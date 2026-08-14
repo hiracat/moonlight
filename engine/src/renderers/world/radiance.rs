@@ -26,16 +26,16 @@ use crate::{
 
 #[derive(Debug, Clone, Copy)]
 pub struct RadianceCascadesConfiguration {
-    volume_center: Vec3,
+    pub volume_center: Vec3,
     /// probe volume is just this dimension * smallest_object_size
-    top_level_probe_count: UVec3,
-    top_level_probe_gap: f32,
-    cascade_count: u32,
+    pub top_level_probe_count: UVec3,
+    pub top_level_probe_gap: f32,
+    pub cascade_count: u32,
     /// must be a perfect square, if is not a perfect square,
     /// it will be rounded down to the nearest square
-    bottom_level_rays_per_probe: u32,
+    pub bottom_level_rays_per_probe: u32,
     /// the ratio to mulitply the gap between probes by to get the interal length
-    base_interval_length_ratio: f32,
+    pub base_interval_length_ratio: f32,
 }
 
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -60,7 +60,7 @@ pub struct RadianceMeshBuffers {
     pub mesh_infos: Vec<MeshInfo>,
 }
 
-fn setup(
+pub fn setup(
     config: RadianceCascadesConfiguration,
     device: Arc<ash::Device>,
     pipeline_manager: &mut PipelineManager,
@@ -72,6 +72,7 @@ fn setup(
     normal: &mut ImageVersion,
     hdr_color: &mut ImageVersion,
 ) -> RenderGraph {
+    dbg!(&config);
     let compute_radiance_data = get_compute_data(
         device.clone(),
         Path::new("shaders/compute_cascade.comp.spv"),
@@ -84,7 +85,7 @@ fn setup(
 
     let apply_radiance = pipeline_manager.allocate_handle("ambient");
     let apply_radiance_desc = additive_light_pass_desc(
-        &geometry_pipeline_desc(vk::Format::from_raw(0), &vec![]),
+        &geometry_pipeline_desc(vk::Format::from_raw(0), &[]),
         vec![vk::Format::R32G32B32A32_SFLOAT; 5],
     );
 
@@ -262,20 +263,20 @@ fn setup(
             configs[0],
         ),
     );
-    let graph = graph
+
+    graph
         .add_pipeline("ambient")
         .pipeline(apply_radiance)
-        .reads(&albedo)
-        .reads(&normal)
-        .reads(&position)
+        .reads(albedo)
+        .reads(normal)
+        .reads(position)
         .reads(&cascade_images[0])
         .writes(hdr_color)
         .writes(&mut tmp1)
         .writes(&mut tmp2)
         .writes(&mut tmp3)
         .writes(&mut tmp4)
-        .build();
-    graph
+        .build()
 }
 
 fn make_radiance_setup(
@@ -538,7 +539,7 @@ fn make_apply_radiance_pipline_setup(
     final_image_id: ImageId,
     radiance_info: RadianceLevelConfigUBO,
 ) -> PipelineFn {
-    let closure = Box::new(
+    Box::new(
         move |world: &mut World,
               _resource_manager: &mut ResourceManager,
               descriptor_manager: &mut DescriptorManager,
@@ -637,8 +638,7 @@ fn make_apply_radiance_pipline_setup(
             }];
             PipelineJob::Graphics(jobs)
         },
-    );
-    closure
+    )
 }
 
 impl RadianceLevelConfigUBO {
@@ -647,7 +647,7 @@ impl RadianceLevelConfigUBO {
     fn new(config: RadianceCascadesConfiguration, level: u32) -> Self {
         let volume_center = config.volume_center;
         let cascade_count = config.cascade_count;
-        assert!(config.cascade_count == 0);
+        assert!(config.cascade_count != 0);
 
         let top_level_probe_count = config.top_level_probe_count;
         let top_level_probe_gap = config.top_level_probe_gap;
@@ -671,7 +671,7 @@ impl RadianceLevelConfigUBO {
         let grid_origin = volume_center
             - ((Vec3::from(grid_size.to_array().map(|x| x as f32)) - Vec3::ONE) * grid_gap / 2.0);
 
-        let is_top_cascade = if cascade_count == level - 1 { 1 } else { 0 };
+        let is_top_cascade = if level == cascade_count { 1 } else { 0 };
 
         Self {
             is_top_cascade,

@@ -1379,6 +1379,7 @@ fn benchmark() {
             }
         });
     }
+    panic!();
 }
 
 #[test]

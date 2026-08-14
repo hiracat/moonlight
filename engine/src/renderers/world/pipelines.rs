@@ -12,12 +12,14 @@ use ash::vk::{self, Extent2D};
 use bytemuck::bytes_of;
 use educe::Educe;
 use egui::TextBuffer;
+use glam::{UVec3, Vec3};
 use rspirv_reflect::{self as rr, Reflection};
 
 use crate::core::TerrainMap;
 use crate::ecs::{Not, NotM, Opt, OptM, ReqM, World};
 use crate::renderers::world::descriptors::{BindingData, DescriptorManager};
 use crate::renderers::world::draw::{DrawStyle, PipelineJob};
+use crate::renderers::world::radiance::{self, RadianceCascadesConfiguration};
 use crate::renderers::world::rendergraph::{ImageDesc, ImageId, RenderGraph};
 use crate::resources::{Animated, AnimatedVertex, IsVertex, ResourceManager, Vertex};
 use crate::resources::{Material, Mesh};
@@ -315,7 +317,7 @@ pub fn create_builtin_graphics_pipelines(
         name: "depth",
         format: vk::Format::D32_SFLOAT,
     });
-    let hdr_color = graph.add_image(ImageDesc::Managed {
+    let mut hdr_color = graph.add_image(ImageDesc::Managed {
         name: "hdr_color",
         format: vk::Format::R32G32B32A32_SFLOAT,
     });
@@ -405,6 +407,28 @@ pub fn create_builtin_graphics_pipelines(
         &tonemap_data.stages,
         tonemap_layout,
         make_tonemap_setup(hdr_color_id),
+    );
+
+    let config = RadianceCascadesConfiguration {
+        volume_center: Vec3::ZERO,
+        top_level_probe_count: UVec3::new(8, 6, 8),
+        top_level_probe_gap: 2.0,
+        cascade_count: 3,
+        bottom_level_rays_per_probe: 16,
+        base_interval_length_ratio: 1.7,
+    };
+
+    let graph = radiance::setup(
+        config,
+        device,
+        &mut pipeline_manager,
+        &mut descriptor_manager,
+        graph,
+        allocator,
+        &mut albedo,
+        &mut position,
+        &mut normal,
+        &mut hdr_color,
     );
 
     let graph = graph

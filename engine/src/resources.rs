@@ -109,7 +109,7 @@ pub struct Animation {
     #[lua(skip)]
     pub(crate) id: usize,
 }
-pub(crate) struct AnimationResources {
+pub struct AnimationResources {
     // store all skeletons and bones, then flatten to upload to the gpu.
     pub(crate) skeletons: Vec<SkeletonImpl>,
     // use the same indices as the skeletons, with multiple animations per skeleton possible
@@ -118,8 +118,8 @@ pub(crate) struct AnimationResources {
     pub(crate) skeleton_transform_handle: SsboHandle,
     pub(crate) skeleton_normal_handle: SsboHandle,
 
-    allocator: SharedAllocator,
-    device: Arc<ash::Device>,
+    _allocator: SharedAllocator,
+    _device: Arc<ash::Device>,
 }
 impl AnimationResources {
     pub(crate) fn write_bones(&mut self, ssbo_registry: &mut SsboRegistry) {
@@ -208,8 +208,8 @@ impl AnimationResources {
             skeleton_normal_handle: normal_handle,
             skeletons: Vec::new(),
             animations: Vec::new(),
-            device: device.clone(),
-            allocator: memory_allocator.clone(),
+            _device: device.clone(),
+            _allocator: memory_allocator.clone(),
         }
     }
 }
@@ -293,7 +293,7 @@ pub(crate) enum Keyframes {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AnimationImpl {
-    name: String,
+    _name: String,
 
     pub(crate) channels: Vec<AnimationChannel>,
 }
@@ -307,7 +307,7 @@ pub(crate) struct AnimationChannel {
 
 fn load_joints(
     skin: &gltf::Skin,
-    buffers: &Vec<gltf::buffer::Data>,
+    buffers: &[gltf::buffer::Data],
 ) -> (Vec<Joint>, HashMap<usize, usize>, HashMap<usize, usize>) {
     let inverse_bind_accessor = skin.inverse_bind_matrices().unwrap();
     let mut gltf_node_to_engine = HashMap::new();
@@ -879,7 +879,7 @@ impl ResourceManager {
     pub fn load_animations(
         &mut self,
         document: &gltf::Document,
-        buffers: &Vec<gltf::buffer::Data>,
+        buffers: &[gltf::buffer::Data],
     ) -> (Animated, HashMap<usize, usize>) {
         assert_eq!(document.skins().len(), 1);
 
@@ -918,10 +918,8 @@ impl ResourceManager {
                             Keyframes::Translation(translations_vec)
                         }
                         gltf::animation::util::ReadOutputs::Rotations(rotations) => {
-                            let rotations_vec = rotations
-                                .into_f32()
-                                .map(|x| gl::Quat::from_array(x))
-                                .collect();
+                            let rotations_vec =
+                                rotations.into_f32().map(gl::Quat::from_array).collect();
                             Keyframes::Rotation(rotations_vec)
                         }
                         gltf::animation::util::ReadOutputs::Scales(scales) => {
@@ -945,7 +943,7 @@ impl ResourceManager {
                 })
             }
             animation_clips.push(AnimationImpl {
-                name: animation.name().unwrap_or("no name").to_string(),
+                _name: animation.name().unwrap_or("no name").to_string(),
                 channels: animation_channels,
             });
         }
@@ -1113,7 +1111,7 @@ impl ResourceManager {
 
     fn load_static_mesh(
         primative: &gltf::Primitive,
-        buffers: &Vec<gltf::buffer::Data>,
+        buffers: &[gltf::buffer::Data],
         allocator: SharedAllocator,
         device: Arc<ash::Device>,
     ) -> GpuMesh {
@@ -1178,7 +1176,7 @@ impl ResourceManager {
 
     fn load_animated_mesh(
         primative: &gltf::Primitive,
-        buffers: &Vec<gltf::buffer::Data>,
+        buffers: &[gltf::buffer::Data],
         allocator: SharedAllocator,
         device: Arc<ash::Device>,
         gltf_joint_to_engine: &HashMap<usize, usize>,
@@ -1335,7 +1333,7 @@ impl GpuTexture {
         staging_mem
             .mapped_slice_mut()
             .unwrap()
-            .write(image.as_bytes())
+            .write_all(image.as_bytes())
             .unwrap();
 
         let subresource_range = vk::ImageSubresourceRange {
@@ -1530,7 +1528,7 @@ impl GpuTexture {
         staging_mem
             .mapped_slice_mut()
             .unwrap()
-            .write(&image_bytes)
+            .write_all(&image_bytes)
             .unwrap();
 
         let subresource_range = vk::ImageSubresourceRange {

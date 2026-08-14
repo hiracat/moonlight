@@ -32,12 +32,12 @@ pub enum PlaybackMode {
 
 #[derive(Debug, Clone, LuaVal)]
 #[lua(no_default)]
-struct Then {
+pub struct Then {
     next_mode: Box<PlaybackMode>,
 }
 #[derive(Debug, Clone, LuaVal)]
 #[lua(no_default)]
-struct Blend {
+pub struct Blend {
     blend_progress: f32,
     /// if > 0, wait this long before even starting the source
     delay: f32,
