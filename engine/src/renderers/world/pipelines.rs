@@ -171,272 +171,272 @@ pub fn create_builtin_graphics_pipelines(
     allocator: SharedAllocator,
     swapchain_image_format: vk::Format,
 ) -> (RenderGraph, PipelineManager, DescriptorManager, ImageId) {
-    let depth_format = vk::Format::D32_SFLOAT;
-    let color_formats = [
-        vk::Format::A2B10G10R10_UNORM_PACK32,
-        vk::Format::R16G16B16A16_SFLOAT,
-        vk::Format::R32G32B32A32_SFLOAT,
-    ];
-    let geometry_desc = geometry_pipeline_desc(depth_format, &color_formats);
-
-    let animated_geometry_desc = GraphicsPipelineDesc {
-        vertex_input_state: VertexInputState {
-            vertex_attribute_descriptions: AnimatedVertex::get_vertex_attributes(),
-            vertex_binding_descriptions: vec![vk::VertexInputBindingDescription {
-                binding: 0,
-                stride: std::mem::size_of::<AnimatedVertex>() as u32,
-                input_rate: vk::VertexInputRate::VERTEX,
-            }],
-        },
-        ..geometry_desc.clone()
-    };
-    let clipped_geometry_desc = GraphicsPipelineDesc {
-        raster_state: RasterState {
-            cull_mode: vk::CullModeFlags::NONE,
-            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
-            line_width: 1.0,
-            depth_clamp_enable: false,
-            rasterizer_discard_enable: false,
-            polygon_mode: vk::PolygonMode::FILL,
-            depth_bias_enable: false,
-            depth_bias_constant_factor: 0.0,
-            depth_bias_clamp: 0.0,
-            depth_bias_slope_factor: 0.0,
-        },
-        ..geometry_desc.clone()
-    };
-
-    let lighting_desc = additive_light_pass_desc(&geometry_desc, color_formats.to_vec());
-
-    let tonemap_desc = fullscreen_opaque_pass_desc(&lighting_desc, vec![swapchain_image_format]);
-
-    let terrain_desc = GraphicsPipelineDesc {
-        vertex_input_state: VertexInputState {
-            vertex_binding_descriptions: vec![],
-            vertex_attribute_descriptions: vec![],
-        },
-        ..geometry_desc.clone()
-    };
-
-    // --- reflect shaders ---
-    let static_geometry_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/static_geometry.vert.spv"),
-        Path::new("shaders/geometry.frag.spv"),
-    );
-    let animated_geometry_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/animated_geometry.vert.spv"),
-        Path::new("shaders/geometry.frag.spv"),
-    );
-    let clipped_geometry_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/static_geometry.vert.spv"),
-        Path::new("shaders/clipped_geometry.frag.spv"),
-    );
-    let terrain_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/terrain.vert.spv"),
-        Path::new("shaders/terrain.frag.spv"),
-    );
-    let tonemap_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/tonemap.vert.spv"),
-        Path::new("shaders/tonemap.frag.spv"),
-    );
-    let directional_data = get_pipeline_data(
-        device.clone(),
-        Path::new("shaders/directional.vert.spv"),
-        Path::new("shaders/directional.frag.spv"),
-    );
-
+    // let depth_format = vk::Format::D32_SFLOAT;
+    // let color_formats = [
+    //     vk::Format::A2B10G10R10_UNORM_PACK32,
+    //     vk::Format::R16G16B16A16_SFLOAT,
+    //     vk::Format::R32G32B32A32_SFLOAT,
+    // ];
+    // let geometry_desc = geometry_pipeline_desc(depth_format, &color_formats);
+    //
+    // let animated_geometry_desc = GraphicsPipelineDesc {
+    //     vertex_input_state: VertexInputState {
+    //         vertex_attribute_descriptions: AnimatedVertex::get_vertex_attributes(),
+    //         vertex_binding_descriptions: vec![vk::VertexInputBindingDescription {
+    //             binding: 0,
+    //             stride: std::mem::size_of::<AnimatedVertex>() as u32,
+    //             input_rate: vk::VertexInputRate::VERTEX,
+    //         }],
+    //     },
+    //     ..geometry_desc.clone()
+    // };
+    // let clipped_geometry_desc = GraphicsPipelineDesc {
+    //     raster_state: RasterState {
+    //         cull_mode: vk::CullModeFlags::NONE,
+    //         front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+    //         line_width: 1.0,
+    //         depth_clamp_enable: false,
+    //         rasterizer_discard_enable: false,
+    //         polygon_mode: vk::PolygonMode::FILL,
+    //         depth_bias_enable: false,
+    //         depth_bias_constant_factor: 0.0,
+    //         depth_bias_clamp: 0.0,
+    //         depth_bias_slope_factor: 0.0,
+    //     },
+    //     ..geometry_desc.clone()
+    // };
+    //
+    // let lighting_desc = additive_light_pass_desc(&geometry_desc, color_formats.to_vec());
+    //
+    // let tonemap_desc = fullscreen_opaque_pass_desc(&lighting_desc, vec![swapchain_image_format]);
+    //
+    // let terrain_desc = GraphicsPipelineDesc {
+    //     vertex_input_state: VertexInputState {
+    //         vertex_binding_descriptions: vec![],
+    //         vertex_attribute_descriptions: vec![],
+    //     },
+    //     ..geometry_desc.clone()
+    // };
+    //
+    // // --- reflect shaders ---
+    // let static_geometry_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/static_geometry.vert.spv"),
+    //     Path::new("shaders/geometry.frag.spv"),
+    // );
+    // let animated_geometry_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/animated_geometry.vert.spv"),
+    //     Path::new("shaders/geometry.frag.spv"),
+    // );
+    // let clipped_geometry_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/static_geometry.vert.spv"),
+    //     Path::new("shaders/clipped_geometry.frag.spv"),
+    // );
+    // let terrain_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/terrain.vert.spv"),
+    //     Path::new("shaders/terrain.frag.spv"),
+    // );
+    // let tonemap_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/tonemap.vert.spv"),
+    //     Path::new("shaders/tonemap.frag.spv"),
+    // );
+    // let directional_data = get_pipeline_data(
+    //     device.clone(),
+    //     Path::new("shaders/directional.vert.spv"),
+    //     Path::new("shaders/directional.frag.spv"),
+    // );
+    //
     let mut pipeline_manager = PipelineManager::new(device.clone());
-
-    // --- allocate handles ---
-    let static_geometry = pipeline_manager.allocate_handle("static_geometry");
-    let animated_geometry = pipeline_manager.allocate_handle("animated_geometry");
-    let clipped_geometry = pipeline_manager.allocate_handle("clipped_geometry");
-    let terrain = pipeline_manager.allocate_handle("terrain");
-    let tonemap = pipeline_manager.allocate_handle("tonemap");
-    let directional = pipeline_manager.allocate_handle("directional");
-
-    // --- build descriptor managers, get layouts ---
+    //
+    // // --- allocate handles ---
+    // let static_geometry = pipeline_manager.allocate_handle("static_geometry");
+    // let animated_geometry = pipeline_manager.allocate_handle("animated_geometry");
+    // let clipped_geometry = pipeline_manager.allocate_handle("clipped_geometry");
+    // let terrain = pipeline_manager.allocate_handle("terrain");
+    // let tonemap = pipeline_manager.allocate_handle("tonemap");
+    // let directional = pipeline_manager.allocate_handle("directional");
+    //
+    // // --- build descriptor managers, get layouts ---
     let mut descriptor_manager: DescriptorManager =
         DescriptorManager::new(device.clone(), allocator.clone());
-
-    let static_geometry_layout = descriptor_manager.add_pipeline(
-        static_geometry,
-        static_geometry_data.vertex_sets,
-        static_geometry_data.fragment_sets,
-    );
-    let animated_geometry_layout = descriptor_manager.add_pipeline(
-        animated_geometry,
-        animated_geometry_data.vertex_sets,
-        animated_geometry_data.fragment_sets,
-    );
-    let clipped_geometry_layout = descriptor_manager.add_pipeline(
-        clipped_geometry,
-        clipped_geometry_data.vertex_sets,
-        clipped_geometry_data.fragment_sets,
-    );
-    let terrain_layout = descriptor_manager.add_pipeline(
-        terrain,
-        terrain_data.vertex_sets,
-        terrain_data.fragment_sets,
-    );
-    let tonemap_layout = descriptor_manager.add_pipeline(
-        tonemap,
-        tonemap_data.vertex_sets,
-        tonemap_data.fragment_sets,
-    );
-    let directional_layout = descriptor_manager.add_pipeline(
-        directional,
-        directional_data.vertex_sets,
-        directional_data.fragment_sets,
-    );
-
+    //
+    // let static_geometry_layout = descriptor_manager.add_pipeline(
+    //     static_geometry,
+    //     static_geometry_data.vertex_sets,
+    //     static_geometry_data.fragment_sets,
+    // );
+    // let animated_geometry_layout = descriptor_manager.add_pipeline(
+    //     animated_geometry,
+    //     animated_geometry_data.vertex_sets,
+    //     animated_geometry_data.fragment_sets,
+    // );
+    // let clipped_geometry_layout = descriptor_manager.add_pipeline(
+    //     clipped_geometry,
+    //     clipped_geometry_data.vertex_sets,
+    //     clipped_geometry_data.fragment_sets,
+    // );
+    // let terrain_layout = descriptor_manager.add_pipeline(
+    //     terrain,
+    //     terrain_data.vertex_sets,
+    //     terrain_data.fragment_sets,
+    // );
+    // let tonemap_layout = descriptor_manager.add_pipeline(
+    //     tonemap,
+    //     tonemap_data.vertex_sets,
+    //     tonemap_data.fragment_sets,
+    // );
+    // let directional_layout = descriptor_manager.add_pipeline(
+    //     directional,
+    //     directional_data.vertex_sets,
+    //     directional_data.fragment_sets,
+    // );
+    //
     let mut graph = RenderGraph::new();
-
+    //
     let mut final_color = graph.add_image(ImageDesc::Imported {
         name: "final_color",
         format: swapchain_image_format,
     });
-    let mut albedo = graph.add_image(ImageDesc::Managed {
-        name: "albedo",
-        format: vk::Format::A2B10G10R10_UNORM_PACK32,
-    });
-    let mut normal = graph.add_image(ImageDesc::Managed {
-        name: "normal",
-        format: vk::Format::R16G16B16A16_SFLOAT,
-    });
-    let mut position = graph.add_image(ImageDesc::Managed {
-        name: "position",
-        format: vk::Format::R32G32B32A32_SFLOAT,
-    });
-    let mut depth = graph.add_image(ImageDesc::Managed {
-        name: "depth",
-        format: vk::Format::D32_SFLOAT,
-    });
-    let mut hdr_color = graph.add_image(ImageDesc::Managed {
-        name: "hdr_color",
-        format: vk::Format::R32G32B32A32_SFLOAT,
-    });
-
-    let albedo_id = albedo.id;
-    let normal_id = normal.id;
-    let position_id = position.id;
-    let hdr_color_id = hdr_color.id;
-
-    pipeline_manager.add_pipeline(
-        static_geometry,
-        &geometry_desc,
-        &static_geometry_data.stages,
-        static_geometry_layout,
-        Box::new(static_geometry_setup),
-    );
-
-    pipeline_manager.add_pipeline(
-        animated_geometry,
-        &animated_geometry_desc,
-        &animated_geometry_data.stages,
-        animated_geometry_layout,
-        Box::new(animated_geometry_setup),
-    );
-
-    pipeline_manager.add_pipeline(
-        clipped_geometry,
-        &clipped_geometry_desc,
-        &clipped_geometry_data.stages,
-        clipped_geometry_layout,
-        Box::new(clipped_geometry_setup),
-    );
-
-    pipeline_manager.add_pipeline(
-        terrain,
-        &terrain_desc,
-        &terrain_data.stages,
-        terrain_layout,
-        Box::new(terrainmap_setup),
-    );
-
-    pipeline_manager.add_pipeline(
-        directional,
-        &lighting_desc,
-        &directional_data.stages,
-        directional_layout,
-        make_directional_light_setup(albedo_id, normal_id, position_id),
-    );
-
-    let graph = graph
-        .add_pipeline("static_geometry")
-        .pipeline(static_geometry)
-        .writes(&mut albedo)
-        .writes(&mut normal)
-        .writes(&mut position)
-        .writes_depth(&mut depth)
-        .build();
-    let graph = graph
-        .add_pipeline("animated_geometry")
-        .pipeline(animated_geometry)
-        .writes(&mut albedo)
-        .writes(&mut normal)
-        .writes(&mut position)
-        .writes_depth(&mut depth)
-        .build();
-    let graph = graph
-        .add_pipeline("clipped_geometry")
-        .pipeline(clipped_geometry)
-        .writes(&mut albedo)
-        .writes(&mut normal)
-        .writes(&mut position)
-        .writes_depth(&mut depth)
-        .build();
-
-    let graph = graph
-        .add_pipeline("terrain")
-        .pipeline(terrain)
-        .writes(&mut albedo)
-        .writes(&mut normal)
-        .writes(&mut position)
-        .writes_depth(&mut depth)
-        .build();
-
-    pipeline_manager.add_pipeline(
-        tonemap,
-        &tonemap_desc,
-        &tonemap_data.stages,
-        tonemap_layout,
-        make_tonemap_setup(hdr_color_id),
-    );
-
-    let config = RadianceCascadesConfiguration {
-        volume_center: Vec3::ZERO,
-        top_level_probe_count: UVec3::new(8, 6, 8),
-        top_level_probe_gap: 2.0,
-        cascade_count: 3,
-        bottom_level_rays_per_probe: 16,
-        base_interval_length_ratio: 1.7,
-    };
-
-    let graph = radiance::setup(
-        config,
-        device,
-        &mut pipeline_manager,
-        &mut descriptor_manager,
-        graph,
-        allocator,
-        &mut albedo,
-        &mut position,
-        &mut normal,
-        &mut hdr_color,
-    );
-
-    let graph = graph
-        .add_pipeline("tonemap")
-        .pipeline(tonemap)
-        .reads(&hdr_color)
-        .writes(&mut final_color)
-        .build();
+    // let mut albedo = graph.add_image(ImageDesc::Managed {
+    //     name: "albedo",
+    //     format: vk::Format::A2B10G10R10_UNORM_PACK32,
+    // });
+    // let mut normal = graph.add_image(ImageDesc::Managed {
+    //     name: "normal",
+    //     format: vk::Format::R16G16B16A16_SFLOAT,
+    // });
+    // let mut position = graph.add_image(ImageDesc::Managed {
+    //     name: "position",
+    //     format: vk::Format::R32G32B32A32_SFLOAT,
+    // });
+    // let mut depth = graph.add_image(ImageDesc::Managed {
+    //     name: "depth",
+    //     format: vk::Format::D32_SFLOAT,
+    // });
+    // let mut hdr_color = graph.add_image(ImageDesc::Managed {
+    //     name: "hdr_color",
+    //     format: vk::Format::R32G32B32A32_SFLOAT,
+    // });
+    //
+    // let albedo_id = albedo.id;
+    // let normal_id = normal.id;
+    // let position_id = position.id;
+    // let hdr_color_id = hdr_color.id;
+    //
+    // pipeline_manager.add_pipeline(
+    //     static_geometry,
+    //     &geometry_desc,
+    //     &static_geometry_data.stages,
+    //     static_geometry_layout,
+    //     Box::new(static_geometry_setup),
+    // );
+    //
+    // pipeline_manager.add_pipeline(
+    //     animated_geometry,
+    //     &animated_geometry_desc,
+    //     &animated_geometry_data.stages,
+    //     animated_geometry_layout,
+    //     Box::new(animated_geometry_setup),
+    // );
+    //
+    // pipeline_manager.add_pipeline(
+    //     clipped_geometry,
+    //     &clipped_geometry_desc,
+    //     &clipped_geometry_data.stages,
+    //     clipped_geometry_layout,
+    //     Box::new(clipped_geometry_setup),
+    // );
+    //
+    // pipeline_manager.add_pipeline(
+    //     terrain,
+    //     &terrain_desc,
+    //     &terrain_data.stages,
+    //     terrain_layout,
+    //     Box::new(terrainmap_setup),
+    // );
+    //
+    // pipeline_manager.add_pipeline(
+    //     directional,
+    //     &lighting_desc,
+    //     &directional_data.stages,
+    //     directional_layout,
+    //     make_directional_light_setup(albedo_id, normal_id, position_id),
+    // );
+    //
+    // let graph = graph
+    //     .add_pipeline("static_geometry")
+    //     .pipeline(static_geometry)
+    //     .writes(&mut albedo)
+    //     .writes(&mut normal)
+    //     .writes(&mut position)
+    //     .writes_depth(&mut depth)
+    //     .build();
+    // let graph = graph
+    //     .add_pipeline("animated_geometry")
+    //     .pipeline(animated_geometry)
+    //     .writes(&mut albedo)
+    //     .writes(&mut normal)
+    //     .writes(&mut position)
+    //     .writes_depth(&mut depth)
+    //     .build();
+    // let graph = graph
+    //     .add_pipeline("clipped_geometry")
+    //     .pipeline(clipped_geometry)
+    //     .writes(&mut albedo)
+    //     .writes(&mut normal)
+    //     .writes(&mut position)
+    //     .writes_depth(&mut depth)
+    //     .build();
+    //
+    // let graph = graph
+    //     .add_pipeline("terrain")
+    //     .pipeline(terrain)
+    //     .writes(&mut albedo)
+    //     .writes(&mut normal)
+    //     .writes(&mut position)
+    //     .writes_depth(&mut depth)
+    //     .build();
+    //
+    // pipeline_manager.add_pipeline(
+    //     tonemap,
+    //     &tonemap_desc,
+    //     &tonemap_data.stages,
+    //     tonemap_layout,
+    //     make_tonemap_setup(hdr_color_id),
+    // );
+    //
+    // let config = RadianceCascadesConfiguration {
+    //     volume_center: Vec3::ZERO,
+    //     top_level_probe_count: UVec3::new(8, 6, 8),
+    //     top_level_probe_gap: 2.0,
+    //     cascade_count: 3,
+    //     bottom_level_rays_per_probe: 16,
+    //     base_interval_length_ratio: 1.7,
+    // };
+    //
+    // let graph = radiance::setup(
+    //     config,
+    //     device,
+    //     &mut pipeline_manager,
+    //     &mut descriptor_manager,
+    //     graph,
+    //     allocator,
+    //     &mut albedo,
+    //     &mut position,
+    //     &mut normal,
+    //     &mut hdr_color,
+    // );
+    //
+    // let graph = graph
+    //     .add_pipeline("tonemap")
+    //     .pipeline(tonemap)
+    //     .reads(&hdr_color)
+    //     .writes(&mut final_color)
+    //     .build();
 
     (graph, pipeline_manager, descriptor_manager, final_color.id)
 }
@@ -1559,8 +1559,9 @@ pub fn create_pipeline_layout_from_vert_frag(
 
 fn load_path_data(path: &path::Path) -> (Vec<u32>, Reflection) {
     let out_dir = PathBuf::from(env!("OUT_DIR"));
-    let bytes = fs::read(out_dir.join(path))
-        .unwrap_or_else(|_| panic!("failed to read file: {}", path.to_string_lossy().as_str()));
+    let out_path = out_dir.join(path);
+    let bytes = fs::read(&out_path)
+        .unwrap_or_else(|_| panic!("failed to read file: {}", out_path.display()));
     let code: Vec<u32> = bytes
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))

@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use ash::vk::{self, Extent2D};
-use bytemuck::{Pod, Zeroable, bytes_of};
+use bytemuck::bytes_of;
 use glam::{UVec3, Vec3, Vec4, Vec4Swizzles};
 
 use crate::{
@@ -19,7 +19,8 @@ use crate::{
     },
     resources::{Mesh, ResourceManager, SsboBinding, SsboHandle},
     ubo::{
-        CameraInverseUBO, ComputeRadianceUBO, DirectionalLightUBO, LightDataUBO, MeshInfo, ModelUBO,
+        CameraInverseUBO, ComputeRadianceUBO, DirectionalLightUBO, LightDataUBO, MeshInfo,
+        ModelUBO, RadianceLevelConfigUBO,
     },
     vulkan::SharedAllocator,
 };
@@ -38,21 +39,6 @@ pub struct RadianceCascadesConfiguration {
     pub base_interval_length_ratio: f32,
 }
 
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
-pub struct RadianceLevelConfigUBO {
-    grid_size: UVec3,
-    grid_gap: f32,
-    /// the grid origin, varies between each level because how how each probe level is offset from
-    /// the previous
-    grid_origin: Vec3,
-    sqrt_ray_count: u32,
-    interval_start: f32,
-    interval_end: f32,
-    is_top_cascade: u32, // zero for false, anything else for true
-    _pad0: u32,
-}
-
 #[derive(Debug, Clone)]
 pub struct RadianceMeshBuffers {
     pub position_ssbo: SsboHandle,
@@ -60,6 +46,7 @@ pub struct RadianceMeshBuffers {
     pub mesh_infos: Vec<MeshInfo>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn setup(
     config: RadianceCascadesConfiguration,
     device: Arc<ash::Device>,
@@ -75,12 +62,12 @@ pub fn setup(
     dbg!(&config);
     let compute_radiance_data = get_compute_data(
         device.clone(),
-        Path::new("shaders/compute_cascade.comp.spv"),
+        Path::new("shaders/compute_radiance.comp.spv"),
     );
     let apply_radiance_data = get_pipeline_data(
         device.clone(),
-        Path::new("shaders/ambient.vert.spv"),
-        Path::new("shaders/ambient.frag.spv"),
+        Path::new("shaders/apply_radiance.vert.spv"),
+        Path::new("shaders/apply_radiance.frag.spv"),
     );
 
     let apply_radiance = pipeline_manager.allocate_handle("ambient");

@@ -7,7 +7,6 @@ use glam as gl;
 use crate::{
     components::{AmbientLight, Camera, DirectionalLight, PointLight, Transform},
     core::TerrainMap,
-    renderers::world::radiance::RadianceLevelConfigUBO,
     resources::Material,
 };
 
@@ -56,6 +55,20 @@ pub struct MeshInfo {
     pub aabb_local_max: gl::Vec4,
     pub local_to_world: gl::Mat4,
     pub world_to_local: gl::Mat4,
+}
+#[derive(Debug, Clone, Copy, bm::Pod, bm::Zeroable)]
+#[repr(C)]
+pub struct RadianceLevelConfigUBO {
+    pub grid_size: gl::UVec3,
+    pub grid_gap: f32,
+    /// the grid origin, varies between each level because how how each probe level is offset from
+    /// the previous
+    pub grid_origin: gl::Vec3,
+    pub sqrt_ray_count: u32,
+    pub interval_start: f32,
+    pub interval_end: f32,
+    pub is_top_cascade: u32, // zero for false, anything else for true
+    pub _pad0: u32,
 }
 
 #[derive(Debug, Copy, Clone, bm::Zeroable, bm::Pod)]

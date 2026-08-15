@@ -1,5 +1,9 @@
 #version 450 core
 #extension GL_EXT_debug_printf : enable
+#extension GL_GOOGLE_include_directive : require
+
+#include "shared/definitions.glsl"
+#include "shared/utils.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -28,27 +32,18 @@ struct MeshInfo {
     mat4 world_to_local;
 };
 
-layout(set = 2, binding = 0) uniform RadianceConfigUBO {
-    vec4     start_position;
-    uint     count_x;
-    uint     count_y;
-    uint     count_z;
-    uint     z_cols;
-    uint     xy_cols;
-    uint     xy_rows;
-    uint     above_z_cols;
-    uint     above_xy_cols;
-    uint     above_xy_rows;
-    uint     _pad;
-    float    probe_spacing;
-    float    interval_start;
-    float    interval_end;
-    uint     is_top_cascade;
-    uint     sqrt_ray_count;
-    uint     mesh_count;
-    MeshInfo meshes[64];
-}
-config;
+struct ComputeRadianceUBO {
+    RadianceLevelConfig level_config;
+    uint                _pad0;
+    uint                _pad1;
+    uint                _pad2;
+
+    uint mesh_count;
+
+    pub mesh_count : u32,
+        // offset 64 here, meshes is naturally aligned, no padding needed
+        pub meshes : [MeshInfo; 64],
+};
 
 layout(set = 2, binding = 1) readonly buffer PositionBuffer {
     vec4 positions[];
